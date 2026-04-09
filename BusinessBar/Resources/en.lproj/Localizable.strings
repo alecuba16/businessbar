@@ -1,0 +1,187 @@
+/* ============================================================
+   BusinessBar — English (en) Localization
+   ============================================================ */
+
+// MARK: - General / App
+
+"app.name" = "BusinessBar";
+"app.quit" = "Quit BusinessBar";
+
+// MARK: - Status bar
+
+"statusbar.no_meetings" = "No meetings";
+"statusbar.loading" = "Loading…";
+"statusbar.meeting.in" = "in %@";          /* e.g. "in 12m" */
+"statusbar.meeting.now" = "now (%@ left)"; /* e.g. "now (25m left)" */
+"statusbar.meeting.ends" = "(ends %@)";    /* e.g. "(ends 5m)" */
+
+// MARK: - Main menu
+
+"menu.section.today" = "— Today —";
+"menu.section.tomorrow" = "— Tomorrow —";
+"menu.no_upcoming_events" = "No upcoming events";
+"menu.join_next_meeting" = "Join Next Meeting";
+"menu.create_meeting" = "Create Meeting…";
+"menu.preferences" = "Preferences…";
+"menu.section.no_sleep" = "— NoSleep —";
+
+// MARK: - NoSleep menu
+
+"nosleep.active" = "☕️ Active";
+"nosleep.active.remaining" = "☕️ Active — %@ remaining"; /* e.g. "☕️ Active — 1h 23m remaining" */
+"nosleep.deactivate" = "Deactivate";
+"nosleep.activate" = "Activate";
+"nosleep.activate_for" = "Activate for…";
+"nosleep.duration.indefinitely" = "Indefinitely";
+"nosleep.duration.15min" = "15 minutes";
+"nosleep.duration.30min" = "30 minutes";
+"nosleep.duration.1hour" = "1 hour";
+"nosleep.duration.2hours" = "2 hours";
+"nosleep.duration.5hours" = "5 hours";
+
+// MARK: - Event submenu
+
+"event.join_meeting" = "Join Meeting";
+"event.dismiss" = "Dismiss";
+"event.open_in_calendar" = "Open in Calendar";
+"event.copy_meeting_link" = "Copy Meeting Link";
+"event.email_attendees" = "Email Attendees";
+
+// MARK: - Preferences — General tab
+
+"prefs.general.title" = "General";
+"prefs.general.launch_at_login" = "Launch at login";
+"prefs.general.check_for_updates" = "Check for updates automatically";
+"prefs.general.check_now" = "Check for Updates Now";
+"prefs.general.calendar_provider" = "Calendar Provider";
+"prefs.general.provider.macos" = "macOS Calendar";
+"prefs.general.provider.google" = "Google Calendar";
+"prefs.general.provider.google.hint" = "Sign in to Google Calendar in the Calendars tab.";
+"prefs.general.meeting_display" = "Meeting Display";
+"prefs.general.title_max_length" = "Meeting title max length:";
+"prefs.general.title_max_length.suffix" = "characters";
+"prefs.general.show_tomorrow" = "Show tomorrow's events";
+"prefs.general.show_declined" = "Show declined events (dimmed)";
+"prefs.general.shortcuts" = "Keyboard Shortcuts";
+"prefs.general.shortcut.join" = "Join meeting:";
+"prefs.general.shortcut.open_menu" = "Open menu:";
+
+// MARK: - Preferences — Calendars tab
+
+"prefs.calendars.title" = "Calendars";
+"prefs.calendars.select_hint" = "Select which calendars to show:";
+"prefs.calendars.notifications" = "Notifications";
+"prefs.calendars.notify_before" = "Notify before event:";
+"prefs.calendars.end_of_event" = "End-of-event notification";
+
+// MARK: - Notification times
+
+"notify.at_start" = "At start";
+"notify.1min" = "1 minute before";
+"notify.3min" = "3 minutes before";
+"notify.5min" = "5 minutes before";
+"notify.10min" = "10 minutes before";
+"notify.15min" = "15 minutes before";
+"notify.30min" = "30 minutes before";
+
+// MARK: - Preferences — Badges tab
+
+"prefs.badges.title" = "Notification Badges";
+"prefs.badges.monitored_apps" = "Monitored Apps";
+"prefs.badges.apps_to_monitor" = "Apps to monitor:";
+"prefs.badges.add_app" = "Add App";
+"prefs.badges.no_apps" = "No apps added yet";
+"prefs.badges.settings" = "Settings";
+"prefs.badges.hide_when_not_running" = "Hide icon when app is not running";
+"prefs.badges.grayscale_when_none" = "Grayscale icon when no notifications";
+"prefs.badges.accessibility" = "Accessibility Permission";
+"prefs.badges.accessibility.granted" = "Accessibility permission granted";
+"prefs.badges.accessibility.required" = "Accessibility permission required";
+"prefs.badges.accessibility.description" = "BusinessBar needs Accessibility permission to read dock notification badges.";
+"prefs.badges.accessibility.open_settings" = "Open System Settings";
+
+// MARK: - Preferences — NoSleep tab
+
+"prefs.no_sleep.title" = "NoSleep";
+"prefs.no_sleep.sleep_mode" = "Sleep Prevention Mode";
+"prefs.no_sleep.mode.system_only" = "Prevent system sleep only";
+"prefs.no_sleep.mode.system_only.desc" = "Screen can dim and sleep. Best for battery life.";
+"prefs.no_sleep.mode.system_display" = "Prevent system + display sleep";
+"prefs.no_sleep.mode.system_display.desc" = "Nothing sleeps. Use when presenting.";
+"prefs.no_sleep.default_duration" = "Default Duration";
+"prefs.no_sleep.behavior" = "Behavior";
+"prefs.no_sleep.activate_on_start" = "Activate when starting BusinessBar";
+"prefs.no_sleep.deactivate_on_sleep" = "Deactivate when device sleeps manually";
+"prefs.no_sleep.simulate_activity" = "Keep apps active (simulate activity)";
+"prefs.no_sleep.simulate_activity.desc" = "Prevents apps showing \"Away\" status. Requires Accessibility permission.";
+
+// MARK: - Preferences — Appearance tab
+
+"prefs.appearance.title" = "Appearance";
+"prefs.appearance.title_length" = "Meeting title max length:";
+"prefs.appearance.time_format" = "Event time format:";
+"prefs.appearance.time_format.relative" = "Relative  \"in 12m\" / \"now (25m left)\"";
+"prefs.appearance.time_format.absolute" = "Absolute  \"10:00\"";
+"prefs.appearance.badge_icon_size" = "Badge icon size:";
+"prefs.appearance.badge_size.small" = "Small (14px)";
+"prefs.appearance.badge_size.medium" = "Medium (18px)";
+"prefs.appearance.grayscale_when_zero" = "Grayscale badge icons when count is 0";
+"prefs.appearance.invert_dark_mode" = "Invert badge icons in dark mode";
+
+// MARK: - Onboarding
+
+"onboarding.welcome.title" = "Welcome to BusinessBar";
+"onboarding.welcome.subtitle" = "Your meetings, notifications, and focus mode — all in one place.";
+"onboarding.welcome.button" = "Get Started";
+
+"onboarding.permissions.title" = "Permissions Needed";
+"onboarding.permissions.calendar.title" = "Calendar Access";
+"onboarding.permissions.calendar.desc" = "To show your upcoming meetings";
+"onboarding.permissions.calendar.grant" = "Grant Access";
+"onboarding.permissions.notifications.title" = "Notifications";
+"onboarding.permissions.notifications.desc" = "To alert you before meetings";
+"onboarding.permissions.accessibility.title" = "Accessibility  (optional)";
+"onboarding.permissions.accessibility.desc" = "To read dock notification badges";
+"onboarding.permissions.accessibility.open" = "Open Settings";
+"onboarding.permissions.granted" = "Granted";
+"onboarding.permissions.pending" = "Pending";
+
+"onboarding.calendars.title" = "Select Your Calendars";
+"onboarding.calendars.hint" = "Choose which calendars to display:";
+"onboarding.calendars.finish" = "Finish Setup";
+
+"onboarding.button.back" = "Back";
+"onboarding.button.next" = "Next";
+
+// MARK: - Notifications
+
+"notification.upcoming_meeting.title" = "Upcoming Meeting";
+"notification.action.join" = "Join";
+"notification.action.dismiss" = "Dismiss";
+"notification.action.snooze5" = "Snooze 5 min";
+"notification.action.snooze10" = "Snooze 10 min";
+"notification.snooze.body" = "Your meeting is starting soon";
+"notification.snooze.title" = "Meeting Reminder";
+
+// MARK: - App Intents
+
+"intent.join_meeting.title" = "Join Next Meeting";
+"intent.join_meeting.description" = "Opens the meeting link for your next scheduled event";
+"intent.join_meeting.opening" = "Opening %@";
+"intent.join_meeting.error.no_meeting" = "No upcoming meeting found or meeting has no link";
+
+"intent.get_next_event.title" = "Get Next Event";
+"intent.get_next_event.description" = "Returns details about your next scheduled calendar event";
+"intent.get_next_event.error.no_event" = "No upcoming events found";
+
+"intent.toggle_no_sleep.title" = "Toggle NoSleep";
+"intent.toggle_no_sleep.description" = "Toggles the NoSleep feature on or off";
+"intent.toggle_no_sleep.activated" = "NoSleep activated";
+"intent.toggle_no_sleep.deactivated" = "NoSleep deactivated";
+"intent.toggle_no_sleep.error.unavailable" = "NoSleep manager not available";
+
+// MARK: - Errors
+
+"error.calendar.no_access" = "Calendar access not granted.";
+"error.google.not_authenticated" = "Not signed in to Google Calendar.";
+"error.google.auth_failed" = "Google authorization failed.";
