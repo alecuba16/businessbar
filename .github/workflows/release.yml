@@ -1,7 +1,7 @@
 name: Release DMG
 
-# Manually triggered from GitHub Actions UI (Actions → Release DMG → Run workflow).
-# Produces an unsigned .app bundle inside a DMG, uploaded as a workflow artifact.
+# Triggered automatically when a version tag (v*) is pushed.
+# Produces an unsigned .app bundle inside a DMG, published as a GitHub Release.
 #
 # NOTE: The app is unsigned. On first launch macOS Gatekeeper will block it.
 # To open it, right-click the app → Open, then confirm in the dialog.
@@ -9,12 +9,9 @@ name: Release DMG
 #   xattr -d com.apple.quarantine BusinessBar.dmg
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version number (e.g. 1.2.0) — written into Info.plist'
-        required: true
-        default: '1.0.0'
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   dmg:
@@ -57,14 +54,17 @@ jobs:
 
     - name: Build, assemble and sign
       run: |
+        VERSION=${GITHUB_REF_NAME#v}
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
         bash scripts/bundle_app.sh \
-          "${{ github.event.inputs.version }}" \
+          "$VERSION" \
           "${{ github.run_number }}"
 
     - name: Create DMG
       run: |
         set -euo pipefail
-        VERSION="${{ github.event.inputs.version }}"
+        VERSION="${{ env.VERSION }}"
         DMG="BusinessBar-${VERSION}.dmg"
 
         hdiutil create \
@@ -78,6 +78,13 @@ jobs:
     - name: Upload DMG artifact
       uses: actions/upload-artifact@v4
       with:
-        name: BusinessBar-${{ github.event.inputs.version }}
+        name: BusinessBar-${{ env.VERSION }}
         path: ${{ env.DMG_NAME }}
         retention-days: 30
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: BusinessBar ${{ env.VERSION }}
+        files: ${{ env.DMG_NAME }}
+        generate_release_notes: true
