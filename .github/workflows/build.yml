@@ -14,42 +14,6 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Inject credentials and Sparkle config
-      env:
-        GOOGLE_CLIENT_NUMBER: ${{ secrets.GOOGLE_CLIENT_NUMBER }}
-        GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-        SPARKLE_APPCAST_URL: ${{ vars.SPARKLE_APPCAST_URL }}
-        SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-      run: |
-        # Write real values into credentials.json (bakes them into the binary)
-        cat > BusinessBar/Resources/credentials.json <<EOF
-        {
-            "google_client_number": "${GOOGLE_CLIENT_NUMBER}",
-            "google_client_secret": "${GOOGLE_CLIENT_SECRET}"
-        }
-        EOF
-
-        # Patch Info.plist URL scheme with the real client number
-        /usr/libexec/PlistBuddy \
-          -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 com.googleusercontent.apps.${GOOGLE_CLIENT_NUMBER}" \
-          BusinessBar/Resources/Info.plist
-
-        # Patch Sparkle appcast URL (if the variable is set)
-        if [ -n "$SPARKLE_APPCAST_URL" ]; then
-          /usr/libexec/PlistBuddy \
-            -c "Set :SUFeedURL ${SPARKLE_APPCAST_URL}" \
-            BusinessBar/Resources/Info.plist
-          echo "  ✓ Info.plist SUFeedURL patched"
-        fi
-
-        # Patch Sparkle public EdDSA key (if the secret is set)
-        if [ -n "$SPARKLE_PUBLIC_ED_KEY" ]; then
-          /usr/libexec/PlistBuddy \
-            -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" \
-            BusinessBar/Resources/Info.plist
-          echo "  ✓ Info.plist SUPublicEDKey patched"
-        fi
-
     - name: Select Xcode
       uses: maxim-lobanov/setup-xcode@v1
       with:
@@ -71,6 +35,33 @@ jobs:
 
     - name: Build (release)
       run: swift build -c release
+
+    - name: Inject credentials into built artifacts
+      env:
+        GOOGLE_CLIENT_NUMBER: ${{ secrets.GOOGLE_CLIENT_NUMBER }}
+        GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      run: |
+        # Patch credentials.json in the SPM-built resource bundle, NOT the
+        # source file.  This keeps the source tree clean — no git-dirty state.
+        BUILT_BUNDLE=".build/arm64-apple-macosx/release/BusinessBar_BusinessBar.bundle"
+        BUILT_CREDS="$BUILT_BUNDLE/credentials.json"
+
+        if [ -f "$BUILT_CREDS" ] && [ -n "$GOOGLE_CLIENT_NUMBER" ] && [ -n "$GOOGLE_CLIENT_SECRET" ]; then
+          cat > "$BUILT_CREDS" <<EOF
+        {
+            "google_client_number": "${GOOGLE_CLIENT_NUMBER}",
+            "google_client_secret": "${GOOGLE_CLIENT_SECRET}"
+        }
+        EOF
+          echo "  ✓ Built credentials.json patched with real values"
+
+          # Remove credentials.local.json from the built bundle so it never
+          # ships in a release (real values are already in credentials.json).
+          rm -f "$BUILT_BUNDLE/credentials.local.json"
+          echo "  ✓ Removed credentials.local.json from built bundle"
+        else
+          echo "  ⚠ Built credentials.json not found or secrets not set — skipping credential injection"
+        fi
 
     - name: Upload release binary
       if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'

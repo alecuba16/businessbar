@@ -39,5 +39,6 @@ fastlane/test_output
 iOSInjectionProject/
 BusinessBar.app
 
-# Secrets — credentials.local.json contains real OAuth secrets
+# Secrets — credentials.local.json and .env contain real OAuth secrets
 BusinessBar/Resources/credentials.local.json
+.env

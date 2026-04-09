@@ -24,41 +24,23 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Inject credentials and Sparkle config
+    - name: Write .env for bundle_app.sh
       env:
         GOOGLE_CLIENT_NUMBER: ${{ secrets.GOOGLE_CLIENT_NUMBER }}
         GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         SPARKLE_APPCAST_URL: ${{ vars.SPARKLE_APPCAST_URL }}
         SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
       run: |
-        # Write real values into credentials.json (bakes them into the binary)
-        cat > BusinessBar/Resources/credentials.json <<EOF
-        {
-            "google_client_number": "${GOOGLE_CLIENT_NUMBER}",
-            "google_client_secret": "${GOOGLE_CLIENT_SECRET}"
-        }
+        # Write secrets to .env so bundle_app.sh can read them and inject
+        # into BUILT artifacts (not source files).  The .env file is in
+        # .gitignore and never committed.
+        cat > .env <<EOF
+        GOOGLE_CLIENT_NUMBER=${GOOGLE_CLIENT_NUMBER}
+        GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+        SPARKLE_APPCAST_URL=${SPARKLE_APPCAST_URL}
+        SPARKLE_PUBLIC_ED_KEY=${SPARKLE_PUBLIC_ED_KEY}
         EOF
-
-        # Patch Info.plist URL scheme with the real client number
-        /usr/libexec/PlistBuddy \
-          -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 com.googleusercontent.apps.${GOOGLE_CLIENT_NUMBER}" \
-          BusinessBar/Resources/Info.plist
-
-        # Patch Sparkle appcast URL (if the variable is set)
-        if [ -n "$SPARKLE_APPCAST_URL" ]; then
-          /usr/libexec/PlistBuddy \
-            -c "Set :SUFeedURL ${SPARKLE_APPCAST_URL}" \
-            BusinessBar/Resources/Info.plist
-          echo "  ✓ Info.plist SUFeedURL patched"
-        fi
-
-        # Patch Sparkle public EdDSA key (if the secret is set)
-        if [ -n "$SPARKLE_PUBLIC_ED_KEY" ]; then
-          /usr/libexec/PlistBuddy \
-            -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" \
-            BusinessBar/Resources/Info.plist
-          echo "  ✓ Info.plist SUPublicEDKey patched"
-        fi
+        echo "  ✓ .env written for bundle_app.sh"
 
     - name: Select Xcode
       uses: maxim-lobanov/setup-xcode@v1
