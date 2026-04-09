@@ -47,13 +47,13 @@ let package = Package(
                 "Resources/Info.plist",
                 "Resources/BusinessBar.entitlements",
                 "Resources/AppIcon.icns",
-                "Resources/credentials.local.json.example"
+                "Resources/credentials.local.json.example",
+                "Resources/credentials.local.json"
             ],
             resources: [
                 .process("Resources/Assets.xcassets"),
                 .process("Resources/en.lproj"),
-                .copy("Resources/credentials.json"),
-                .copy("Resources/credentials.local.json")
+                .copy("Resources/credentials.json")
             ]
         ),
         // Unit-test target

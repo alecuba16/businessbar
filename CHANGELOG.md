@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-04-09
+
+### Fixed
+- Removed `credentials.local.json` from SPM resources in `Package.swift` (moved to `exclude`) to eliminate `Invalid Resource: File not found` warning in CI where the gitignored file doesn't exist
+- Added `permissions: contents: write` to release workflow so `GITHUB_TOKEN` can create GitHub Releases (fixes 403 error)
+
 ## [1.1.0] - 2026-03-10
 
 ### Added
@@ -69,5 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **1.1.1** - CI workflow fixes: SPM resource warning and release permissions
 - **1.1.0** - CPU/energy optimizations, configurable badge polling, notification scheduling
 - **1.0.0** - Initial implementation complete, pending first release
