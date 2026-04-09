@@ -198,10 +198,44 @@ BusinessBar is built with:
 - **CredentialLoader** — JSON-based credential system (`.local.json` override → `.json` default → placeholder fallback)
 - **AppLogger** — structured logging via OSLog + rotating file logs (`~/Library/Logs/BusinessBar/`)
 - **Sparkle** for in-app auto-updates
+- **Gitleaks** via pre-commit for secret detection on push
 
 ## License
 
 MIT License - See LICENSE file for details
+
+## Secret Detection (Gitleaks)
+
+To prevent secrets from being pushed, set up [Gitleaks](https://github.com/gitleaks/gitleaks) via [pre-commit](https://pre-commit.com/):
+
+### 1. Install pre-commit
+
+```bash
+# macOS
+brew install pre-commit
+
+# or pip
+pip install pre-commit
+```
+
+### 2. Create `.pre-commit-config.yaml` at the repo root
+
+```yaml
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.3  # or run: pre-commit autoupdate
+    hooks:
+      - id: gitleaks
+        stages: [pre-push]  # runs on push, not commit
+```
+
+### 3. Install the hook
+
+```bash
+pre-commit install --hook-type pre-push
+```
+
+Gitleaks will now scan for secrets on every `git push`.
 
 ## Credits
 
