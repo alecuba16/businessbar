@@ -56,6 +56,25 @@ enum LogLevel: Int, Comparable, CustomStringConvertible, CaseIterable, Identifia
     }
 }
 
+// MARK: - AppLoggerConstants
+
+/// Constants for `AppLogger` extracted to file scope so they are not implicitly
+/// `@MainActor`-isolated.  All are `Sendable` immutable values (String,
+/// Int, Int64) that are safe to reference from any isolation domain.
+private enum AppLoggerConstants {
+    static let subsystem = "com.businessbar.app"
+    static let logDirectoryName = "BusinessBar"
+    static let logFileBaseName = "BusinessBar"
+    static let logFileExtension = "log"
+    static let maxLogFiles = 5
+    static let maxFileSizeBytes: Int64 = 1_048_576
+
+    // UserDefaults keys
+    static let loggingEnabledKey = "loggingEnabled"
+    static let fileLoggingEnabledKey = "fileLoggingEnabled"
+    static let logLevelRawKey = "logLevelRaw"
+}
+
 // MARK: - AppLogger
 
 /// A structured logging system that combines Apple's unified logging (`OSLog`)
@@ -75,30 +94,6 @@ final class AppLogger {
 
     static let shared = AppLogger()
 
-    // MARK: - Constants
-
-    // MARK: - Constants
-    //
-    // Extracted into a `nonisolated` enum so the values are not implicitly
-    // `@MainActor`-isolated.  All are `Sendable` immutable values (String,
-    // Int, Int64) that are safe to reference from any isolation domain.
-    // Without this, Swift 6 warns: "main actor-isolated static property
-    // can not be referenced from a nonisolated context."
-
-    nonisolated private enum Constants {
-        static let subsystem = "com.businessbar.app"
-        static let logDirectoryName = "BusinessBar"
-        static let logFileBaseName = "BusinessBar"
-        static let logFileExtension = "log"
-        static let maxLogFiles = 5
-        static let maxFileSizeBytes: Int64 = 1_048_576
-
-        // UserDefaults keys
-        static let loggingEnabledKey = "loggingEnabled"
-        static let fileLoggingEnabledKey = "fileLoggingEnabled"
-        static let logLevelRawKey = "logLevelRaw"
-    }
-
     // MARK: - UserDefaults Helpers
 
     /// Returns `true` if logging is enabled according to UserDefaults.
@@ -106,10 +101,10 @@ final class AppLogger {
     /// Uses `object(forKey:)` to distinguish between "not set" (default `true`)
     /// and "explicitly set to false". Thread-safe for reads.
     nonisolated private static func shouldLog(level: LogLevel) -> Bool {
-        guard UserDefaults.standard.object(forKey: Constants.loggingEnabledKey) as? Bool ?? true else {
+        guard UserDefaults.standard.object(forKey: AppLoggerConstants.loggingEnabledKey) as? Bool ?? true else {
             return false
         }
-        let storedRaw = UserDefaults.standard.integer(forKey: Constants.logLevelRawKey)
+        let storedRaw = UserDefaults.standard.integer(forKey: AppLoggerConstants.logLevelRawKey)
         let minLevel = LogLevel(rawValue: storedRaw) ?? .warning
         return level.rawValue >= minLevel.rawValue
     }
@@ -119,7 +114,7 @@ final class AppLogger {
     /// Uses `object(forKey:)` to distinguish between "not set" (default `true`)
     /// and "explicitly set to false". Thread-safe for reads.
     nonisolated static func isFileLoggingEnabled() -> Bool {
-        UserDefaults.standard.object(forKey: Constants.fileLoggingEnabledKey) as? Bool ?? true
+        UserDefaults.standard.object(forKey: AppLoggerConstants.fileLoggingEnabledKey) as? Bool ?? true
     }
 
     // MARK: - Properties
@@ -141,7 +136,7 @@ final class AppLogger {
             .urls(for: .libraryDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("Logs", isDirectory: true)
-            .appendingPathComponent(Constants.logDirectoryName, isDirectory: true)
+            .appendingPathComponent(AppLoggerConstants.logDirectoryName, isDirectory: true)
 
         self.logDirectoryURL = logDir
 
@@ -263,7 +258,7 @@ final class AppLogger {
         let directory = logDirectoryURL
         var urls: [URL] = []
         fileQueue.sync {
-            for i in 0..<Constants.maxLogFiles {
+            for i in 0..<AppLoggerConstants.maxLogFiles {
                 let url = Self.logFileURL(index: i, in: directory)
                 if FileManager.default.fileExists(atPath: url.path) {
                     urls.append(url)
@@ -286,7 +281,7 @@ final class AppLogger {
     /// This is the power-efficient path: `Logger` is `Sendable` and `os_log`
     /// is thread-safe, so no actor hop or `Task` allocation is needed.
     nonisolated private static func osLog(message: String, category: String, level: LogLevel) {
-        let logger = Logger(subsystem: Constants.subsystem, category: category)
+        let logger = Logger(subsystem: AppLoggerConstants.subsystem, category: category)
         switch level {
         case .debug:
             logger.debug("\(message, privacy: .public)")
@@ -356,7 +351,7 @@ final class AppLogger {
     /// Returns the URL for a log file at the given rotation index.
     nonisolated private static func logFileURL(index: Int, in directory: URL) -> URL {
         directory.appendingPathComponent(
-            "\(Constants.logFileBaseName)_\(index).\(Constants.logFileExtension)"
+            "\(AppLoggerConstants.logFileBaseName)_\(index).\(AppLoggerConstants.logFileExtension)"
         )
     }
 
@@ -408,7 +403,7 @@ final class AppLogger {
                 atPath: currentFileURL.path
             )
             let fileSize = (attrs?[.size] as? Int64) ?? 0
-            if fileSize >= Constants.maxFileSizeBytes {
+            if fileSize >= AppLoggerConstants.maxFileSizeBytes {
                 rotateLogFiles(in: directory)
             }
         }
@@ -460,13 +455,13 @@ final class AppLogger {
         let fileManager = FileManager.default
 
         // Delete the oldest file (index maxLogFiles - 1).
-        let oldestURL = logFileURL(index: Constants.maxLogFiles - 1, in: directory)
+        let oldestURL = logFileURL(index: AppLoggerConstants.maxLogFiles - 1, in: directory)
         if fileManager.fileExists(atPath: oldestURL.path) {
             try? fileManager.removeItem(at: oldestURL)
         }
 
         // Shift files: n-1 → n, n-2 → n-1, …, 1 → 2, 0 → 1
-        for i in stride(from: Constants.maxLogFiles - 2, through: 0, by: -1) {
+        for i in stride(from: AppLoggerConstants.maxLogFiles - 2, through: 0, by: -1) {
             let sourceURL = logFileURL(index: i, in: directory)
             let destURL = logFileURL(index: i + 1, in: directory)
 
