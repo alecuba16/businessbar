@@ -202,7 +202,7 @@ BusinessBar is built with:
 
 ## License
 
-MIT License - See LICENSE file for details
+MIT NON-AI License - See LICENSE file for details
 
 ## Secret Detection (Gitleaks)
 
@@ -243,3 +243,10 @@ Inspired by:
 - [MeetingBar](https://github.com/leits/MeetingBar)
 - [Doll](https://github.com/xiaogdgenuine/Doll)
 - [Caffeinated](https://github.com/evanriley/Caffeinated)
+
+Third-party libraries:
+- [Defaults](https://github.com/sindresorhus/Defaults) — Copyright © Sindre Sorhus (MIT)
+- [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts) — Copyright © Sindre Sorhus (MIT)
+- [LaunchAtLogin-Modern](https://github.com/sindresorhus/LaunchAtLogin-Modern) — Copyright © Sindre Sorhus (MIT)
+- [AppAuth-iOS](https://github.com/openid/AppAuth-iOS) — Copyright © OpenID contributors (Apache 2.0)
+- [Sparkle](https://github.com/sparkle-project/Sparkle) — Copyright © Andy Matuschak, Elgato Systems GmbH, Kornel Lesiński, Mayur Pawashe, C.W. Betts, Petroules Corporation, Big Nerd Ranch (MIT)
