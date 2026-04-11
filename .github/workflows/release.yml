@@ -23,7 +23,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Write .env for bundle_app.sh
+    - name: Write .env
       env:
         GOOGLE_CLIENT_NUMBER: ${{ secrets.GOOGLE_CLIENT_NUMBER }}
         GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -59,9 +59,7 @@ jobs:
         VERSION=${GITHUB_REF_NAME#v}
         echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-        bash scripts/bundle_app.sh \
-          "$VERSION" \
-          "${{ github.run_number }}"
+        ./bundle_app.sh "$VERSION" "${{ github.run_number }}"
 
     - name: Create DMG
       run: |

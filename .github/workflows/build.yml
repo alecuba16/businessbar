@@ -1,4 +1,4 @@
-name: Build
+name: Build & Test
 
 on:
   push:
@@ -13,6 +13,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # full history for git describe in snapshot versioning
 
     - name: Select Xcode
       uses: maxim-lobanov/setup-xcode@v1
@@ -30,43 +32,25 @@ jobs:
     - name: Resolve dependencies
       run: swift package resolve
 
-    - name: Build (debug)
-      run: swift build
+    - name: Run tests
+      run: swift test
 
     - name: Build (release)
       run: swift build -c release
 
-    - name: Inject credentials into built artifacts
-      env:
-        GOOGLE_CLIENT_NUMBER: ${{ secrets.GOOGLE_CLIENT_NUMBER }}
-        GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+    - name: Assemble .app (smoke test)
       run: |
-        # Patch credentials.json in the SPM-built resource bundle, NOT the
-        # source file.  This keeps the source tree clean — no git-dirty state.
-        BUILT_BUNDLE=".build/arm64-apple-macosx/release/BusinessBar_BusinessBar.bundle"
-        BUILT_CREDS="$BUILT_BUNDLE/credentials.json"
+        # Assemble the .app bundle to catch Info.plist, resource, or
+        # code-signing issues early.  No credentials are injected —
+        # placeholder values are fine for CI validation.
+        ./bundle_app.sh
+        echo "  ✓ BusinessBar.app assembled successfully"
 
-        if [ -f "$BUILT_CREDS" ] && [ -n "$GOOGLE_CLIENT_NUMBER" ] && [ -n "$GOOGLE_CLIENT_SECRET" ]; then
-          cat > "$BUILT_CREDS" <<EOF
-        {
-            "google_client_number": "${GOOGLE_CLIENT_NUMBER}",
-            "google_client_secret": "${GOOGLE_CLIENT_SECRET}"
-        }
-        EOF
-          echo "  ✓ Built credentials.json patched with real values"
-
-          # Remove credentials.local.json from the built bundle so it never
-          # ships in a release (real values are already in credentials.json).
-          rm -f "$BUILT_BUNDLE/credentials.local.json"
-          echo "  ✓ Removed credentials.local.json from built bundle"
-        else
-          echo "  ⚠ Built credentials.json not found or secrets not set — skipping credential injection"
-        fi
-
-    - name: Upload release binary
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-      uses: actions/upload-artifact@v4
-      with:
-        name: BusinessBar-${{ github.sha }}
-        path: .build/release/BusinessBar
-        retention-days: 7
+    - name: Verify .app bundle
+      run: |
+        codesign --verify --deep --strict BusinessBar.app
+        echo "  ✓ Code signature verified"
+        # Sanity-check that version was written by snapshot versioning
+        VERSION=$(defaults read BusinessBar.app/Contents/Info.plist CFBundleShortVersionString)
+        BUILD=$(defaults read BusinessBar.app/Contents/Info.plist CFBundleVersion)
+        echo "  ✓ Version: ${VERSION} (build ${BUILD})"

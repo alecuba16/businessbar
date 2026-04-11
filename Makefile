@@ -22,11 +22,14 @@ release:
 
 # ── .app bundle ────────────────────────────────────────────────────────────────
 # Produces BusinessBar.app in the project root.
-app: build
-	@./bundle_app.sh debug
+# bundle_app.sh builds release internally and auto-detects version from git
+# (e.g. 1.1.1-snapshot+7.abc1234).  No separate swift build needed.
+app:
+	@./bundle_app.sh
 
-app-release: release
-	@./bundle_app.sh release
+# Alias for backward compatibility — identical to `make app`.
+app-release:
+	@./bundle_app.sh
 
 # ── Install / uninstall ────────────────────────────────────────────────────────
 install: app-release
@@ -41,12 +44,12 @@ uninstall:
 	@echo "Done"
 
 # ── DMG ────────────────────────────────────────────────────────────────────────
-dmg: app-release
-	@./bundle_app.sh release dmg
+# Creates a versioned DMG (e.g. BusinessBar-1.1.1-snapshot.dmg).
+dmg:
+	@./bundle_app.sh dmg
 
 # ── Run ────────────────────────────────────────────────────────────────────────
 run: app
-	@echo "Launching $(APP_NAME).app…"
 	@open "$(APP_NAME).app"
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -72,13 +75,13 @@ clean:
 help:
 	@echo "BusinessBar — available targets"
 	@echo ""
-	@echo "  make             → build debug .app (same as make app)"
-	@echo "  make app         → debug .app bundle in project root"
-	@echo "  make app-release → optimised .app bundle"
-	@echo "  make run         → build debug .app and open it"
+	@echo "  make             → build .app (same as make app)"
+	@echo "  make app         → snapshot .app bundle (version from git)"
+	@echo "  make app-release → same as make app (backward compat)"
+	@echo "  make run         → build .app and open it"
 	@echo "  make install     → release .app → /Applications"
 	@echo "  make uninstall   → remove from /Applications"
-	@echo "  make dmg         → release .app wrapped in a DMG"
+	@echo "  make dmg         → snapshot .app + versioned DMG"
 	@echo "  make test        → run unit tests"
 	@echo "  make setup       → resolve SPM dependencies"
 	@echo "  make xcode       → open in Xcode"

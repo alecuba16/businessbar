@@ -51,9 +51,9 @@ swift run
 Or build a standalone `.app` bundle:
 
 ```bash
-./bundle_app.sh              # debug build → BusinessBar.app
-./bundle_app.sh release      # release build → BusinessBar.app
-./scripts/bundle_app.sh 1.2.0 42   # versioned release build
+./bundle_app.sh                        # snapshot build → BusinessBar.app
+./bundle_app.sh 1.2.0 42              # versioned release build (CI)
+./bundle_app.sh dmg                    # snapshot build + DMG
 ```
 
 ### Google Calendar Credentials

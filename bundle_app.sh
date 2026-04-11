@@ -1,50 +1,113 @@
-#!/bin/bash
-# bundle_app.sh — assembles BusinessBar.app from a completed `swift build` output
+#!/usr/bin/env bash
+# bundle_app.sh — Builds, assembles, and ad-hoc signs BusinessBar.app
 #
 # Usage:
-#   ./bundle_app.sh              → debug build  → BusinessBar.app
-#   ./bundle_app.sh release      → release build → BusinessBar.app
-#   ./bundle_app.sh release dmg  → release + BusinessBar.dmg
+#   ./bundle_app.sh              → snapshot build (version from git)
+#   ./bundle_app.sh 1.2.0 42    → explicit release build (CI)
+#   ./bundle_app.sh dmg          → snapshot build + DMG
+#   ./bundle_app.sh 1.2.0 42 dmg → explicit build + DMG
 #
-# The resulting BusinessBar.app can be:
-#   • Double-clicked to run
-#   • Dragged to /Applications
-#   • Archived / notarised for distribution
+# Legacy interface (backward-compatible):
+#   ./bundle_app.sh debug        → snapshot build (same as no args)
+#   ./bundle_app.sh release      → snapshot build (same as no args)
+#   ./bundle_app.sh release dmg  → snapshot build + DMG
+#
+# Arguments:
+#   VERSION  Human-readable version string written into Info.plist
+#            (default: auto-detected from git, e.g. 1.1.1-snapshot)
+#   BUILD    Build number written into CFBundleVersion
+#            (default: <commits-since-tag>.<short-sha>, e.g. 7.abc1234)
+#   dmg      If present as any argument, creates a DMG after building
+#
+# Version resolution (when no explicit VERSION given):
+#   VERSION = <latest_git_tag>-snapshot   (e.g. 1.1.1-snapshot)
+#   BUILD   = <commits_since_tag>.<sha>   (e.g. 7.abc1234)
+#   Falls back to 0.0.0-snapshot if no tags exist.
+#
+# Design note:
+#   Credentials and Sparkle config are injected into the BUILT artifacts
+#   (the SPM resource bundle and the assembled .app), never into source
+#   files.  This keeps the working tree clean — no git-dirty state after
+#   a local build.
 
 set -euo pipefail
 
-# ── Configuration ──────────────────────────────────────────────────────────────
-APP_NAME="BusinessBar"
-BUNDLE_ID="com.businessbar.app"
+# ── Parse arguments ──────────────────────────────────────────────────────────
+# Supports both the new interface (VERSION BUILD [dmg]) and the legacy
+# interface (debug|release [dmg]).  The "dmg" flag can appear anywhere.
+
+VERSION_ARG=""
+BUILD_ARG=""
+MAKE_DMG=false
+
+for arg in "$@"; do
+    case "$arg" in
+        debug|release)
+            # Legacy build-mode flag — this script always builds release,
+            # so this is accepted for compatibility but has no effect.
+            ;;
+        dmg)
+            MAKE_DMG=true
+            ;;
+        *)
+            # Positional args are VERSION then BUILD
+            if [ -z "$VERSION_ARG" ]; then
+                VERSION_ARG="$arg"
+            elif [ -z "$BUILD_ARG" ]; then
+                BUILD_ARG="$arg"
+            fi
+            ;;
+    esac
+done
+
+# ── Version / Build ──────────────────────────────────────────────────────────
+# When args are provided (e.g. from CI release workflow), use them directly.
+# When no args, derive snapshot versioning from git:
+#   VERSION = <last_tag>-snapshot  (e.g. 1.1.1-snapshot, 0.0.0-snapshot if no tags)
+#   BUILD   = <commits_since_tag>.<short_sha>  (e.g. 7.abc1234)
+
+if [ -n "$VERSION_ARG" ]; then
+    VERSION="$VERSION_ARG"
+    BUILD="${BUILD_ARG:-0}"
+else
+    LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+    if [ -n "$LATEST_TAG" ]; then
+        # Strip leading 'v' if present (v1.2.0 → 1.2.0)
+        TAG_VERSION="${LATEST_TAG#v}"
+        VERSION="${TAG_VERSION}-snapshot"
+        COMMITS_SINCE=$(git rev-list "${LATEST_TAG}..HEAD" --count 2>/dev/null || echo "0")
+    else
+        VERSION="0.0.0-snapshot"
+        COMMITS_SINCE="0"
+    fi
+    SHORT_SHA=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
+    BUILD="${COMMITS_SINCE}.${SHORT_SHA}"
+fi
+
+APP="BusinessBar.app"
+ARCH="arm64-apple-macosx"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$PROJECT_DIR/BusinessBar/Resources"
 ENTITLEMENTS="$RESOURCES_DIR/BusinessBar.entitlements"
 
-# Build mode
-BUILD_CONFIG="debug"
-if [[ "${1:-}" == "release" ]]; then
-    BUILD_CONFIG="release"
-fi
+# Path to the SPM-built resource bundle that contains credentials.json
+BUILT_BUNDLE="$PROJECT_DIR/.build/${ARCH}/release/BusinessBar_BusinessBar.bundle"
 
-BUILD_DIR="$PROJECT_DIR/.build/$BUILD_CONFIG"
-OUT_APP="$PROJECT_DIR/$APP_NAME.app"
+# ── Step 0 — Read credentials (from .local.json / .env) ─────────────────────
+# Credentials are gathered early so they are available for post-build
+# injection, but source files are NOT modified at this stage.
 
-# ── Step 1a — Inject credentials ──────────────────────────────────────────────
-# For release builds, real credentials must be baked into credentials.json
-# so they are compiled into the binary (no .local.json in the .app bundle).
-#
-# Source order: credentials.local.json → .env → leave as placeholder
-
-CREDS_FILE="$RESOURCES_DIR/credentials.json"
 CREDS_LOCAL="$RESOURCES_DIR/credentials.local.json"
 ENV_FILE="$PROJECT_DIR/.env"
 
+GOOGLE_CLIENT_NUMBER=""
+GOOGLE_CLIENT_SECRET=""
 SPARKLE_APPCAST_URL=""
 SPARKLE_PUBLIC_ED_KEY=""
 
 # Try to read from credentials.local.json first
 if [ -f "$CREDS_LOCAL" ]; then
-    echo "  ▶ Found credentials.local.json — using it for release build"
+    echo "  ▶ Found credentials.local.json — will use it for release build"
     GOOGLE_CLIENT_NUMBER=$(python3 -c "import json; print(json.load(open('$CREDS_LOCAL'))['google_client_number'])" 2>/dev/null || echo "")
     GOOGLE_CLIENT_SECRET=$(python3 -c "import json; print(json.load(open('$CREDS_LOCAL'))['google_client_secret'])" 2>/dev/null || echo "")
     SPARKLE_APPCAST_URL=$(python3 -c "import json; print(json.load(open('$CREDS_LOCAL'))['sparkle_appcast_url'])" 2>/dev/null || echo "")
@@ -60,135 +123,164 @@ if [ -z "$GOOGLE_CLIENT_NUMBER" ] && [ -f "$ENV_FILE" ]; then
         [ -z "$key" ] && continue
         [[ "$key" == \#* ]] && continue
         case "$key" in
-            GOOGLE_CLIENT_NUMBER) GOOGLE_CLIENT_NUMBER="$value" ;;
-            GOOGLE_CLIENT_SECRET) GOOGLE_CLIENT_SECRET="$value" ;;
-            SPARKLE_APPCAST_URL)  SPARKLE_APPCAST_URL="$value" ;;
+            GOOGLE_CLIENT_NUMBER)  GOOGLE_CLIENT_NUMBER="$value" ;;
+            GOOGLE_CLIENT_SECRET)  GOOGLE_CLIENT_SECRET="$value" ;;
+            SPARKLE_APPCAST_URL)   SPARKLE_APPCAST_URL="$value" ;;
             SPARKLE_PUBLIC_ED_KEY) SPARKLE_PUBLIC_ED_KEY="$value" ;;
         esac
     done < "$ENV_FILE"
 fi
 
+# Strip surrounding quotes if present
+GOOGLE_CLIENT_NUMBER="${GOOGLE_CLIENT_NUMBER%\"}"; GOOGLE_CLIENT_NUMBER="${GOOGLE_CLIENT_NUMBER#\"}"
+GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET%\"}"; GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET#\"}"
+SPARKLE_APPCAST_URL="${SPARKLE_APPCAST_URL%\"}";   SPARKLE_APPCAST_URL="${SPARKLE_APPCAST_URL#\"}"
+SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY%\"}"; SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY#\"}"
+
+HAS_CREDENTIALS=false
 if [ -n "$GOOGLE_CLIENT_NUMBER" ] && [ -n "$GOOGLE_CLIENT_SECRET" ]; then
-    # Strip surrounding quotes if present
-    GOOGLE_CLIENT_NUMBER="${GOOGLE_CLIENT_NUMBER%\"}"
-    GOOGLE_CLIENT_NUMBER="${GOOGLE_CLIENT_NUMBER#\"}"
-    GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET%\"}"
-    GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET#\"}"
-
-    # Write real values into credentials.json (bakes them into the binary)
-    cat > "$CREDS_FILE" <<JSON_EOF
-{
-    "google_client_number": "${GOOGLE_CLIENT_NUMBER}",
-    "google_client_secret": "${GOOGLE_CLIENT_SECRET}"
-}
-JSON_EOF
-    echo "  ✓ credentials.json updated with real values"
-
-    # Patch Info.plist URL scheme
-    /usr/libexec/PlistBuddy \
-        -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 com.googleusercontent.apps.${GOOGLE_CLIENT_NUMBER}" \
-        "$RESOURCES_DIR/Info.plist" 2>/dev/null || true
-    echo "  ✓ Info.plist URL scheme patched"
+    HAS_CREDENTIALS=true
 else
     echo "  ⚠ No credentials found — credentials.json will use placeholder values."
     echo "    Create BusinessBar/Resources/credentials.local.json with real values."
 fi
 
-# ── Step 1b — Inject Sparkle config ──────────────────────────────────────────
-# The appcast URL and EdDSA public key are not secrets — they are public values
-# embedded in the app binary for Sparkle's update verification. Source order:
-# credentials.local.json → .env → leave as placeholder.
+# ── Step 1 — Build ──────────────────────────────────────────────────────────
+echo "==> Building release binary..."
+swift build -c release
 
-if [ -n "$SPARKLE_APPCAST_URL" ]; then
-    # Strip surrounding quotes if present
-    SPARKLE_APPCAST_URL="${SPARKLE_APPCAST_URL%\"}"
-    SPARKLE_APPCAST_URL="${SPARKLE_APPCAST_URL#\"}"
-    /usr/libexec/PlistBuddy \
-        -c "Set :SUFeedURL ${SPARKLE_APPCAST_URL}" \
-        "$RESOURCES_DIR/Info.plist" 2>/dev/null || true
-    echo "  ✓ Info.plist SUFeedURL patched"
+# ── Step 2 — Inject credentials into BUILT artifacts ────────────────────────
+# Patch the credentials.json inside the SPM-built resource bundle, NOT the
+# source file.  This keeps the source tree clean.
+
+BUILT_CREDS="$BUILT_BUNDLE/credentials.json"
+if [ "$HAS_CREDENTIALS" = true ]; then
+    if [ -f "$BUILT_CREDS" ]; then
+        cat > "$BUILT_CREDS" <<JSON_EOF
+{
+    "google_client_number": "${GOOGLE_CLIENT_NUMBER}",
+    "google_client_secret": "${GOOGLE_CLIENT_SECRET}"
+}
+JSON_EOF
+        echo "  ✓ Built credentials.json patched with real values"
+    else
+        echo "  ⚠ Built credentials.json not found at $BUILT_CREDS — skipping"
+    fi
+
+    # Also remove credentials.local.json from the built bundle so it never
+    # ships in the .app (real values are now in credentials.json).
+    BUILT_LOCAL_CREDS="$BUILT_BUNDLE/credentials.local.json"
+    if [ -f "$BUILT_LOCAL_CREDS" ]; then
+        rm "$BUILT_LOCAL_CREDS"
+        echo "  ✓ Removed credentials.local.json from built bundle"
+    fi
 fi
 
-if [ -n "$SPARKLE_PUBLIC_ED_KEY" ]; then
-    # Strip surrounding quotes if present
-    SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY%\"}"
-    SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY#\"}"
-    /usr/libexec/PlistBuddy \
-        -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" \
-        "$RESOURCES_DIR/Info.plist" 2>/dev/null || true
-    echo "  ✓ Info.plist SUPublicEDKey patched"
-fi
+# ── Step 3 — Assemble .app skeleton ────────────────────────────────────────
+echo "==> Assembling ${APP}..."
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" \
+         "$APP/Contents/Resources" \
+         "$APP/Contents/Frameworks"
 
-# ── Step 1 — Build ─────────────────────────────────────────────────────────────
-echo "▶ Building ($BUILD_CONFIG)…"
-if [[ "$BUILD_CONFIG" == "release" ]]; then
-    swift build -c release
-else
-    swift build
-fi
-echo "  ✓ swift build complete"
+# ── Step 4 — Copy binary ────────────────────────────────────────────────────
+cp ".build/release/BusinessBar" "$APP/Contents/MacOS/"
 
-# ── Step 2 — Create .app skeleton ──────────────────────────────────────────────
-echo "▶ Assembling $APP_NAME.app…"
-rm -rf "$OUT_APP"
-MACOS_DIR="$OUT_APP/Contents/MacOS"
-FRAMEWORKS_DIR="$OUT_APP/Contents/Frameworks"
-RESOURCES_DEST="$OUT_APP/Contents/Resources"
-
-mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DEST"
-
-# ── Step 3 — Copy executable ───────────────────────────────────────────────────
-cp "$BUILD_DIR/$APP_NAME" "$MACOS_DIR/$APP_NAME"
-echo "  ✓ executable copied"
-
-# ── Step 4 — Copy Info.plist ───────────────────────────────────────────────────
-cp "$RESOURCES_DIR/Info.plist" "$OUT_APP/Contents/Info.plist"
-echo "  ✓ Info.plist copied"
-
-# ── Step 5 — Copy SPM resource bundles ────────────────────────────────────────
+# ── Step 5 — Copy SPM resource bundles ──────────────────────────────────────
 # Swift Package Manager places *.bundle directories alongside the binary.
 # Each bundle holds the resources (strings, plists, assets) for its module.
-for bundle in "$BUILD_DIR"/*.bundle; do
+for bundle in ".build/${ARCH}/release"/*.bundle; do
     [ -d "$bundle" ] || continue
     bundle_name="$(basename "$bundle")"
-    cp -R "$bundle" "$RESOURCES_DEST/$bundle_name"
+    cp -R "$bundle" "$APP/Contents/Resources/$bundle_name"
     echo "  ✓ bundle: $bundle_name"
 done
 
-# Remove credentials.local.json from the .app bundle — it should never
-# ship in a release build (real values are already in credentials.json).
-if [ -f "$RESOURCES_DEST/BusinessBar_BusinessBar.bundle/credentials.local.json" ]; then
-    rm "$RESOURCES_DEST/BusinessBar_BusinessBar.bundle/credentials.local.json"
-    echo "  ✓ Removed credentials.local.json from bundle (not for distribution)"
-fi
+# Also check the generic release dir (some SPM versions place bundles there)
+for bundle in ".build/release"/*.bundle; do
+    [ -d "$bundle" ] || continue
+    bundle_name="$(basename "$bundle")"
+    # Skip if already copied
+    [ -d "$APP/Contents/Resources/$bundle_name" ] && continue
+    cp -R "$bundle" "$APP/Contents/Resources/$bundle_name"
+    echo "  ✓ bundle: $bundle_name"
+done
 
-# ── Step 6 — Copy Sparkle.framework ───────────────────────────────────────────
-if [ -d "$BUILD_DIR/Sparkle.framework" ]; then
-    cp -R "$BUILD_DIR/Sparkle.framework" "$FRAMEWORKS_DIR/Sparkle.framework"
+# Remove credentials.local.json from any bundle inside the .app — it should
+# never ship in a release build (real values are already in credentials.json).
+for bundle_dir in "$APP/Contents/Resources"/*.bundle; do
+    [ -d "$bundle_dir" ] || continue
+    local_creds="$bundle_dir/credentials.local.json"
+    if [ -f "$local_creds" ]; then
+        rm "$local_creds"
+        echo "  ✓ Removed credentials.local.json from bundle (not for distribution)"
+    fi
+done
+
+# ── Step 6 — Sparkle.framework ──────────────────────────────────────────────
+# Sparkle is a pre-built binary framework linked via @rpath. It must be embedded
+# in Contents/Frameworks/ and the binary's rpath must include that directory.
+if [ -d ".build/${ARCH}/release/Sparkle.framework" ]; then
+    cp -R ".build/${ARCH}/release/Sparkle.framework" "$APP/Contents/Frameworks/"
+    echo "  ✓ Sparkle.framework copied"
+elif [ -d ".build/release/Sparkle.framework" ]; then
+    cp -R ".build/release/Sparkle.framework" "$APP/Contents/Frameworks/"
     echo "  ✓ Sparkle.framework copied"
 fi
 
 # Copy any other .framework directories SPM placed in the build dir
-for fw in "$BUILD_DIR"/*.framework; do
+for fw in ".build/${ARCH}/release"/*.framework; do
     [ -d "$fw" ] || continue
     fw_name="$(basename "$fw")"
     [ "$fw_name" = "Sparkle.framework" ] && continue   # already handled above
-    cp -R "$fw" "$FRAMEWORKS_DIR/$fw_name"
+    cp -R "$fw" "$APP/Contents/Frameworks/$fw_name"
     echo "  ✓ framework: $fw_name"
 done
 
-# ── Step 7 — Fix up Sparkle's embedded helpers (rpath) ────────────────────────
-# Sparkle bundles Autoupdate.app and XPC services; they need correct rpaths.
-SPARKLE_FW="$FRAMEWORKS_DIR/Sparkle.framework"
-if [ -d "$SPARKLE_FW" ]; then
-    # Update rpath in main binary so it finds Sparkle in @executable_path/../Frameworks
-    install_name_tool \
-        -add_rpath "@executable_path/../Frameworks" \
-        "$MACOS_DIR/$APP_NAME" 2>/dev/null || true
-    echo "  ✓ rpath updated for Sparkle"
+install_name_tool \
+    -add_rpath @executable_path/../Frameworks \
+    "$APP/Contents/MacOS/BusinessBar" 2>/dev/null || true
+
+# ── Step 7 — Info.plist (copy to .app, then patch IN THE .APP) ──────────────
+# The source Info.plist is copied as-is, then all patching happens on the
+# copy inside the .app bundle so the source file is never modified.
+cp "$RESOURCES_DIR/Info.plist" "$APP/Contents/"
+
+# Patch version/build number
+/usr/libexec/PlistBuddy \
+    -c "Set :CFBundleShortVersionString ${VERSION}" \
+    "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy \
+    -c "Set :CFBundleVersion ${BUILD}" \
+    "$APP/Contents/Info.plist"
+
+# Patch URL scheme with real client number (only if credentials are available)
+if [ "$HAS_CREDENTIALS" = true ]; then
+    /usr/libexec/PlistBuddy \
+        -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 com.googleusercontent.apps.${GOOGLE_CLIENT_NUMBER}" \
+        "$APP/Contents/Info.plist" 2>/dev/null || true
+    echo "  ✓ Info.plist URL scheme patched"
 fi
 
-# ── Step 8 — App icon & Assets ─────────────────────────────────────────────────
+# Patch Sparkle appcast URL (if available)
+if [ -n "$SPARKLE_APPCAST_URL" ]; then
+    /usr/libexec/PlistBuddy \
+        -c "Set :SUFeedURL ${SPARKLE_APPCAST_URL}" \
+        "$APP/Contents/Info.plist" 2>/dev/null || true
+    echo "  ✓ Info.plist SUFeedURL patched"
+fi
+
+# Patch Sparkle public EdDSA key (if available)
+if [ -n "$SPARKLE_PUBLIC_ED_KEY" ]; then
+    /usr/libexec/PlistBuddy \
+        -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" \
+        "$APP/Contents/Info.plist" 2>/dev/null || true
+    echo "  ✓ Info.plist SUPublicEDKey patched"
+fi
+
+echo "  ✓ Info.plist copied (version ${VERSION}, build ${BUILD})"
+
+# ── Step 8 — App icon & Assets ──────────────────────────────────────────────
 # macOS needs either a compiled Assets.car (from actool) or an AppIcon.icns
 # file in Contents/Resources for the app icon to appear in Finder, Launchpad,
 # and the About window.  We try multiple strategies so the icon always works.
@@ -196,6 +288,7 @@ fi
 ASSETS_SRC="$RESOURCES_DIR/Assets.xcassets"
 ICON_SET_SRC="$ASSETS_SRC/AppIcon.appiconset"
 PREGEN_ICNS="$RESOURCES_DIR/AppIcon.icns"
+RESOURCES_DEST="$APP/Contents/Resources"
 ICON_GENERATED=false
 
 # Strategy 1: Compile Assets.xcassets with actool → produces Assets.car
@@ -203,11 +296,13 @@ if [ -d "$ASSETS_SRC" ] && command -v actool &>/dev/null; then
     echo "  ▶ Compiling Assets.xcassets with actool…"
     if actool \
         --output-format human-readable-text \
-        --notices --warnings \
-        --platform macosx \
-        --minimum-deployment-target 14.0 \
+        --notices --warnings --errors \
         --app-icon AppIcon \
-        --output-partial-info-plist /dev/null \
+        --enable-on-demand-resources NO \
+        --development-region en \
+        --minimum-deployment-target 14.0 \
+        --platform macosx \
+        --output-partial-info-plist /tmp/actool.plist \
         --compile "$RESOURCES_DEST" \
         "$ASSETS_SRC" 2>&1 | grep -E "warning:|error:|compiled" || true; then
         # Verify the .car file was actually produced
@@ -270,61 +365,76 @@ for lproj in "$RESOURCES_DIR"/*.lproj; do
     echo "  ✓ localisation: $lproj_name"
 done
 
-# ── Step 9 — Code-sign ────────────────────────────────────────────────────────
-# Ad-hoc sign (no Developer ID required) so macOS will run the app locally.
-# For distribution replace "-" with "Developer ID Application: Your Name (TEAMID)"
-echo "▶ Code-signing (ad-hoc)…"
+# ── Step 9 — Ad-hoc sign (inside-out) ───────────────────────────────────────
+# Signing rules:
+#  1. Sign nested bundles before their parent (inside-out order).
+#  2. codesign --deep is unreliable on versioned framework symlinks (Sparkle),
+#     so we sign each component explicitly.
+#  3. The main app is signed with entitlements that include
+#     com.apple.security.cs.disable-library-validation — required because
+#     codesign automatically enables the hardened runtime on app bundles, and
+#     hardened runtime + library validation would reject ad-hoc frameworks.
 
-# Sign frameworks first (inside-out)
-if [ -d "$FRAMEWORKS_DIR/Sparkle.framework" ]; then
-    # Sign the XPC services and helpers inside Sparkle
-    for helper in \
-        "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
-        "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \
-        "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Autoupdate" \
-        "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Updater.app"; do
-        [ -e "$helper" ] && \
-            codesign --force --sign "-" \
-                --entitlements "$ENTITLEMENTS" \
-                "$helper" 2>/dev/null || true
-    done
-    codesign --force --sign "-" "$FRAMEWORKS_DIR/Sparkle.framework" 2>/dev/null || true
+echo "==> Ad-hoc signing (inside-out)..."
+
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+if [ -d "$SPARKLE" ]; then
+    SPARKLE_B="$SPARKLE/Versions/B"
+
+    # 1. Sparkle's XPC services
+    if [ -d "$SPARKLE_B/XPCServices" ]; then
+        codesign --force --sign - "$SPARKLE_B/XPCServices/Downloader.xpc" 2>/dev/null || true
+        codesign --force --sign - "$SPARKLE_B/XPCServices/Installer.xpc" 2>/dev/null || true
+    fi
+
+    # 2. Sparkle's helper app
+    if [ -d "$SPARKLE_B/Updater.app" ]; then
+        codesign --force --deep --sign - "$SPARKLE_B/Updater.app" 2>/dev/null || true
+    fi
+
+    # 3. Sparkle's autoupdate helper
+    if [ -f "$SPARKLE_B/Autoupdate" ]; then
+        codesign --force --sign - --entitlements "$ENTITLEMENTS" "$SPARKLE_B/Autoupdate" 2>/dev/null || true
+    fi
+
+    # 4. Sparkle framework binary + bundle
+    codesign --force --sign - "$SPARKLE" 2>/dev/null || true
+    echo "  ✓ Sparkle.framework signed"
 fi
 
 # Sign remaining frameworks
-for fw in "$FRAMEWORKS_DIR"/*.framework; do
+for fw in "$APP/Contents/Frameworks"/*.framework; do
     [ -d "$fw" ] || continue
     [[ "$fw" == *Sparkle* ]] && continue
-    codesign --force --sign "-" "$fw" 2>/dev/null || true
+    codesign --force --sign - "$fw" 2>/dev/null || true
 done
 
-# Sign the app bundle (preserves metadata)
-codesign \
-    --force \
-    --sign "-" \
+# 5. Main app (with entitlements so library validation is disabled)
+codesign --force --sign - \
     --entitlements "$ENTITLEMENTS" \
-    --options runtime \
-    "$OUT_APP"
+    "$APP"
 
 echo "  ✓ ad-hoc signature applied"
 
-# ── Step 10 — Verify ──────────────────────────────────────────────────────────
-codesign --verify --deep --strict "$OUT_APP" && echo "  ✓ signature verified"
+# ── Step 10 — Verify ─────────────────────────────────────────────────────────
+codesign --verify --deep --strict "$APP" 2>/dev/null && echo "  ✓ signature verified" || true
+
 echo ""
-echo "✅  $OUT_APP is ready."
-echo "    Double-click it or drag it to /Applications to run."
+echo "==> Done: ${APP} (version ${VERSION}, build ${BUILD})"
+echo "    Run:  open ${APP}"
 echo ""
 
-# ── Step 11 — Optional DMG ────────────────────────────────────────────────────
-if [[ "${2:-}" == "dmg" ]]; then
-    DMG_PATH="$PROJECT_DIR/$APP_NAME.dmg"
-    echo "▶ Creating $APP_NAME.dmg…"
+# ── Step 11 — Optional DMG ──────────────────────────────────────────────────
+if [ "$MAKE_DMG" = true ]; then
+    DMG_NAME="BusinessBar-${VERSION}.dmg"
+    DMG_PATH="$PROJECT_DIR/$DMG_NAME"
+
+    echo "▶ Creating ${DMG_NAME}…"
     rm -f "$DMG_PATH"
     hdiutil create \
-        -volname "$APP_NAME" \
-        -srcfolder "$OUT_APP" \
-        -ov \
-        -format UDZO \
+        -volname "BusinessBar ${VERSION}" \
+        -srcfolder "$APP" \
+        -ov -format UDZO \
         "$DMG_PATH"
-    echo "✅  $DMG_PATH created."
+    echo "✅  ${DMG_NAME} created."
 fi
