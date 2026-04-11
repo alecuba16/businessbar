@@ -50,7 +50,9 @@ jobs:
       run: |
         codesign --verify --deep --strict BusinessBar.app
         echo "  ✓ Code signature verified"
-        # Sanity-check that version was written by snapshot versioning
-        VERSION=$(defaults read BusinessBar.app/Contents/Info.plist CFBundleShortVersionString)
-        BUILD=$(defaults read BusinessBar.app/Contents/Info.plist CFBundleVersion)
+        # Sanity-check that version was written by snapshot versioning.
+        # PlistBuddy reads the file directly — more reliable than
+        # `defaults read` which fails in CI environments.
+        VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" BusinessBar.app/Contents/Info.plist)
+        BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" BusinessBar.app/Contents/Info.plist)
         echo "  ✓ Version: ${VERSION} (build ${BUILD})"
