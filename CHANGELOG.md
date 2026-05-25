@@ -5,6 +5,14 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-05-25
+### Fixed
+- Fixed SIGTRAP crash when opening Preferences in CI-built app — SPM's `Bundle.module` accessor for KeyboardShortcuts could not locate the resource bundle inside `.app/Contents/Resources/`, causing a `fatalError` at view initialization. Added a safe lookup that uses `Bundle.main.url(forResource:withExtension:)` which correctly searches the app bundle. ([KeyboardShortcuts #229](https://github.com/sindresorhus/KeyboardShortcuts/issues/229))
+- SPM resource bundles in `Contents/Resources/` are now signed before the main app during `bundle_app.sh`, preventing macOS from rejecting them at runtime
+
+### Changed
+- `bundle_app.sh` resolves SPM dependencies (`swift package resolve`) and patches KeyboardShortcuts' `Utilities.swift` before building, injecting a `keyboardShortcutsSafeBundle` accessor as a drop-in replacement for the broken `Bundle.module`
+
 ## [1.2.1] - 2026-05-25
 ### Added
 - Crash handling with signal and NSException handlers — unhandled crashes are captured to `~/Library/Logs/BusinessBar/crash_*.log`
@@ -103,6 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **1.2.2** - KeyboardShortcuts Bundle.module crash fix, resource bundle signing
 - **1.2.1** - Crash handler, preference live updates, String.truncated fix, UI reorg
 - **1.2.0** - Configurable time rounding threshold, relative time minutes, CI PlistBuddy fix
 - **1.1.2** - Improved coverage test, updated version management
