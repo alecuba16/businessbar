@@ -23,6 +23,7 @@ import Foundation
         static let badgePollInterval = Constants.Defaults.badgePollInterval
         static let badgeIconSize = Constants.Defaults.badgeIconSize
         static let timeFormat = Constants.Defaults.timeFormat
+        static let timeRoundingThreshold = Constants.Defaults.timeRoundingThreshold
         static let calendarProvider = Constants.Defaults.calendarProvider
         static let featureCalendar = Constants.Defaults.featureCalendar
         static let featureNoSleep = Constants.Defaults.featureNoSleep
@@ -56,6 +57,7 @@ extension UserDefaults {
             DefaultsKeys.badgePollInterval: Constants.DefaultValues.badgePollInterval,
             DefaultsKeys.badgeIconSize: "medium",
             DefaultsKeys.timeFormat: "relative",
+            DefaultsKeys.timeRoundingThreshold: Constants.DefaultValues.timeRoundingThreshold,
             DefaultsKeys.calendarProvider: CalendarProvider.eventKit.rawValue,
             DefaultsKeys.featureCalendar: true,
             DefaultsKeys.featureNoSleep: true,

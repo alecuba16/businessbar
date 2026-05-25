@@ -20,16 +20,10 @@ struct CalendarsTab: View {
     @AppStorage(Constants.Defaults.notificationMinutesBefore) private var notificationMinutes = Constants.DefaultValues.notificationMinutesBefore
     @AppStorage(Constants.Defaults.endOfEventNotification) private var endOfEventNotification = false
     @AppStorage(Constants.Defaults.calendarProvider) private var calendarProvider = CalendarProvider.eventKit.rawValue
-    @AppStorage(Constants.Defaults.meetingTitleMaxLength) private var titleMaxLength = Constants.DefaultValues.meetingTitleMaxLength {
-        didSet { notifyPreferencesChanged() }
-    }
     @AppStorage(Constants.Defaults.showTomorrowEvents) private var showTomorrowEvents = true {
         didSet { notifyPreferencesChanged() }
     }
     @AppStorage(Constants.Defaults.showDeclinedEvents) private var showDeclinedEvents = false {
-        didSet { notifyPreferencesChanged() }
-    }
-    @AppStorage(Constants.Defaults.timeFormat) private var timeFormat = "relative" {
         didSet { notifyPreferencesChanged() }
     }
     @AppStorage(Constants.Defaults.featureNotifications) private var meetingNotificationsEnabled = true {
@@ -179,25 +173,6 @@ struct CalendarsTab: View {
             .disabled(!canEditCalendarConfig)
 
             Section("Meeting Display") {
-                VStack(alignment: .leading) {
-                    Text("Meeting title max length:")
-                    HStack {
-                        Slider(value: Binding(
-                            get: { Double(titleMaxLength) },
-                            set: { titleMaxLength = Int($0) }
-                        ), in: 10...50, step: 1)
-                        Text("\(titleMaxLength) characters")
-                            .foregroundColor(.secondary)
-                            .frame(width: 100, alignment: .leading)
-                    }
-                }
-
-                Picker("Event time format:", selection: $timeFormat) {
-                    Text("Relative (\"in 12m\" / \"now (25m left)\")").tag("relative")
-                    Text("Absolute (\"10:00\")").tag("absolute")
-                }
-                .pickerStyle(.radioGroup)
-
                 Toggle("Show tomorrow's events", isOn: $showTomorrowEvents)
                 Toggle("Show declined events (dimmed)", isOn: $showDeclinedEvents)
             }

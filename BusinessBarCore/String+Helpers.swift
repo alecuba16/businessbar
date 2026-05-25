@@ -6,7 +6,8 @@ public extension String {
             return self
         }
         
-        return self.prefix(maxLength - trailing.count) + trailing
+        let prefixLength = max(0, maxLength - trailing.count)
+        return self.prefix(prefixLength) + trailing
     }
     
     func stripHTML() -> String {

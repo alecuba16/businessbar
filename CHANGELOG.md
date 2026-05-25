@@ -5,6 +5,31 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-05-25
+### Added
+- Crash handling with signal and NSException handlers — unhandled crashes are captured to `~/Library/Logs/BusinessBar/crash_*.log`
+- Alert on next launch when a previous session crash is detected, with "Reveal in Finder" button
+
+### Changed
+- Refactored relative time formatting in `StatusBarController` into shared `formatRelative(minutes:)` helper (eliminates duplicate logic)
+- Moved "Meeting title max length" and "Event time format" controls from Calendars tab to Appearance tab
+- Appearance tab preferences now post `businessBarPreferencesDidChange` notification on change (immediate live update without waiting for next event refresh)
+- `String.truncated(to:trailing:)` clamps prefix length to zero instead of crashing on negative values
+
+### Fixed
+- `String.truncated(to:trailing:)` no longer traps at runtime when custom trailing string exceeds `maxLength` (e.g. trailing "....." with maxLength 3)
+
+### Removed
+- Unused `cachedFallbackIcon` and `renderFallbackIcon()` from `StatusBarController`
+
+## [1.2.0] - 2026-05-25
+### Added
+- Configurable rounding threshold for relative times in Appearance preferences (0 = always exact, 1+ = round to whole hours when ≥ that many hours away)
+- Relative times now show minutes past the hour when < threshold (e.g. "1h31m" instead of just "1h")
+
+### Changed
+- CI workflow uses `PlistBuddy` instead of `defaults read` for version sanity check (more reliable in CI environments)
+
 ## [1.1.2] - 2026-04-11
 ### Changed
 - Improved the coverage test
@@ -78,6 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
-- **1.1.1** - CI workflow fixes: SPM resource warning and release permissions
+- **1.2.1** - Crash handler, preference live updates, String.truncated fix, UI reorg
+- **1.2.0** - Configurable time rounding threshold, relative time minutes, CI PlistBuddy fix
+- **1.1.2** - Improved coverage test, updated version management
+- **1.1.1** - Removed credentials.local.json from SPM resources, added release workflow permissions
 - **1.1.0** - CPU/energy optimizations, configurable badge polling, notification scheduling
 - **1.0.0** - Initial implementation complete, pending first release

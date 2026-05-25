@@ -28,6 +28,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
+        // Install crash handlers before anything else so unhandled crashes
+        // are captured to disk.
+        CrashHandler.shared.install()
+
         AppLogger.info("Application launching", category: "AppDelegate")
 
         // Register Apple Event handler for URL scheme callbacks (Google OAuth redirect).
@@ -42,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         initializeManagers()
         setupStatusBar()
         checkFirstLaunch()
+
+        // Check if the app crashed in the previous session and alert the user.
+        CrashHandler.shared.showCrashAlertIfNeeded()
 
         AppLogger.info("Application launched successfully", category: "AppDelegate")
     }

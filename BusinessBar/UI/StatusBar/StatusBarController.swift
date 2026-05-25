@@ -27,16 +27,6 @@ final class StatusBarController: NSObject {
     /// Used when no meeting or NoSleep is active — gives the idle status bar
     /// item the same visual identity as the app icon.
     private lazy var cachedAppIcon: NSImage? = Self.renderBrandedIcon()
-
-    /// Template calendar icon for use as a secondary image (not currently
-    /// used in the primary status item but kept for future use).
-    private lazy var cachedFallbackIcon: NSImage? = {
-        if let assetIcon = NSImage(named: "StatusBarIcon") {
-            assetIcon.isTemplate = true
-            return assetIcon
-        }
-        return Self.renderFallbackIcon()
-    }()
     private var cachedNoSleepInfiniteIcon: NSImage?
     private var cachedNoSleepTimedIcon: NSImage?
     /// Tracks the last-rendered badge image per app to avoid redundant CIFilter work.
@@ -304,41 +294,6 @@ final class StatusBarController: NSObject {
         return result
     }
 
-    /// Renders the "Bb" text icon as a white-on-transparent template image.
-    /// Only used as a last-resort fallback if the asset-catalog icon is missing.
-    private static func renderFallbackIcon() -> NSImage? {
-        let iconSize = NSSize(width: 18, height: 18)
-        let icon = NSImage(size: iconSize, flipped: false) { rect in
-            NSColor.clear.setFill()
-            rect.fill()
-
-            let font = NSFont(name: "SF Pro Display SemiBold", size: 12)
-                ?? NSFont.systemFont(ofSize: 12, weight: .semibold)
-
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: NSColor.white,
-                .paragraphStyle: paragraph
-            ]
-
-            let text = NSAttributedString(string: "Bb", attributes: attributes)
-            let textSize = text.size()
-            let textRect = NSRect(
-                x: (rect.width - textSize.width) / 2,
-                y: (rect.height - textSize.height) / 2 - 1,
-                width: textSize.width,
-                height: textSize.height
-            )
-            text.draw(in: textRect)
-
-            return true
-        }
-        icon.isTemplate = true
-        return icon
-    }
 
     /// Renders the calendar.badge.clock SF Symbol in the app's brand color
     /// (blue/purple matching the AppIcon) as a non-template image.
@@ -417,35 +372,11 @@ final class StatusBarController: NSObject {
             let now = Date()
 
             if event.isHappening {
-                let remaining = event.endDate.timeIntervalSince(now)
-                let minutes = Int(remaining / 60)
-                let threshold = currentRoundingThreshold
-
-                if threshold > 0 && minutes >= threshold * 60 {
-                    let hours = Int(round(Double(minutes) / 60.0))
-                    return "(ends \(hours)h)"
-                } else if minutes < 60 {
-                    return "(ends \(minutes)m)"
-                } else {
-                    let hours = minutes / 60
-                    let mins = minutes % 60
-                    return mins == 0 ? "(ends \(hours)h)" : "(ends \(hours)h\(mins)m)"
-                }
+                let minutes = Int(event.endDate.timeIntervalSince(now) / 60)
+                return "(ends \(formatRelative(minutes: minutes)))"
             } else {
-                let timeUntil = event.startDate.timeIntervalSince(now)
-                let minutes = Int(timeUntil / 60)
-                let threshold = currentRoundingThreshold
-
-                if threshold > 0 && minutes >= threshold * 60 {
-                    let hours = Int(round(Double(minutes) / 60.0))
-                    return "in \(hours)h"
-                } else if minutes < 60 {
-                    return "in \(minutes)m"
-                } else {
-                    let hours = minutes / 60
-                    let mins = minutes % 60
-                    return mins == 0 ? "in \(hours)h" : "in \(hours)h\(mins)m"
-                }
+                let minutes = Int(event.startDate.timeIntervalSince(now) / 60)
+                return "in \(formatRelative(minutes: minutes))"
             }
 
         case .absolute:
@@ -453,6 +384,23 @@ final class StatusBarController: NSObject {
             let start = fmt.string(from: event.startDate)
             let end = fmt.string(from: event.endDate)
             return "(\(start)-\(end))"
+        }
+    }
+
+    /// Formats a minute count into a compact relative string.
+    /// - Parameter minutes: total minutes (positive)
+    /// - Returns: e.g. "5m", "1h", "1h31m", "2h"
+    private func formatRelative(minutes: Int) -> String {
+        let threshold = currentRoundingThreshold
+
+        if threshold > 0 && minutes >= threshold * 60 {
+            return "\(Int(round(Double(minutes) / 60.0)))h"
+        } else if minutes < 60 {
+            return "\(minutes)m"
+        } else {
+            let hours = minutes / 60
+            let mins = minutes % 60
+            return mins == 0 ? "\(hours)h" : "\(hours)h\(mins)m"
         }
     }
 

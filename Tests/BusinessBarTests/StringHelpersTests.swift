@@ -38,13 +38,13 @@ final class StringHelpersTests: XCTestCase {
         XCTAssertEqual(result, "")
     }
 
-    func testTruncated_customTrailingLongerThanMaxLength_crashes() throws {
+    func testTruncated_customTrailingLongerThanMaxLength_clampsPrefixToZero() {
         // Edge case: trailing "....." (5 chars) with maxLength 3
-        // prefix(3 - 5) = prefix(-2) — Swift.String.prefix() traps on
-        // negative lengths, so this input would crash at runtime.
-        // This is a known limitation of the current implementation.
-        // Skipping the test to avoid the fatal error.
-        throw XCTSkip("prefix() with negative length crashes; this edge case is a known limitation of truncated(to:trailing:)")
+        // prefix(3 - 5) = prefix(-2) — now clamped to prefix(0),
+        // so result is just the trailing string.
+        let input = "Hello, World!"
+        let result = input.truncated(to: 3, trailing: ".....")
+        XCTAssertEqual(result, ".....")
     }
 
     func testTruncated_customTrailingExactlyFitsMaxLength_truncatesCorrectly() {

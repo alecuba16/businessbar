@@ -32,12 +32,14 @@ struct AppearanceTab: View {
                             .frame(width: 100, alignment: .leading)
                     }
                 }
+                .onChange(of: titleMaxLength) { _, _ in notifyPreferencesChanged() }
 
                 Picker("Event time format:", selection: $timeFormat) {
                     Text("Relative (\"in 12m\" / \"now (25m left)\")").tag("relative")
                     Text("Absolute (\"10:00\")").tag("absolute")
                 }
                 .pickerStyle(.radioGroup)
+                .onChange(of: timeFormat) { _, _ in notifyPreferencesChanged() }
 
                 if timeFormat == "relative" {
                     VStack(alignment: .leading) {
@@ -55,6 +57,7 @@ struct AppearanceTab: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+                    .onChange(of: timeRoundingThreshold) { _, _ in notifyPreferencesChanged() }
                 }
             }
 
@@ -65,8 +68,10 @@ struct AppearanceTab: View {
                     Text("Medium (18px)").tag("medium")
                 }
                 .pickerStyle(.radioGroup)
+                .onChange(of: badgeIconSize) { _, _ in notifyPreferencesChanged() }
 
                 Toggle("Grayscale when no notifications", isOn: $grayscaleWhenNoNotifications)
+                    .onChange(of: grayscaleWhenNoNotifications) { _, _ in notifyPreferencesChanged() }
 
                 Text("When enabled, badge icons appear desaturated until a notification is present.")
                     .font(.caption)
@@ -189,5 +194,9 @@ struct AppearanceTab: View {
         default:
             return "\(truncated) in 1h31m  "
         }
+    }
+
+    private func notifyPreferencesChanged() {
+        NotificationCenter.default.post(name: .businessBarPreferencesDidChange, object: nil)
     }
 }
