@@ -73,6 +73,13 @@ final class StatusBarController: NSObject {
         return EventTimeMode(rawValue: rawValue ?? EventTimeMode.relative.rawValue) ?? .relative
     }
 
+    /// Hours threshold at which relative times round to whole hours.
+    /// 0 = always show exact (e.g. "1h31m"), 1 = round when >1h, 2 = round when >2h, etc.
+    private var currentRoundingThreshold: Int {
+        let value = UserDefaults.standard.integer(forKey: Constants.Defaults.timeRoundingThreshold)
+        return value >= 0 ? value : 0
+    }
+
     private func isFeatureEnabled(_ key: String) -> Bool {
         if let value = UserDefaults.standard.object(forKey: key) as? Bool {
             return value
@@ -412,16 +419,32 @@ final class StatusBarController: NSObject {
             if event.isHappening {
                 let remaining = event.endDate.timeIntervalSince(now)
                 let minutes = Int(remaining / 60)
-                return "(ends \(minutes)m)"
+                let threshold = currentRoundingThreshold
+
+                if threshold > 0 && minutes >= threshold * 60 {
+                    let hours = Int(round(Double(minutes) / 60.0))
+                    return "(ends \(hours)h)"
+                } else if minutes < 60 {
+                    return "(ends \(minutes)m)"
+                } else {
+                    let hours = minutes / 60
+                    let mins = minutes % 60
+                    return mins == 0 ? "(ends \(hours)h)" : "(ends \(hours)h\(mins)m)"
+                }
             } else {
                 let timeUntil = event.startDate.timeIntervalSince(now)
                 let minutes = Int(timeUntil / 60)
+                let threshold = currentRoundingThreshold
 
-                if minutes < 60 {
+                if threshold > 0 && minutes >= threshold * 60 {
+                    let hours = Int(round(Double(minutes) / 60.0))
+                    return "in \(hours)h"
+                } else if minutes < 60 {
                     return "in \(minutes)m"
                 } else {
                     let hours = minutes / 60
-                    return "in \(hours)h"
+                    let mins = minutes % 60
+                    return mins == 0 ? "in \(hours)h" : "in \(hours)h\(mins)m"
                 }
             }
 

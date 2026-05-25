@@ -30,6 +30,7 @@ enum Constants {
         static let badgePollInterval = "badgePollInterval"
         static let badgeIconSize = "badgeIconSize"
         static let timeFormat = "timeFormat"
+        static let timeRoundingThreshold = "timeRoundingThreshold"
         // Calendar provider selection ("EventKit" or "Google")
         static let calendarProvider = "calendarProvider"
         static let featureCalendar = "featureCalendar"
@@ -40,6 +41,7 @@ enum Constants {
     
     enum DefaultValues {
         static let meetingTitleMaxLength = 20
+        static let timeRoundingThreshold = 0   // 0 = always show exact (e.g. "1h31m")
         static let notificationMinutesBefore = 5
         static let noSleepDefaultDuration = 0   // 0 = infinite (no time limit)
         static let badgePollInterval = 3             // seconds between badge polls

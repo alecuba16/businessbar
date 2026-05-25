@@ -13,6 +13,7 @@ struct AppearanceTab: View {
     // MARK: - Status bar text
 
     @AppStorage(Constants.Defaults.timeFormat) private var timeFormat = "relative"
+    @AppStorage(Constants.Defaults.timeRoundingThreshold) private var timeRoundingThreshold = Constants.DefaultValues.timeRoundingThreshold
     @AppStorage(Constants.Defaults.meetingTitleMaxLength) private var titleMaxLength = Constants.DefaultValues.meetingTitleMaxLength
 
     var body: some View {
@@ -37,6 +38,24 @@ struct AppearanceTab: View {
                     Text("Absolute (\"10:00\")").tag("absolute")
                 }
                 .pickerStyle(.radioGroup)
+
+                if timeFormat == "relative" {
+                    VStack(alignment: .leading) {
+                        Text("Time rounding threshold:")
+                        HStack {
+                            Slider(value: Binding(
+                                get: { Double(timeRoundingThreshold) },
+                                set: { timeRoundingThreshold = Int($0) }
+                            ), in: 0...12, step: 1)
+                            Text(roundingLabel)
+                                .foregroundColor(.secondary)
+                                .frame(width: 160, alignment: .leading)
+                        }
+                        Text("0 = always exact (\"1h31m\"). 1+ = round to whole hours when ≥ that many hours away.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
 
             // MARK: Badge Icons
@@ -148,15 +167,27 @@ struct AppearanceTab: View {
 
     // MARK: - Helpers
 
+    private var roundingLabel: String {
+        if timeRoundingThreshold == 0 {
+            return "Always exact"
+        } else {
+            return "Round when ≥\(timeRoundingThreshold)h away"
+        }
+    }
+
     private var previewMeetingText: String {
         let truncated = "Team Standup".truncated(to: titleMaxLength)
         switch timeFormat {
         case "relative":
-            return "\(truncated) in 12m  "
+            if timeRoundingThreshold > 0 && timeRoundingThreshold <= 1 {
+                return "\(truncated) in 2h  "
+            } else {
+                return "\(truncated) in 1h31m  "
+            }
         case "absolute":
             return "\(truncated) (10:00-10:30)  "
         default:
-            return "\(truncated) in 12m  "
+            return "\(truncated) in 1h31m  "
         }
     }
 }
