@@ -53,8 +53,9 @@ If Apple ships the plugins inside CLT itself, the build helper goes silent
 on its own and the stash becomes unnecessary.
 
 Limitation: running the XCTest suite still needs full Xcode: XCTest.framework
-is also Xcode-only. Under CLT, `make test` builds the suite but fails at
-launch with a dyld error for XCTest.framework.
+is also Xcode-only. Under CLT, `make test` fails to compile the suite:
+swiftc cannot resolve the XCTest module at build time, so the tests never
+launch at all.
 
 ### Building the Project
 
