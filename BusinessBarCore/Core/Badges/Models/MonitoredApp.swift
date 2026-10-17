@@ -18,10 +18,23 @@ public struct MonitoredApp: Identifiable, Hashable, Codable {
 
     /// Resolves the app icon, handling both `.app` bundle directories and bare
     /// `.icns` file paths. Falls back to looking up by bundle identifier.
+    ///
+    /// Resolution hits the disk (NSWorkspace / file reads), so results are
+    /// cached per bundle identifier. Icons are app-static; a stale entry only
+    /// survives until relaunch or an app update, which is acceptable here.
     public var icon: NSImage? {
-        // If iconPath points to a .app bundle directory, use NSWorkspace which
-        // handles asset-catalogue icons correctly. Fall back to direct file load
-        // for bare .icns paths, then look up by bundle identifier.
+        if let cached = Self.iconCache.object(forKey: bundleIdentifier as NSString) {
+            return cached
+        }
+
+        let resolved = resolveIcon()
+        if let resolved {
+            Self.iconCache.setObject(resolved, forKey: bundleIdentifier as NSString)
+        }
+        return resolved
+    }
+
+    private func resolveIcon() -> NSImage? {
         if let iconPath {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: iconPath, isDirectory: &isDir), isDir.boolValue {
@@ -36,4 +49,8 @@ public struct MonitoredApp: Identifiable, Hashable, Codable {
         }
         return nil
     }
+
+    /// NSCache so the system can evict under memory pressure instead of
+    /// pinning every icon for the app's lifetime.
+    private static let iconCache = NSCache<NSString, NSImage>()
 }
