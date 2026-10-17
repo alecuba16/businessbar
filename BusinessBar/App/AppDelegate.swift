@@ -21,6 +21,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferencesWindowController: PreferencesWindowController?
     private var onboardingWindowController: OnboardingWindowController?
 
+    // Backing managers for the SwiftUI Settings scene. Created lazily so a
+    // first launch does not pay for them before managers initialize.
+    private lazy var lazyBadgeManager = BadgeManager()
+    private lazy var lazyMeetingManager = MeetingManager(eventStore: EKEventStoreAdapter())
+
+    /// Managers handed to the SwiftUI `Settings` scene. Reuse the live
+    /// managers when they exist so both windows observe the same state.
+    var preferencesBadgeManager: BadgeManager { badgeManager ?? lazyBadgeManager }
+    var preferencesMeetingManager: MeetingManager { meetingManager ?? lazyMeetingManager }
+
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - NSApplicationDelegate
