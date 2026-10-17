@@ -13,6 +13,9 @@ public final class MeetingManager: ObservableObject {
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "Meeting")
 
     private let eventStore: EventStoreProtocol
+    /// Injectable clock. Tests pass a closure over a mutable date to simulate
+    /// midnight rollover without waiting for a real day change.
+    private let nowProvider: () -> Date
     private var cancellables = Set<AnyCancellable>()
 
     /// Dismissed event IDs are pruned to IDs still present in the current
@@ -43,8 +46,9 @@ public final class MeetingManager: ObservableObject {
         return true
     }
 
-    public init(eventStore: EventStoreProtocol) {
+    public init(eventStore: EventStoreProtocol, nowProvider: @escaping () -> Date = Date.init) {
         self.eventStore = eventStore
+        self.nowProvider = nowProvider
         self.lastFeatureState = Self.calendarFeatureEnabled()
 
         setupEventStoreObserver()
@@ -102,7 +106,7 @@ public final class MeetingManager: ObservableObject {
             }
 
             let showTomorrow = showTomorrowEvents
-            let window = EventDisplayPlanner.fetchWindow(includeTomorrow: showTomorrow)
+            let window = EventDisplayPlanner.fetchWindow(now: nowProvider(), includeTomorrow: showTomorrow)
 
             var fetchedEvents = try await eventStore.fetchEvents(
                 from: window.start,
@@ -149,9 +153,9 @@ public final class MeetingManager: ObservableObject {
         nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs)
     }
 
-    private func hasDayChangedSinceLastFetch(now: Date = Date(), calendar: Calendar = .current) -> Bool {
+    private func hasDayChangedSinceLastFetch(calendar: Calendar = .current) -> Bool {
         guard let lastFetchDayStart else { return false }
-        return calendar.startOfDay(for: now) != lastFetchDayStart
+        return calendar.startOfDay(for: nowProvider()) != lastFetchDayStart
     }
 
     /// Drops dismissed IDs that no longer appear in the fetched events,
