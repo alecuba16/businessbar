@@ -1,8 +1,9 @@
 import Foundation
 
 public extension Date {
-    func relativeString() -> String {
-        let now = Date()
+    /// - Parameter now: reference instant; pass a fixed date in tests to keep
+    ///   them deterministic.  Defaults to the current time for production use.
+    func relativeString(now: Date = Date()) -> String {
         let interval = self.timeIntervalSince(now)
         
         if interval < 0 {
