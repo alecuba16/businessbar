@@ -5,6 +5,8 @@
 APP_NAME  = BusinessBar
 INSTALL   = /Applications/$(APP_NAME).app
 DEBUG_BIN = .build/debug/$(APP_NAME)
+# Empty under full Xcode; CLT builds need the SwiftUI macro plugin flags.
+PLUGIN_FLAGS = $(shell scripts/swift-clt-plugins.sh flags 2>/dev/null)
 
 # ── Default ────────────────────────────────────────────────────────────────────
 all: app
@@ -12,12 +14,12 @@ all: app
 # ── Swift build ────────────────────────────────────────────────────────────────
 build:
 	@echo "Building $(APP_NAME) (debug)…"
-	@swift build
+	@swift build $(PLUGIN_FLAGS)
 	@echo "Done → $(DEBUG_BIN)"
 
 release:
 	@echo "Building $(APP_NAME) (release)…"
-	@swift build -c release
+	@swift build -c release $(PLUGIN_FLAGS)
 	@echo "Done → .build/release/$(APP_NAME)"
 
 # ── .app bundle ────────────────────────────────────────────────────────────────
@@ -55,7 +57,12 @@ run: app
 # ── Tests ─────────────────────────────────────────────────────────────────────
 test:
 	@echo "Running tests…"
-	@swift test
+	@swift test $(PLUGIN_FLAGS)
+
+# Stash the SwiftUI macro plugin dylibs from an installed Xcode into the
+# gitignored Vendor/ dir, so CLT builds keep working without Xcode.
+plugins-refresh:
+	@scripts/swift-clt-plugins.sh refresh
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 setup:
@@ -84,5 +91,6 @@ help:
 	@echo "  make dmg         → snapshot .app + versioned DMG"
 	@echo "  make test        → run unit tests"
 	@echo "  make setup       → resolve SPM dependencies"
+	@echo "  make plugins-refresh → stash SwiftUI macro plugins from Xcode (CLT builds)"
 	@echo "  make xcode       → open in Xcode"
 	@echo "  make clean       → delete .build, .app, .dmg"

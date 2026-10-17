@@ -16,6 +16,10 @@ echo ""
 echo "📋 Checking Swift version..."
 swift --version
 
+# Under Command Line Tools the SwiftUI macro plugins must be added to the
+# compile; with full Xcode selected the helper prints nothing.
+SWIFT_PLUGIN_FLAGS="$("$PROJECT_DIR/scripts/swift-clt-plugins.sh" flags)"
+
 # Clean build directory
 if [ "$1" == "clean" ]; then
     echo "🧹 Cleaning build directory..."
@@ -32,10 +36,10 @@ swift package resolve
 # Build the project
 echo "🔨 Building BusinessBar..."
 if [ "$1" == "release" ]; then
-    swift build -c release
+    swift build -c release $SWIFT_PLUGIN_FLAGS
     echo "✅ Release build complete: .build/release/BusinessBar"
 else
-    swift build
+    swift build $SWIFT_PLUGIN_FLAGS
     echo "✅ Debug build complete: .build/debug/BusinessBar"
 fi
 

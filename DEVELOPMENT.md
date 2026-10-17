@@ -4,8 +4,29 @@
 
 ### Prerequisites
 - macOS 14.0+ (Sonoma or later)
-- Xcode 15.0+
+- Xcode 15.0+ (or Command Line Tools, see below)
 - Swift 6.0+
+
+### Building with Command Line Tools only
+
+The macOS 26 SDK implements SwiftUI `@State` and `#Preview` as external
+Swift macros. Their plugin dylibs (`libSwiftUIMacros.dylib`,
+`libPreviewsMacros.dylib`) ship only inside full Xcode, not in CLT, so a bare
+`swift build` under CLT fails with `plugin for module 'SwiftUIMacros' not found`.
+
+The repo's build entry points (`make`, `build.sh`, `bundle_app.sh`) handle
+this automatically via `scripts/swift-clt-plugins.sh`: under CLT they add the
+missing `-plugin-path` flags, resolved from a vendored stash first and from a
+live Xcode install second. With full Xcode selected nothing changes.
+
+To build without Xcode installed, stash the dylibs once while it is still
+installed: `make plugins-refresh` (copies ~2 MB into the gitignored
+`Vendor/SwiftMacroPlugins/`). The stash is version-locked to the SDK, so
+re-run it after any macOS SDK / CLT update.
+
+Limitation: running the XCTest suite still needs full Xcode: XCTest.framework
+is also Xcode-only. Under CLT, `make test` builds the suite but fails at
+launch with a dyld error for XCTest.framework.
 
 ### Building the Project
 
