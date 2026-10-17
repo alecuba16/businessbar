@@ -113,7 +113,7 @@ The `sparkle_appcast_url` and `sparkle_public_ed_key` fields are optional — le
 
 This file is **gitignored** and takes precedence over the placeholder `credentials.json` at runtime. When you run `swift run` or `./bundle_app.sh`, the app loads credentials from `credentials.local.json` first.
 
-> **Note:** The `Info.plist` URL scheme (`com.googleusercontent.apps.YOUR_GOOGLE_CLIENT_NUMBER`) is also patched automatically by `bundle_app.sh` at build time. For `swift run`, the redirect is handled by the app's URL event handler regardless.
+> **Note:** The `Info.plist` URL scheme (`com.googleusercontent.apps.YOUR_GOOGLE_CLIENT_NUMBER`) is also patched automatically by `bundle_app.sh` at build time. For `swift run` or `make run`, the redirect is handled by the app's URL event handler regardless. Under Command Line Tools without full Xcode use `make run` (or `./bundle_app.sh`); a bare `swift run` misses the SwiftUI macro plugin flags, see [DEVELOPMENT.md](/DEVELOPMENT.md).
 
 #### GitHub Actions Configuration
 
