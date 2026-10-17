@@ -439,21 +439,11 @@ final class StatusBarController: NSObject {
             }
         }
 
-        // Add status items for newly monitored apps.
-        for bundleID in monitoredBundleIDs.subtracting(currentBundleIDs) {
-            let item = NSStatusBar.system.statusItem(withLength: iconSize)
-            badgeStatusItems[bundleID] = item
-            if let button = item.button {
-                button.target = self
-                button.action = #selector(badgeStatusItemClicked(_:))
-            }
-        }
-
-        // Update icon + visibility for every monitored app.
+        // A zero-length NSStatusItem still renders its button's ~2px padding,
+        // so hidden items are fully removed instead of collapsed via `length = 0`.
+        var bundleIDsToHide: Set<String> = []
         for app in monitoredApps {
             let bundleID = app.bundleIdentifier
-            guard let item = badgeStatusItems[bundleID],
-                  let button = item.button else { continue }
 
             let count     = badges[bundleID] ?? 0
             let isRunning = runningBundleIDs.contains(bundleID)
@@ -463,8 +453,11 @@ final class StatusBarController: NSObject {
             // without toasting so we don't fire on pre-existing unread counts.
             let previousCount = previousBadgeCounts[bundleID]
             previousBadgeCounts[bundleID] = count
-            if let prev = previousCount, count > prev, count > 0 {
-                showToast(for: app, count: count, anchoredTo: button)
+            if let prev = previousCount, count > prev, count > 0,
+               badgeStatusItems[bundleID] != nil {
+                if let button = badgeStatusItems[bundleID]?.button {
+                    showToast(for: app, count: count, anchoredTo: button)
+                }
             }
 
             // Hide when there are no notifications (counts as 0) and the relevant
@@ -472,14 +465,41 @@ final class StatusBarController: NSObject {
             // is the broader condition.
             let shouldHide = count == 0 && (hideWhenNoNotification || (hideWhenNotRunning && !isRunning))
             if shouldHide {
-                item.length = 0
-                button.image = nil
-                continue
+                bundleIDsToHide.insert(bundleID)
             }
+        }
+
+        // Remove items whose app must stay hidden (recreated when it becomes visible).
+        for bundleID in bundleIDsToHide {
+            if let item = badgeStatusItems[bundleID] {
+                NSStatusBar.system.removeStatusItem(item)
+                badgeStatusItems.removeValue(forKey: bundleID)
+            }
+            renderedBadgeImages.removeValue(forKey: bundleID)
+        }
+
+        // Add status items for newly monitored apps and for apps that became visible again.
+        for app in monitoredApps {
+            let bundleID = app.bundleIdentifier
+            guard !bundleIDsToHide.contains(bundleID), badgeStatusItems[bundleID] == nil else { continue }
+            let item = NSStatusBar.system.statusItem(withLength: iconSize)
+            badgeStatusItems[bundleID] = item
+            if let button = item.button {
+                button.target = self
+                button.action = #selector(badgeStatusItemClicked(_:))
+            }
+        }
+
+        for app in monitoredApps {
+            let bundleID = app.bundleIdentifier
+            guard let item = badgeStatusItems[bundleID],
+                  let button = item.button else { continue }
+
             item.length = iconSize
 
             guard let icon = app.icon else { continue }
 
+            let count = badges[bundleID] ?? 0
             let cached = renderedBadgeImages[bundleID]
             if cached?.count == count, button.image != nil {
                 continue

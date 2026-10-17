@@ -5,6 +5,10 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Fixed
+- Hidden badge icons no longer leave an empty spacer in the menu bar. Collapsing via `NSStatusItem.length = 0` still renders the button's ~2px padding, so an app hidden by "Hide when no notifications" showed up as a gap between its neighbours. Hidden items are now removed from the status bar and recreated when the app becomes visible again. Removal happens only when the hidden/shown state flips, so badge polling causes no extra work
+
 ## [1.2.4] - 2026-10-17
 ### Fixed
 - Released DMGs now include an `/Applications` symlink next to the app, so the mounted image supports drag-to-Applications install. `hdiutil` was imaging the `.app` alone in both `bundle_app.sh` and the release workflow's separate DMG step; both now stage the app in a temp dir with the symlink before imaging
