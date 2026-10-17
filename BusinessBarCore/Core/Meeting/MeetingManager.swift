@@ -13,15 +13,28 @@ public final class MeetingManager: ObservableObject {
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "Meeting")
 
     private let eventStore: EventStoreProtocol
+    /// Injectable clock. Tests pass a closure over a mutable date to simulate
+    /// midnight rollover without waiting for a real day change.
+    private let nowProvider: () -> Date
     private var cancellables = Set<AnyCancellable>()
 
+    /// Dismissed event IDs are pruned to IDs still present in the current
+    /// fetch window on every refresh, so the set cannot grow without bound
+    /// across weeks of 24/7 uptime.
     private var dismissedEventIDs = Set<String>()
+
+    /// Start of the day the last successful fetch covered. Used by the
+    /// periodic tick to detect midnight rollover and trigger a full refresh
+    /// so the fetch window advances to the new day.
+    private var lastFetchDayStart: Date?
     private var lastFeatureState: Bool {
         didSet {
             if !lastFeatureState {
                 events = []
                 nextEvent = nil
                 calendars = []
+                dismissedEventIDs.removeAll()
+                lastFetchDayStart = nil
             }
         }
     }
@@ -33,8 +46,9 @@ public final class MeetingManager: ObservableObject {
         return true
     }
 
-    public init(eventStore: EventStoreProtocol) {
+    public init(eventStore: EventStoreProtocol, nowProvider: @escaping () -> Date = Date.init) {
         self.eventStore = eventStore
+        self.nowProvider = nowProvider
         self.lastFeatureState = Self.calendarFeatureEnabled()
 
         setupEventStoreObserver()
@@ -66,7 +80,7 @@ public final class MeetingManager: ObservableObject {
         } catch {
             // Expected during first launch (permission not yet granted) or
             // when Google provider is selected but not yet signed in.
-            // Not printed — callers handle the empty-list state via UI.
+            // Callers handle the empty-list state via UI.
         }
     }
 
@@ -74,6 +88,7 @@ public final class MeetingManager: ObservableObject {
         guard Self.calendarFeatureEnabled() else {
             events = []
             nextEvent = nil
+            lastFetchDayStart = nil
             return
         }
         guard !isLoading else { return }
@@ -90,28 +105,30 @@ public final class MeetingManager: ObservableObject {
                 return
             }
 
-        let calendar = Calendar.current
-        let now = Date()
-        let startOfToday = calendar.startOfDay(for: now)
-        let startOfTomorrow = calendar.date(byAdding: .day, value: 1, to: startOfToday)!
-        let endDate = showTomorrowEvents
-            ? calendar.date(byAdding: .day, value: 2, to: startOfToday)!
-            : startOfTomorrow
+            let showTomorrow = showTomorrowEvents
+            let window = EventDisplayPlanner.fetchWindow(now: nowProvider(), includeTomorrow: showTomorrow)
 
-        var fetchedEvents = try await eventStore.fetchEvents(
-            from: startOfToday,
-            to: endDate,
-            calendars: selectedCalendarIDs
-        )
+            var fetchedEvents = try await eventStore.fetchEvents(
+                from: window.start,
+                to: window.end,
+                calendars: selectedCalendarIDs
+            )
 
-        fetchedEvents = filterEvents(fetchedEvents)
-        if !showTomorrowEvents {
-            fetchedEvents = fetchedEvents.filter { $0.startDate < startOfTomorrow }
-        }
+            pruneDismissedIDs(keeping: fetchedEvents)
+
+            fetchedEvents = EventDisplayPlanner.filter(
+                fetchedEvents,
+                dismissedIDs: dismissedEventIDs,
+                showDeclined: UserDefaults.standard.bool(forKey: Constants.Defaults.showDeclinedEvents)
+            )
+            if !showTomorrow {
+                fetchedEvents = fetchedEvents.filter { $0.startDate < window.end }
+            }
             fetchedEvents.sort { $0.startDate < $1.startDate }
 
             events = fetchedEvents
-            nextEvent = calculateNextEvent()
+            nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs)
+            lastFetchDayStart = window.start
         } catch {
             Self.logger.error("Failed to refresh events: \(error.localizedDescription)")
         }
@@ -119,41 +136,33 @@ public final class MeetingManager: ObservableObject {
 
     public func dismissEvent(_ eventID: String) {
         dismissedEventIDs.insert(eventID)
-        nextEvent = calculateNextEvent()
+        nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs)
     }
 
-    /// Lightweight recalculation of `nextEvent` from the cached events array.
-    /// Call periodically so ended events are pruned without a full network/store refresh.
+    /// Recalculation of `nextEvent` from the cached events array, plus day
+    /// rollover detection: when the calendar day changed since the last
+    /// successful fetch, kicks a full `refreshEvents()` so the fetch window
+    /// advances. The tick stays responsive either way: the cache-based
+    /// recalculation below runs immediately, the refresh lands async.
     public func recalculateNextEvent() {
-        nextEvent = calculateNextEvent()
-    }
-
-    private func filterEvents(_ events: [CalendarEvent]) -> [CalendarEvent] {
-        let showDeclined = UserDefaults.standard.bool(forKey: Constants.Defaults.showDeclinedEvents)
-
-        return events.filter { event in
-            if dismissedEventIDs.contains(event.id) {
-                return false
-            }
-
-            if !showDeclined && event.status == .canceled {
-                return false
-            }
-
-            return true
-        }
-    }
-
-    private func calculateNextEvent() -> CalendarEvent? {
-        let now = Date()
-
-        for event in events where !dismissedEventIDs.contains(event.id) {
-            if event.endDate > now {
-                return event
+        if hasDayChangedSinceLastFetch() {
+            Task { @MainActor [weak self] in
+                await self?.refreshEvents()
             }
         }
+        nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs)
+    }
 
-        return nil
+    private func hasDayChangedSinceLastFetch(calendar: Calendar = .current) -> Bool {
+        guard let lastFetchDayStart else { return false }
+        return calendar.startOfDay(for: nowProvider()) != lastFetchDayStart
+    }
+
+    /// Drops dismissed IDs that no longer appear in the fetched events,
+    /// keeping the set bounded to the visible window.
+    private func pruneDismissedIDs(keeping fetchedEvents: [CalendarEvent]) {
+        let currentIDs = Set(fetchedEvents.map { $0.id })
+        dismissedEventIDs = dismissedEventIDs.intersection(currentIDs)
     }
 
     private func getSelectedCalendarIDs() -> [String] {

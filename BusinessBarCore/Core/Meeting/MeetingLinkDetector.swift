@@ -1,6 +1,16 @@
 import Foundation
 
 public final class MeetingLinkDetector {
+    /// Compiled regexes are expensive; the service patterns are immutable,
+    /// so compile each once and reuse across all lookups.
+    private static let compiledPatterns: [(service: MeetingService, regex: NSRegularExpression)] =
+        MeetingService.allCases.compactMap { service in
+            guard let regex = try? NSRegularExpression(pattern: service.pattern, options: [.caseInsensitive]) else {
+                return nil
+            }
+            return (service, regex)
+        }
+
     public static func detectMeetingLink(in event: CalendarEvent) -> URL? {
         let searchTexts = [
             event.url?.absoluteString,
@@ -12,25 +22,18 @@ public final class MeetingLinkDetector {
 
     /// Scans a free-form string for any recognised meeting URL.
     public static func detectMeetingLink(in text: String) -> URL? {
-        for service in MeetingService.allCases {
-            if let url = findURL(in: text, matching: service.pattern) {
+        let range = NSRange(text.startIndex..., in: text)
+        for (_, regex) in compiledPatterns {
+            if let url = findURL(in: text, regex: regex, range: range) {
                 return url
             }
         }
         return nil
     }
 
-    private static func findURL(in text: String, matching pattern: String) -> URL? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-
-        let range = NSRange(text.startIndex..., in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: range) else {
-            return nil
-        }
-
-        guard let matchRange = Range(match.range, in: text) else {
+    private static func findURL(in text: String, regex: NSRegularExpression, range: NSRange) -> URL? {
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              let matchRange = Range(match.range, in: text) else {
             return nil
         }
 
