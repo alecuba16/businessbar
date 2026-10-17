@@ -29,7 +29,11 @@ A unified macOS menu bar application combining three essential functionalities:
 ## Requirements
 
 - macOS 14.0 (Sonoma) or later
-- Xcode 15.0 or later for building
+- Building: Command Line Tools alone suffice. Full Xcode is optional; see
+  DEVELOPMENT.md ("Building with Command Line Tools only") for the SwiftUI
+  macro plugin setup. Running the XCTest suite still needs Xcode.
+- Updating the plugin stash after major CLT/SDK updates: full Xcode briefly,
+  or the "Refresh Swift Macro Plugins" GitHub workflow (no local Xcode).
 
 ## Installation
 

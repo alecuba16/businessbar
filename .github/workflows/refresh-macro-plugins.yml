@@ -1,0 +1,69 @@
+name: Refresh Swift Macro Plugins
+
+# Re-stashes the SwiftUI macro plugin dylibs (libSwiftUIMacros,
+# libPreviewsMacros) from a GitHub-hosted full Xcode install into a CI
+# artifact, so local CLT-only builds keep working without owning Xcode.
+#
+# The macOS 26+ SDK implements SwiftUI @State and #Preview as external
+# Swift macros whose plugin dylibs ship only inside Xcode.app. The
+# gitignored Vendor/SwiftMacroPlugins/ stash is version-locked to the
+# toolchain: re-run this workflow after every major CLT / SDK update,
+# download the artifact, and drop the two dylibs into Vendor/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: 'Reason for refresh (optional, shown in artifact name)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    # xcode-27 image: macOS 27 + full Xcode 27 toolchain (arm64).
+    # Matches the local toolchain this repo builds with (Swift 6.4).
+    runs-on: xcode-27
+
+    steps:
+      - name: Report toolchain
+        run: |
+          sw_vers
+          xcode-select -p
+          xcodebuild -version
+          swift --version | head -1
+
+      - name: Extract macro plugin dylibs
+        run: |
+          PLUGINS="$(xcode-select -p)/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins"
+          mkdir -p SwiftMacroPlugins
+          for dylib in libSwiftUIMacros.dylib libPreviewsMacros.dylib; do
+            if [ -f "$PLUGINS/$dylib" ]; then
+              cp "$PLUGINS/$dylib" "SwiftMacroPlugins/$dylib"
+              echo "  stashed $dylib ($(du -h "SwiftMacroPlugins/$dylib" | cut -f1))"
+            else
+              echo "error: $dylib not found in $PLUGINS" >&2
+              exit 1
+            fi
+          done
+          # Record what these dylibs were built against, so a stale stash is
+          # easy to diagnose: compare against local `swift --version`.
+          swift --version > SwiftMacroPlugins/TOOLCHAIN.txt
+          xcodebuild -version >> SwiftMacroPlugins/TOOLCHAIN.txt
+          sw_vers >> SwiftMacroPlugins/TOOLCHAIN.txt
+
+      - name: Upload stash
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-macro-plugins${{ inputs.note != '' && format('-{0}', inputs.note) || '' }}
+          retention-days: 90
+          path: SwiftMacroPlugins/
+
+      - name: Instructions
+        run: |
+          echo "Download the artifact and copy the dylibs into Vendor/SwiftMacroPlugins/:"
+          echo "  gh run download <run-id> -n <artifact-name> -D /tmp/plugins"
+          echo "  cp /tmp/plugins/SwiftMacroPlugins/*.dylib Vendor/SwiftMacroPlugins/"
+          echo "Then: make plugins-refresh  # to verify the helper picks them up"

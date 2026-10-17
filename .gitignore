@@ -42,3 +42,6 @@ BusinessBar.app
 # Secrets — credentials.local.json and .env contain real OAuth secrets
 BusinessBar/Resources/credentials.local.json
 .env
+
+# SwiftUI macro plugins stashed from Xcode (Apple binaries, do not commit)
+Vendor/SwiftMacroPlugins/

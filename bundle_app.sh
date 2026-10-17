@@ -90,8 +90,16 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$PROJECT_DIR/BusinessBar/Resources"
 ENTITLEMENTS="$RESOURCES_DIR/BusinessBar.entitlements"
 
-# Path to the SPM-built resource bundle that contains credentials.json
-BUILT_BUNDLE="$PROJECT_DIR/.build/${ARCH}/release/BusinessBar_BusinessBar.bundle"
+# Path to the SPM-built resource bundle that contains credentials.json.
+# SwiftBuild (the swift build default now) puts resource bundles under
+# .build/out/Products/<Config>/ with a Contents/Resources/ layout; the older
+# llbuild engine used .build/<arch>/<config>/ with a flat layout. Resolve
+# whichever exists so credentials injection works on both.
+if [ -d "$PROJECT_DIR/.build/out/Products/Release" ]; then
+    BUILT_BUNDLE="$PROJECT_DIR/.build/out/Products/Release/BusinessBar_BusinessBar.bundle/Contents/Resources"
+else
+    BUILT_BUNDLE="$PROJECT_DIR/.build/${ARCH}/release/BusinessBar_BusinessBar.bundle"
+fi
 
 # ── Step 0 — Read credentials (from .local.json / .env) ─────────────────────
 # Credentials are gathered early so they are available for post-build
@@ -227,7 +235,10 @@ PY
 patch_keyboard_shortcuts
 
 echo "==> Building release binary..."
-swift build -c release
+# Under CLT the SwiftUI macro plugins must be injected; helper prints
+# nothing when the full Xcode toolchain is active.
+SWIFT_PLUGIN_FLAGS="$("$PROJECT_DIR/scripts/swift-clt-plugins.sh" flags)"
+swift build -c release $SWIFT_PLUGIN_FLAGS
 
 # ── Step 2 — Inject credentials into BUILT artifacts ────────────────────────
 # Patch the credentials.json inside the SPM-built resource bundle, NOT the
@@ -372,7 +383,11 @@ RESOURCES_DEST="$APP/Contents/Resources"
 ICON_GENERATED=false
 
 # Strategy 1: Compile Assets.xcassets with actool → produces Assets.car
-if [ -d "$ASSETS_SRC" ] && command -v actool &>/dev/null; then
+# actool lives only in full Xcode; the /usr/bin stub under CLT always fails,
+# so probing it there just prints a scary xcode-select error before the
+# iconutil fallback saves us. Only attempt actool with a real developer dir.
+if [ -d "$ASSETS_SRC" ] && command -v actool &>/dev/null \
+   && xcode-select -p 2>/dev/null | grep -qv CommandLineTools; then
     echo "  ▶ Compiling Assets.xcassets with actool…"
     if actool \
         --output-format human-readable-text \

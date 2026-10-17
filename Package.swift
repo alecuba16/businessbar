@@ -48,10 +48,16 @@ let package = Package(
                 "Resources/BusinessBar.entitlements",
                 "Resources/AppIcon.icns",
                 "Resources/credentials.local.json.example",
-                "Resources/credentials.local.json"
+                "Resources/credentials.local.json",
+                // Excluded on purpose: SwiftPM runs an actool version probe for
+                // any .xcassets in the build, regardless of .process or .copy,
+                // and actool exists only in full Xcode. Nothing loads from this
+                // catalog at runtime (icons render from SF Symbols; the app icon
+                // ships as AppIcon.icns via bundle_app.sh), so excluding it
+                // keeps the package buildable with Command Line Tools alone.
+                "Resources/Assets.xcassets"
             ],
             resources: [
-                .process("Resources/Assets.xcassets"),
                 .process("Resources/en.lproj"),
                 .copy("Resources/credentials.json")
             ]
