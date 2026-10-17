@@ -15,7 +15,7 @@ on:
 
 jobs:
   dmg:
-    runs-on: macos-15
+    runs-on: xcode-27
     permissions:
       contents: write
 

@@ -24,6 +24,34 @@ installed: `make plugins-refresh` (copies ~2 MB into the gitignored
 `Vendor/SwiftMacroPlugins/`). The stash is version-locked to the SDK, so
 re-run it after any macOS SDK / CLT update.
 
+### Refreshing the macro plugin stash
+
+The stash in `Vendor/SwiftMacroPlugins/` is version-locked to the Swift
+frontend and SDK that built it. It goes stale after a major CLT or macOS
+SDK update; symptoms are `plugin for module 'SwiftUIMacros' not found` or a
+frontend crash during macro expansion. When that happens, re-stash from any
+full Xcode 27+ install that matches your CLT's Swift version:
+
+1. **GitHub workflow (no local Xcode needed):** Actions tab → *Refresh
+   Swift Macro Plugins* → *Run workflow*. It extracts the two dylibs from
+   the hosted Xcode 27 image and uploads them as an artifact. Download, then:
+   ```
+   cp <artifact>/SwiftMacroPlugins/*.dylib Vendor/SwiftMacroPlugins/
+   make release   # verify the build is green again
+   ```
+   The artifact includes `TOOLCHAIN.txt` (Swift, Xcode, and macOS versions
+   it was built against); compare with your local `swift --version`.
+2. **Local Xcode:** `make plugins-refresh` while Xcode is installed, then
+   delete it again if you want.
+3. **Another Mac:** copy the two dylibs from
+   `<Xcode>/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins/`
+   into `Vendor/SwiftMacroPlugins/`.
+
+Summary: building needs CLT only, refreshing the stash needs full Xcode,
+but only briefly (a workflow run, a temporary install, or a borrowed Mac).
+If Apple ships the plugins inside CLT itself, the build helper goes silent
+on its own and the stash becomes unnecessary.
+
 Limitation: running the XCTest suite still needs full Xcode: XCTest.framework
 is also Xcode-only. Under CLT, `make test` builds the suite but fails at
 launch with a dyld error for XCTest.framework.
