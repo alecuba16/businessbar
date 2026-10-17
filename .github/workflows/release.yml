@@ -54,26 +54,15 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-spm-
 
-    - name: Build, assemble and sign
+    - name: Build, assemble, sign and create DMG
       run: |
         VERSION=${GITHUB_REF_NAME#v}
         echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "DMG_NAME=BusinessBar-${VERSION}.dmg" >> "$GITHUB_ENV"
 
-        ./bundle_app.sh "$VERSION" "${{ github.run_number }}"
-
-    - name: Create DMG
-      run: |
-        set -euo pipefail
-        VERSION="${{ env.VERSION }}"
-        DMG="BusinessBar-${VERSION}.dmg"
-
-        hdiutil create \
-          -volname "BusinessBar ${VERSION}" \
-          -srcfolder BusinessBar.app \
-          -ov -format UDZO \
-          "$DMG"
-
-        echo "DMG_NAME=$DMG" >> "$GITHUB_ENV"
+        # The dmg flag stages the app next to an /Applications symlink
+        # before imaging, so the mounted DMG supports drag-install.
+        ./bundle_app.sh "$VERSION" "${{ github.run_number }}" dmg
 
     - name: Upload DMG artifact
       uses: actions/upload-artifact@v4
