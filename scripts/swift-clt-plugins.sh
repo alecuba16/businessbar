@@ -34,6 +34,19 @@ VENDORED_DIR="$REPO_ROOT/Vendor/SwiftMacroPlugins"
 XCODE_PLUGINS="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins"
 DYLIBS=(libSwiftUIMacros.dylib libPreviewsMacros.dylib)
 
+# CLT's own plugin dir. Apple does not ship the SwiftUI macro plugins there
+# today; if a future CLT does, the flags become unnecessary and this helper
+# goes silent on its own.
+CLT_PLUGINS="/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins"
+
+clt_has_plugins() {
+    local i
+    for i in "${DYLIBS[@]}"; do
+        [ -f "$CLT_PLUGINS/$i" ] || return 1
+    done
+    return 0
+}
+
 # The stub at /usr/bin/actool exists under CLT too, so resolve the real
 # developer dir the way swift-frontend does.
 active_developer_dir() {
@@ -60,6 +73,7 @@ plugin_source_dir() {
 
 cmd_flags() {
     is_clt || return 0
+    clt_has_plugins && return 0
     local dir
     if ! dir="$(plugin_source_dir)"; then
         echo "error: building under Command Line Tools needs the SwiftUI macro plugins" >&2
