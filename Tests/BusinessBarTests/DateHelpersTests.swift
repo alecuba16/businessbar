@@ -4,44 +4,45 @@ import XCTest
 final class DateHelpersTests: XCTestCase {
 
     // MARK: - relativeString()
+    // All relativeString tests pass a fixed `now:` so results don't depend on
+    // scheduling gaps between creating the date and calling the formatter.
 
     func testRelativeString_futureDateLessThanOneMinute_returnsNow() {
-        let date = Date().addingTimeInterval(30) // 30 seconds from now
-        let result = date.relativeString()
-        XCTAssertEqual(result, "now")
+        let now = Date()
+        let date = now.addingTimeInterval(30) // 30 seconds ahead
+        XCTAssertEqual(date.relativeString(now: now), "now")
     }
 
     func testRelativeString_futureDateFiveMinutes_returnsIn5m() {
-        let date = Date().addingTimeInterval(5 * 60) // 5 minutes from now
-        let result = date.relativeString()
-        XCTAssertEqual(result, "in 5m")
+        let now = Date()
+        let date = now.addingTimeInterval(5 * 60) // 5 minutes ahead
+        XCTAssertEqual(date.relativeString(now: now), "in 5m")
     }
 
     func testRelativeString_futureDateNinetyMinutes_returnsIn1h() {
-        let date = Date().addingTimeInterval(90 * 60) // 90 minutes from now
-        let result = date.relativeString()
-        XCTAssertEqual(result, "in 1h")
+        let now = Date()
+        let date = now.addingTimeInterval(90 * 60) // 90 minutes ahead
+        XCTAssertEqual(date.relativeString(now: now), "in 1h")
     }
 
     func testRelativeString_futureDateTwentyFiveHours_returnsIn1d() {
-        let date = Date().addingTimeInterval(25 * 60 * 60) // 25 hours from now
-        let result = date.relativeString()
-        XCTAssertEqual(result, "in 1d")
+        let now = Date()
+        let date = now.addingTimeInterval(25 * 60 * 60) // 25 hours ahead
+        XCTAssertEqual(date.relativeString(now: now), "in 1d")
     }
 
     func testRelativeString_pastDate_returnsPassed() {
-        let date = Date().addingTimeInterval(-60) // 1 minute ago
-        let result = date.relativeString()
-        XCTAssertEqual(result, "passed")
+        let now = Date()
+        let date = now.addingTimeInterval(-60) // 1 minute ago
+        XCTAssertEqual(date.relativeString(now: now), "passed")
     }
 
     func testRelativeString_dateApproximatelyNow_returnsNow() {
-        // Use a tiny future offset to avoid the race between Date() inside
-        // relativeString() and the test's Date() — a bare Date() can appear
-        // in the past by microseconds, producing "passed" instead of "now".
-        let date = Date().addingTimeInterval(0.001)
-        let result = date.relativeString()
-        XCTAssertEqual(result, "now")
+        // Tiny future offset relative to the pinned `now` keeps this on the
+        // "now" side of the minute boundary regardless of test scheduling.
+        let now = Date()
+        let date = now.addingTimeInterval(0.001)
+        XCTAssertEqual(date.relativeString(now: now), "now")
     }
 
     // MARK: - timeRemaining(until:)
