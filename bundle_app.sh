@@ -534,11 +534,18 @@ if [ "$MAKE_DMG" = true ]; then
     DMG_NAME="BusinessBar-${VERSION}.dmg"
     DMG_PATH="$PROJECT_DIR/$DMG_NAME"
 
+    # Stage the app next to an /Applications symlink so users can drag
+    # the app straight into Applications from the mounted DMG.
+    DMG_STAGING="$(mktemp -d)"
+    trap 'rm -rf "$DMG_STAGING"' EXIT
+    cp -R "$APP" "$DMG_STAGING/"
+    ln -s /Applications "$DMG_STAGING/Applications"
+
     echo "▶ Creating ${DMG_NAME}…"
     rm -f "$DMG_PATH"
     hdiutil create \
         -volname "BusinessBar ${VERSION}" \
-        -srcfolder "$APP" \
+        -srcfolder "$DMG_STAGING" \
         -ov -format UDZO \
         "$DMG_PATH"
     echo "✅  ${DMG_NAME} created."
