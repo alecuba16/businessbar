@@ -1,5 +1,5 @@
 #!/bin/bash
-# swift-clt-plugins.sh — keep swift builds working under Command Line Tools.
+# swift-clt-plugins.sh : keep swift builds working under Command Line Tools.
 #
 # The macOS 26 SDK implements SwiftUI @State and #Preview as external Swift
 # macros. The macro plugin dylibs (libSwiftUIMacros, libPreviewsMacros) ship
@@ -8,10 +8,10 @@
 # developer directory is CLT, this script prints the -Xswiftc -plugin-path
 # flags Swift needs, resolved from one of:
 #
-#   1. Vendor/SwiftMacroPlugins/   — stash copied from a previously installed
+#   1. Vendor/SwiftMacroPlugins/   : stash copied from a previously installed
 #      Xcode (`scripts/swift-clt-plugins.sh refresh`). Gitignored: Apple
 #      binaries cannot be redistributed in a public repo.
-#   2. /Applications/Xcode.app     — the live plugin dir of an installed Xcode.
+#   2. /Applications/Xcode.app     : the live plugin dir of an installed Xcode.
 #
 # With full Xcode selected as developer dir the script prints nothing and
 # builds behave exactly as before.
@@ -87,7 +87,7 @@ cmd_flags() {
 
 cmd_refresh() {
     if [ ! -d "$XCODE_PLUGINS" ]; then
-        echo "error: no Xcode at $XCODE_PLUGINS — nothing to refresh from" >&2
+        echo "error: no Xcode at $XCODE_PLUGINS : nothing to refresh from" >&2
         exit 1
     fi
     mkdir -p "$VENDORED_DIR"
@@ -114,7 +114,7 @@ cmd_check() {
         echo "plugins: live Xcode at $XCODE_PLUGINS"
         exit 0
     fi
-    echo "plugins: MISSING — run scripts/swift-clt-plugins.sh refresh (needs Xcode)" >&2
+    echo "plugins: MISSING : run scripts/swift-clt-plugins.sh refresh (needs Xcode)" >&2
     exit 1
 }
 
