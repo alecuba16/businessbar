@@ -5,6 +5,18 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-10-17
+### Fixed
+- Bundled OAuth credentials: `bundle_app.sh` still looked for the built resources at the old SwiftPM llbuild layout while the toolchain emits SwiftBuild's `.build/out/Products`, so real Google OAuth values were never injected and the app shipped with placeholders. Both layouts are now resolved
+- `Package.swift` no longer passes `Assets.xcassets` to SwiftPM: `.process` on a catalog forces an `actool` invocation that only exists in full Xcode, breaking Command Line Tools-only builds. The catalog is unused at runtime (icons render from SF Symbols, app icon ships as `AppIcon.icns`)
+
+### Added
+- Local Command Line Tools-only builds: `scripts/swift-clt-plugins.sh` auto-injects the SwiftUI macro plugin dylibs (`libSwiftUIMacros`, `libPreviewsMacros`, Xcode-only files) via `-plugin-path` when CLT is the active developer dir, silent under full Xcode or once CLT ships them natively
+- `Refresh Swift Macro Plugins` CI workflow (manual dispatch): re-stashes the plugin dylibs from a GitHub-hosted Xcode into a 90-day artifact, so updating the local toolchain no longer requires owning Xcode
+
+### Changed
+- CI runners moved to the `xcode-27` image (macOS 27, Xcode 27, Swift 6.4); stale `setup-xcode` pins updated to match
+
 ## [1.2.2] - 2026-05-25
 ### Fixed
 - Fixed SIGTRAP crash when opening Preferences in CI-built app — SPM's `Bundle.module` accessor for KeyboardShortcuts could not locate the resource bundle inside `.app/Contents/Resources/`, causing a `fatalError` at view initialization. Added a safe lookup that uses `Bundle.main.url(forResource:withExtension:)` which correctly searches the app bundle. ([KeyboardShortcuts #229](https://github.com/sindresorhus/KeyboardShortcuts/issues/229))
