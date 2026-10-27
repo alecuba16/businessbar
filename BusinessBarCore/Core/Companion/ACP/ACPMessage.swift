@@ -213,31 +213,76 @@ public struct ACPUpdateMapper {
 
     /// Full assistant text accumulated from `agent_message_chunk` updates.
     public private(set) var accumulatedText: String
+    /// Reasoning accumulated from `agent_thought_chunk` updates.
+    public private(set) var accumulatedThinking: String
 
     public init() {
         self.accumulatedText = ""
+        self.accumulatedThinking = ""
     }
 
     /// Maps one `session/update` notification params dictionary to the deltas
-    /// it should emit. Non-text content blocks (image, resource_link, tool
-    /// call content) are ignored gracefully. Plan and tool call updates emit
-    /// no companion events in v1; the agent owns its tools.
+    /// it should emit. Message and thought chunks yield text or thinking
+    /// deltas; `resource_link` blocks inside either become markdown links so
+    /// MarkdownUI renders them as clickable instead of dropping them. Other
+    /// block types (image, audio, embedded resource) are ignored gracefully,
+    /// and plan or tool call updates emit no companion events in v1; the agent
+    /// owns its tools.
     public mutating func events(forUpdate params: [String: Any]?) -> [CompanionEvent] {
         guard let update = params?["update"] as? [String: Any],
-              let sessionUpdate = update["sessionUpdate"] as? String,
-              sessionUpdate == "agent_message_chunk"
+              let sessionUpdate = update["sessionUpdate"] as? String
         else { return [] }
 
-        let blocks = (update["content"] as? [[String: Any]]) ?? []
+        let isMessageChunk = sessionUpdate == "agent_message_chunk"
+        guard isMessageChunk || sessionUpdate == "agent_thought_chunk" else { return [] }
+
+        // Thought chunks carry a single content block; message chunks carry
+        // a list. Handle both without assuming.
+        let blocks: [[String: Any]]
+        if let list = update["content"] as? [[String: Any]] {
+            blocks = list
+        } else if let single = update["content"] as? [String: Any] {
+            blocks = [single]
+        } else {
+            return []
+        }
+
         var deltas: [CompanionEvent] = []
         for block in blocks {
-            guard (block["type"] as? String) == "text",
-                  let text = block["text"] as? String
-            else { continue }
-            accumulatedText += text
-            deltas.append(.delta(text))
+            switch block["type"] as? String {
+            case "text":
+                guard let text = block["text"] as? String else { continue }
+                if isMessageChunk {
+                    accumulatedText += text
+                    deltas.append(.delta(text))
+                } else {
+                    accumulatedThinking += text
+                    deltas.append(.thinkingDelta(text))
+                }
+            case "resource_link":
+                guard let link = Self.markdownLink(fromResourceLink: block) else { continue }
+                if isMessageChunk {
+                    accumulatedText += link
+                    deltas.append(.delta(link))
+                } else {
+                    accumulatedThinking += link
+                    deltas.append(.thinkingDelta(link))
+                }
+            default:
+                continue
+            }
         }
         return deltas
+    }
+
+    /// Renders one `resource_link` block as `[label](uri)`, the label
+    /// preferring the title, then the name, then the bare URI.
+    private static func markdownLink(fromResourceLink block: [String: Any]) -> String? {
+        guard let uri = block["uri"] as? String, !uri.isEmpty else { return nil }
+        let title = block["title"] as? String
+        let name = block["name"] as? String
+        let label = title?.nonEmpty ?? name?.nonEmpty ?? uri
+        return "[\(label)](\(uri))"
     }
 
     /// Terminal event for a completed `session/prompt` turn.
@@ -249,4 +294,8 @@ public struct ACPUpdateMapper {
         }
         return .finished(fullText: accumulatedText)
     }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

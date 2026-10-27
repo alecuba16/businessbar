@@ -14,10 +14,24 @@ struct ChatView: View {
     @State private var draft: String = ""
     @State private var showHistory = false
     @State private var confirmingDeleteAll = false
+    @State private var selectedProfileID: UUID?
+    @State private var selectedEffort: String
     @FocusState private var inputFocused: Bool
 
     /// Age buckets offered in the cleanup menu.
     private let cleanupAgeChoices = [7, 30, 90]
+
+    /// "default" means no ad-hoc effort; the profile/global default applies.
+    private static let defaultEffortTag = "__default__"
+
+    init(store: ChatStore, clientProvider: @escaping () -> LLMClient?) {
+        self.store = store
+        self.clientProvider = clientProvider
+        _selectedProfileID = State(initialValue: CompanionConfigService.selectedModelProfile()?.id)
+        _selectedEffort = State(initialValue: CompanionConfigService.adhocChatEffort().isEmpty
+            ? Self.defaultEffortTag
+            : CompanionConfigService.adhocChatEffort())
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,10 +49,94 @@ struct ChatView: View {
                 statusRow
             }
 
+            controlBar
+
             inputBar
         }
         .background(.background)
         .onAppear { inputFocused = true }
+        .background(
+            // Hidden anchors give the panel-scoped shortcuts a place to
+            // live without stealing menu-key-equivalents from other apps.
+            NewSessionShortcutAnchor {
+                store.startNewSession()
+            }
+            .frame(width: 0, height: 0)
+        )
+    }
+
+    // MARK: - Controls
+
+    /// Model profile and reasoning effort pickers. Choices apply to the next
+    /// message, so mid-conversation switches compare models on the same
+    /// history without restarting anything.
+    private var controlBar: some View {
+        let profiles = CompanionConfigService.modelProfiles()
+        let isACP = CompanionConfigService.backend() == .acp
+        return HStack(spacing: 8) {
+            if !isACP, !profiles.isEmpty {
+                Picker("Model", selection: Binding(
+                    get: { selectedProfileID },
+                    set: { newValue in
+                        selectedProfileID = newValue
+                        if let newValue {
+                            CompanionConfigService.setSelectedModelProfileID(newValue)
+                            // A different profile changes the effective model;
+                            // its stored effort becomes the baseline.
+                            if let profile = profiles.first(where: { $0.id == newValue }),
+                               let effort = profile.reasoningEffort, !effort.isEmpty {
+                                selectedEffort = effort
+                                CompanionConfigService.setAdhocChatEffort(effort)
+                            } else {
+                                selectedEffort = Self.defaultEffortTag
+                                CompanionConfigService.setAdhocChatEffort("")
+                            }
+                        }
+                    }
+                )) {
+                    ForEach(profiles) { profile in
+                        Text(profile.name).tag(Optional(profile.id))
+                    }
+                }
+                .controlSize(.small)
+                .frame(maxWidth: 180)
+
+                if CompanionConfigService.reasoningEnabled() {
+                    Picker("Effort", selection: $selectedEffort) {
+                        Text("Default").tag(Self.defaultEffortTag)
+                        ForEach(CompanionConfigService.effortLevels, id: \.self) { level in
+                            Text(level.capitalized).tag(level)
+                        }
+                    }
+                    .controlSize(.small)
+                    .frame(maxWidth: 110)
+                    .onChange(of: selectedEffort) { _, newValue in
+                        if newValue == Self.defaultEffortTag {
+                            CompanionConfigService.setAdhocChatEffort("")
+                        } else {
+                            CompanionConfigService.setAdhocChatEffort(newValue)
+                        }
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                if let prompt = store.editLastUserPrompt() {
+                    draft = prompt
+                    inputFocused = true
+                }
+            } label: {
+                Image(systemName: "pencil.line")
+            }
+            .buttonStyle(.plain)
+            .help("Edit last prompt (put it back in the editor)")
+            .disabled(!store.messages.contains { $0.role == .user } || store.isStreaming)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.bar)
     }
 
     // MARK: - History
@@ -179,9 +277,28 @@ struct ChatView: View {
                             .id(message.id)
                     }
 
-                    if let streaming = store.streamingText {
+                    // While only reasoning has streamed, the thinking block is
+                    // the whole streaming bubble; the first answer delta swaps
+                    // in the regular bubble with the thinking row folded.
+                    if let streaming = store.streamingThinking,
+                       (store.streamingText ?? "").isEmpty {
                         MessageBubble(
-                            message: ChatMessage(role: .assistant, content: streaming),
+                            message: ChatMessage(
+                                role: .assistant,
+                                content: "",
+                                thinking: streaming
+                            ),
+                            isStreaming: true,
+                            streamingThinkingOnly: true
+                        )
+                        .id("streaming")
+                    } else if let streaming = store.streamingText {
+                        MessageBubble(
+                            message: ChatMessage(
+                                role: .assistant,
+                                content: streaming,
+                                thinking: store.streamingThinking
+                            ),
                             isStreaming: true
                         )
                         .id("streaming")
@@ -323,7 +440,22 @@ struct ChatView: View {
             return
         }
         draft = ""
-        store.send(text, client: client)
+        store.send(text, client: client, effortOverride: CompanionConfigService.chatEffortOverride())
+    }
+}
+
+// MARK: - NewSessionShortcutAnchor
+
+/// Zero-size view whose only job is hosting the Cmd+N button so the
+/// shortcut stays scoped to the chat panel (key window at the time).
+private struct NewSessionShortcutAnchor: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button("New Chat", action: action)
+            .keyboardShortcut("n", modifiers: .command)
+            .opacity(0)
+            .accessibilityHidden(true)
     }
 }
 
@@ -332,6 +464,28 @@ struct ChatView: View {
 struct MessageBubble: View {
     let message: ChatMessage
     var isStreaming = false
+    /// True while only reasoning streams; keeps the thinking block expanded
+    /// and the empty answer bubble hidden.
+    var streamingThinkingOnly = false
+
+    /// Whether the user toggled the thinking block themselves; their choice
+    /// wins over the automatic open-while-reasoning behavior.
+    @State private var userToggledThinking = false
+    @State private var thinkingExpanded = false
+
+    private var showsThinkingRow: Bool {
+        guard let thinking = message.thinking, !thinking.isEmpty, message.role == .assistant else {
+            return false
+        }
+        return true
+    }
+
+    /// Expanded unless the user chose otherwise: auto-open while reasoning
+    /// streams, folded once the answer starts or the message finished.
+    private var thinkingIsExpanded: Bool {
+        if userToggledThinking { return thinkingExpanded }
+        return isStreaming && streamingThinkingOnly
+    }
 
     var body: some View {
         HStack {
@@ -341,16 +495,29 @@ struct MessageBubble: View {
                 alignment: message.role == .user ? .trailing : .leading,
                 spacing: 2
             ) {
-                MarkdownContent(text: message.content, role: message.role)
-                    .padding(10)
-                    .background(
-                        message.role == .user
-                            ? Color.accentColor.opacity(0.18)
-                            : Color(nsColor: .controlBackgroundColor)
+                if showsThinkingRow {
+                    ThinkingBlock(
+                        text: message.thinking ?? "",
+                        isExpanded: thinkingIsExpanded,
+                        onToggle: {
+                            userToggledThinking = true
+                            thinkingExpanded.toggle()
+                        }
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
 
-                if isStreaming && message.content.isEmpty {
+                if !streamingThinkingOnly {
+                    MarkdownContent(text: message.content, role: message.role)
+                        .padding(10)
+                        .background(
+                            message.role == .user
+                                ? Color.accentColor.opacity(0.18)
+                                : Color(nsColor: .controlBackgroundColor)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+
+                if isStreaming && message.content.isEmpty && !showsThinkingRow {
                     StreamingDots()
                         .padding(.leading, 10)
                 }
@@ -358,6 +525,46 @@ struct MessageBubble: View {
 
             if message.role == .assistant { Spacer(minLength: 40) }
         }
+    }
+}
+
+// MARK: - ThinkingBlock
+
+/// Collapsible reasoning block. A single disclosure row with a chevron and
+/// secondary styling: reasoning is context for the answer, not the answer,
+/// so it sits visually below it in hierarchy.
+private struct ThinkingBlock: View {
+    let text: String
+    let isExpanded: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button(action: onToggle) {
+                HStack(spacing: 4) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    Text(isExpanded ? "Thinking" : "Thought process")
+                        .font(.caption)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+
+            if isExpanded {
+                Text(text)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(.bar)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(.leading, 2)
     }
 }
 
@@ -386,6 +593,16 @@ private struct StreamingDots: View {
 
 // MARK: - MarkdownContent
 
+/// Schemes a chat message may open; anything else (file, ssh, custom
+/// handlers) coming from model output stays inert.
+private let allowedLinkSchemes: Set<String> = ["http", "https", "mailto", "tel"]
+
+private func openChatLink(_ url: URL) {
+    guard let scheme = url.scheme?.lowercased(),
+          allowedLinkSchemes.contains(scheme) else { return }
+    NSWorkspace.shared.open(url)
+}
+
 /// Renders one message: assistant messages parse as markdown, user
 /// prompts stay verbatim.
 private struct MarkdownContent: View {
@@ -400,6 +617,10 @@ private struct MarkdownContent: View {
         if role == .assistant {
             Markdown(text)
                 .markdownTheme(theme)
+                .environment(\.openURL, OpenURLAction { url in
+                    openChatLink(url)
+                    return .handled
+                })
                 .textSelection(.enabled)
         } else {
             Text(text)

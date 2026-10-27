@@ -11,16 +11,26 @@ public struct PromptTemplate: Identifiable, Codable, Equatable, Hashable, Sendab
     /// When true, a rewrite that comes back wrapped in <output> tags
     /// replaces the selection directly instead of showing the overlay.
     public var autoReplace: Bool
+    /// Optional reasoning effort sent as `reasoning_effort` for this
+    /// template's request. Nil means the global default applies.
+    public var reasoningEffort: String?
 
-    public init(id: UUID = UUID(), name: String, prompt: String, autoReplace: Bool = false) {
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        prompt: String,
+        autoReplace: Bool = false,
+        reasoningEffort: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.prompt = prompt
         self.autoReplace = autoReplace
+        self.reasoningEffort = reasoningEffort
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, prompt, autoReplace
+        case id, name, prompt, autoReplace, reasoningEffort
     }
 
     public init(from decoder: Decoder) throws {
@@ -28,8 +38,19 @@ public struct PromptTemplate: Identifiable, Codable, Equatable, Hashable, Sendab
         id = try container.decode(UUID.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
         prompt = try container.decode(String.self, forKey: .prompt)
-        // Templates stored before the flag existed decode as false.
+        // Templates stored before the flags existed decode with defaults.
         autoReplace = try container.decodeIfPresent(Bool.self, forKey: .autoReplace) ?? false
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+    }
+
+    /// Encoded without nil so old readers skip the field cleanly.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(autoReplace, forKey: .autoReplace)
+        try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
     }
 
     /// The token replaced by the selected text.

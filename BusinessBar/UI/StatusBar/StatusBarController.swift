@@ -614,7 +614,7 @@ final class StatusBarController: NSObject {
 
         KeyboardShortcuts.onKeyUp(for: .toggleCompanionChat) {
             guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion) else { return }
-            CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeClient() })
+            CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeChatClient() })
         }
     }
 
@@ -688,7 +688,7 @@ extension StatusBarController: NSMenuDelegate {
             onQuit: { NSApp.terminate(nil) },
             onToggleCompanionChat: {
                 guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion) else { return }
-                CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeClient() })
+                CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeChatClient() })
             },
             showEvents: isCalendarFeatureEnabled,
             showNoSleep: isNoSleepFeatureEnabled,

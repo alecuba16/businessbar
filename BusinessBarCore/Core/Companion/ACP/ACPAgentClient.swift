@@ -54,9 +54,12 @@ public final class ACPAgentClient: LLMClient, @unchecked Sendable {
     /// Streams a completion for the latest user message in `messages`.
     /// `onToolCall` is unused: ACP agents execute their own tools, so it is
     /// never invoked and tools never surface as companion events in v1.
+    /// `reasoningEffortOverride` is unused for the same reason: the agent
+    /// subprocess owns its reasoning configuration.
     public func stream(
         messages: [ChatMessage],
-        onToolCall: ((String, String) async -> String)?
+        onToolCall: ((String, String) async -> String)?,
+        reasoningEffortOverride: String?
     ) async -> AsyncThrowingStream<CompanionEvent, Error> {
         AsyncThrowingStream(bufferingPolicy: .unbounded) { (continuation: AsyncThrowingStream<CompanionEvent, Error>.Continuation) in
             let client = self

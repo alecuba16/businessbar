@@ -69,11 +69,14 @@ final class RewriteCoordinator: ObservableObject {
             do {
                 let stream = await client.stream(messages: [
                     ChatMessage(role: .user, content: prompt)
-                ], onToolCall: nil)
+                ], onToolCall: nil, reasoningEffortOverride: template.reasoningEffort)
                 for try await event in stream {
                     switch event {
                     case .delta(let text):
                         result += text
+                    case .thinkingDelta:
+                        // Reasoning never feeds the rewrite output.
+                        break
                     case .finished(let fullText):
                         result = fullText
                     case .failed(let message):

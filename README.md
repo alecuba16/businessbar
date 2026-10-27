@@ -30,6 +30,11 @@ A unified macOS menu bar application combining three essential functionalities:
 - ⌨️ Per-template rewrite shortcuts: each prompt template gets its own global shortcut for the selected text, with a toast confirming the trigger and the result
 - ✅ Preferences show a Saved indicator after every change is stored (UserDefaults, Keychain and file-backed settings included), and the Companion tab has the same Accessibility permission check and management as the Badges tab
 - 💬 Floating chat panel that works over fullscreen apps, with markdown rendering (headings, code blocks, tables, links, images), a streaming response with a live status line, and retry on errors
+- 🔀 Model profiles: named endpoint presets (base URL, model, effort, per-profile key) you can switch mid-conversation from the chat panel; the first one is seeded from your existing setup
+- 🎚️ Per-request reasoning effort: pick it per rewrite template, per profile, per chat message, or globally, custom values included
+- ✏️ Edit last prompt: pull your previous question back into the editor, tweak it, and resend over the remaining history; Cmd+N starts a fresh session
+- 💭 Collapsible thinking block: reasoning from ACP agents and OpenAI-compatible reasoning models streams live above the answer, folds once the answer starts, and stays with the saved message
+- 🔗 Agent links render as clickable markdown, and chat links open only http, https, mailto and tel schemes
 - 🗂️ Conversation history: sessions are saved on disk and restored on restart, so you can pick up any past chat and continue it. Cleanup by age or all at once from the history drawer, plus auto-clean by age or session count in Preferences
 - 🔌 OpenAI-compatible API or any ACP agent (Gemini, Claude, Codex) over stdio
 - 🧠 Reasoning models: reasoning effort level and custom HTTP headers for gateway deployments

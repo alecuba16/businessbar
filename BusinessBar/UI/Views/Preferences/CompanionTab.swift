@@ -37,6 +37,7 @@ struct CompanionTab: View {
     @State private var acpArgumentsText: String
     @State private var reasoningEnabled: Bool
     @State private var reasoningEffort: String
+    @State private var customEffortText: String
     @State private var headerPairs: [HeaderPair]
     @State private var historyMaxAgeDays: Int
     @State private var historyMaxSessions: Int
@@ -44,6 +45,9 @@ struct CompanionTab: View {
     @State private var editingTemplate: PromptTemplate?
     @State private var showsTemplateEditor = false
     @State private var keychainError: String?
+    @State private var profiles: [ModelProfile]
+    @State private var editingProfile: ModelProfile?
+    @State private var showsProfileEditor = false
 
     private let templateStore = TemplateStore()
 
@@ -65,13 +69,19 @@ struct CompanionTab: View {
         _acpCommandText = State(initialValue: CompanionConfigService.acpCommand())
         _acpArgumentsText = State(initialValue: CompanionConfigService.acpArguments().joined(separator: " "))
         _reasoningEnabled = State(initialValue: CompanionConfigService.reasoningEnabled())
-        _reasoningEffort = State(initialValue: CompanionConfigService.reasoningEffort())
+        let storedEffort = CompanionConfigService.reasoningEffort()
+        // Non-preset stored values keep the Custom row selected with the
+        // text field carrying the actual string.
+        _reasoningEffort = State(initialValue:
+            CompanionConfigService.effortLevels.contains(storedEffort) ? storedEffort : "__custom__")
+        _customEffortText = State(initialValue: storedEffort)
         _headerPairs = State(initialValue: CompanionConfigService.customHeaders().map {
             HeaderPair(name: $0.name, value: $0.value)
         })
         _historyMaxAgeDays = State(initialValue: CompanionConfigService.historyMaxAgeDays())
         _historyMaxSessions = State(initialValue: CompanionConfigService.historyMaxSessions())
         _templates = State(initialValue: TemplateStore().load())
+        _profiles = State(initialValue: CompanionConfigService.modelProfiles())
     }
 
     var body: some View {
@@ -114,6 +124,53 @@ struct CompanionTab: View {
                     Text(backend == .openai
                         ? "Any OpenAI-compatible endpoint. The API key is stored in the Keychain."
                         : "Runs a local ACP agent over stdio, for example 'gemini --acp' or 'claude --acp'. The process starts with the chat panel and stops when it closes.")
+                }
+
+                // MARK: Profiles
+                if backend == .openai {
+                    Section {
+                        ForEach(profiles) { profile in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(profile.name)
+                                        .fontWeight(.medium)
+                                    Text("\(profile.model) · \(profile.baseURL)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                if CompanionConfigService.selectedModelProfile()?.id == profile.id {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.accentColor)
+                                        .help("Selected for chat")
+                                }
+                                Button("Edit") {
+                                    editingProfile = profile
+                                    showsProfileEditor = true
+                                }
+                                .controlSize(.small)
+                                Button {
+                                    CompanionConfigService.deleteModelProfile(id: profile.id)
+                                    profiles = CompanionConfigService.modelProfiles()
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundColor(.red)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Delete this profile")
+                            }
+                        }
+
+                        Button("Add Profile") {
+                            editingProfile = nil
+                            showsProfileEditor = true
+                        }
+                    } header: {
+                        Text("Model Profiles")
+                    } footer: {
+                        Text("Named endpoint presets the chat panel can switch between mid-conversation. The profile with the checkmark is the chat default; rewrite templates keep using the backend fields above. Keys are stored in the Keychain per profile.")
+                    }
                 }
 
                 // MARK: Search
@@ -273,6 +330,25 @@ struct CompanionTab: View {
                 showsTemplateEditor = false
             }
         }
+        .sheet(isPresented: $showsProfileEditor) {
+            ProfileEditorSheet(profile: editingProfile) { saved, apiKey in
+                if let index = profiles.firstIndex(where: { $0.id == saved.id }) {
+                    profiles[index] = saved
+                } else {
+                    profiles.append(saved)
+                }
+                CompanionConfigService.modelProfileStore.save(profiles)
+                if !apiKey.isEmpty {
+                    do {
+                        try CompanionConfigService.setProfileAPIKey(saved.id, apiKey)
+                        keychainError = nil
+                    } catch {
+                        keychainError = "Could not save the API key: \(error.localizedDescription)"
+                    }
+                }
+                showsProfileEditor = false
+            }
+        }
     }
 
     private var openAIFields: some View {
@@ -321,9 +397,20 @@ struct CompanionTab: View {
                     ForEach(CompanionConfigService.effortLevels, id: \.self) { level in
                         Text(level.capitalized).tag(level)
                     }
+                    Text("Custom").tag("__custom__")
                 }
                 .onChange(of: reasoningEffort) { _, newValue in
-                    CompanionConfigService.setReasoningEffort(newValue)
+                    if newValue != "__custom__" {
+                        CompanionConfigService.setReasoningEffort(newValue)
+                    }
+                }
+                if reasoningEffort == "__custom__" {
+                    TextField("Custom effort value", text: $customEffortText)
+                        .onChange(of: customEffortText) { _, newValue in
+                            if !newValue.isEmpty {
+                                CompanionConfigService.setReasoningEffort(newValue)
+                            }
+                        }
                 }
             }
 
@@ -438,16 +525,89 @@ private struct HeaderPair: Identifiable {
     var value: String
 }
 
+// MARK: - ProfileEditorSheet
+
+/// Sheet for creating and editing a model profile: name, endpoint, model,
+/// default reasoning effort, and the per-profile API key.
+struct ProfileEditorSheet: View {
+    @State private var profile: ModelProfile
+    @State private var apiKey: String
+    let onSave: (ModelProfile, String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    init(profile: ModelProfile?, onSave: @escaping (ModelProfile, String) -> Void) {
+        let initial = profile ?? ModelProfile(name: "", baseURL: "", model: "")
+        _profile = State(initialValue: initial)
+        _apiKey = State(initialValue: CompanionConfigService.profileAPIKey(id: initial.id))
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(profile.name.isEmpty ? "New Profile" : "Edit Profile")
+                .font(.headline)
+
+            TextField("Name", text: $profile.name)
+            TextField("Base URL (ends in /v1)", text: $profile.baseURL)
+            TextField("Model", text: $profile.model)
+            SecureField("API Key (stored in Keychain)", text: $apiKey)
+
+            Picker("Default effort", selection: Binding(
+                get: { profile.reasoningEffort ?? "" },
+                set: { profile.reasoningEffort = $0.isEmpty ? nil : $0 }
+            )) {
+                Text("Global default").tag("")
+                ForEach(CompanionConfigService.effortLevels, id: \.self) { level in
+                    Text(level.capitalized).tag(level)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    onSave(profile, apiKey)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(profile.name.isEmpty || profile.model.isEmpty || profile.baseURL.isEmpty)
+            }
+        }
+        .frame(width: 420, height: 280)
+        .padding()
+    }
+}
+
 // MARK: - TemplateEditorSheet
 
 struct TemplateEditorSheet: View {
     @State var template: PromptTemplate
     let onSave: (PromptTemplate) -> Void
 
+    /// Picker selection for the effort row: "default" maps to nil, "custom"
+    /// reveals the text field; preset levels write straight into the template.
+    @State private var effortSelection: String
+    @State private var customEffort: String
+
     @Environment(\.dismiss) private var dismiss
 
+    private static let presetLevels = CompanionConfigService.effortLevels
+
     init(template: PromptTemplate?, onSave: @escaping (PromptTemplate) -> Void) {
-        _template = State(initialValue: template ?? PromptTemplate(name: "", prompt: "[placeholder]"))
+        let initial = template ?? PromptTemplate(name: "", prompt: "[placeholder]")
+        _template = State(initialValue: initial)
+        let stored = initial.reasoningEffort ?? ""
+        if stored.isEmpty {
+            _effortSelection = State(initialValue: "default")
+            _customEffort = State(initialValue: "")
+        } else if Self.presetLevels.contains(stored) {
+            _effortSelection = State(initialValue: stored)
+            _customEffort = State(initialValue: stored)
+        } else {
+            _effortSelection = State(initialValue: "custom")
+            _customEffort = State(initialValue: stored)
+        }
         self.onSave = onSave
     }
 
@@ -463,10 +623,37 @@ struct TemplateEditorSheet: View {
 
             Toggle("Replace directly when the reply has output tags", isOn: $template.autoReplace)
 
+            Picker("Reasoning effort", selection: $effortSelection) {
+                Text("Default").tag("default")
+                ForEach(Self.presetLevels, id: \.self) { level in
+                    Text(level.capitalized).tag(level)
+                }
+                Text("Custom").tag("custom")
+            }
+            .onChange(of: effortSelection) { _, newValue in
+                switch newValue {
+                case "default":
+                    template.reasoningEffort = nil
+                case "custom":
+                    template.reasoningEffort = customEffort.isEmpty ? nil : customEffort
+                default:
+                    template.reasoningEffort = newValue
+                }
+            }
+            if effortSelection == "custom" {
+                TextField("Custom effort value", text: $customEffort)
+                    .onChange(of: customEffort) { _, newValue in
+                        template.reasoningEffort = newValue.isEmpty ? nil : newValue
+                    }
+            }
+
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
+                    if effortSelection == "custom", customEffort.isEmpty {
+                        template.reasoningEffort = nil
+                    }
                     onSave(template)
                     dismiss()
                 }
@@ -474,7 +661,7 @@ struct TemplateEditorSheet: View {
                 .disabled(template.name.isEmpty || template.prompt.isEmpty)
             }
         }
-        .frame(width: 420, height: 240)
+        .frame(width: 420, height: 320)
         .padding()
     }
 }

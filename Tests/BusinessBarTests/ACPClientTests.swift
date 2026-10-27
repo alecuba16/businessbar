@@ -131,6 +131,16 @@ final class ACPUpdateMapperTests: XCTestCase {
         ]
     }
 
+    private func thoughtChunk(_ text: String) -> [String: Any] {
+        [
+            "sessionId": "s1",
+            "update": [
+                "sessionUpdate": "agent_thought_chunk",
+                "content": ["type": "text", "text": text]
+            ]
+        ]
+    }
+
     func testChunkSequenceAccumulatesAndFinishes() {
         var mapper = ACPUpdateMapper()
         var deltas: [String] = []
@@ -160,8 +170,7 @@ final class ACPUpdateMapperTests: XCTestCase {
                 "sessionUpdate": "agent_message_chunk",
                 "content": [
                     ["type": "image", "data": "..." ],
-                    ["type": "text", "text": "kept"],
-                    ["type": "resource_link", "uri": "file:///tmp"]
+                    ["type": "text", "text": "kept"]
                 ]
             ]
         ]
@@ -173,6 +182,127 @@ final class ACPUpdateMapperTests: XCTestCase {
         }
         XCTAssertEqual(piece, "kept")
         XCTAssertEqual(mapper.accumulatedText, "kept")
+    }
+
+    func testResourceLinkBecomesMarkdownLink() {
+        var mapper = ACPUpdateMapper()
+        let params: [String: Any] = [
+            "sessionId": "s1",
+            "update": [
+                "sessionUpdate": "agent_message_chunk",
+                "content": [
+                    ["type": "resource_link", "name": "report.md", "uri": "file:///tmp/report.md"],
+                    ["type": "resource_link", "title": "Docs", "name": "ignored", "uri": "https://example.com"]
+                ]
+            ]
+        ]
+        let events = mapper.events(forUpdate: params)
+        XCTAssertEqual(events.count, 2)
+        guard case .delta(let first) = events.first else {
+            XCTFail("Expected delta for resource_link")
+            return
+        }
+        XCTAssertEqual(first, "[report.md](file:///tmp/report.md)")
+        guard case .delta(let second) = events.last else {
+            XCTFail("Expected delta for resource_link")
+            return
+        }
+        XCTAssertEqual(second, "[Docs](https://example.com)")
+        XCTAssertEqual(mapper.accumulatedText, "[report.md](file:///tmp/report.md)[Docs](https://example.com)")
+    }
+
+    func testResourceLinkWithoutTitleOrNameUsesURI() {
+        var mapper = ACPUpdateMapper()
+        let params: [String: Any] = [
+            "sessionId": "s1",
+            "update": [
+                "sessionUpdate": "agent_message_chunk",
+                "content": [["type": "resource_link", "uri": "https://example.com/a"]]
+            ]
+        ]
+        let events = mapper.events(forUpdate: params)
+        XCTAssertEqual(events.count, 1)
+        guard case .delta(let piece) = events.first else {
+            XCTFail("Expected delta")
+            return
+        }
+        XCTAssertEqual(piece, "[https://example.com/a](https://example.com/a)")
+    }
+
+    func testResourceLinkWithoutURIIsIgnored() {
+        var mapper = ACPUpdateMapper()
+        let params: [String: Any] = [
+            "sessionId": "s1",
+            "update": [
+                "sessionUpdate": "agent_message_chunk",
+                "content": [["type": "resource_link", "name": "no uri"]]
+            ]
+        ]
+        XCTAssertTrue(mapper.events(forUpdate: params).isEmpty)
+    }
+
+    func testThoughtChunkEmitsThinkingDelta() {
+        var mapper = ACPUpdateMapper()
+        let events = mapper.events(forUpdate: thoughtChunk("considering"))
+        XCTAssertEqual(events.count, 1)
+        guard case .thinkingDelta(let piece) = events.first else {
+            XCTFail("Expected thinking delta")
+            return
+        }
+        XCTAssertEqual(piece, "considering")
+        XCTAssertEqual(mapper.accumulatedThinking, "considering")
+        XCTAssertEqual(mapper.accumulatedText, "")
+    }
+
+    func testThoughtChunkWithContentListAlsoWorks() {
+        var mapper = ACPUpdateMapper()
+        let params: [String: Any] = [
+            "sessionId": "s1",
+            "update": [
+                "sessionUpdate": "agent_thought_chunk",
+                "content": [["type": "text", "text": "list shape"]]
+            ]
+        ]
+        let events = mapper.events(forUpdate: params)
+        XCTAssertEqual(events.count, 1)
+        guard case .thinkingDelta(let piece) = events.first else {
+            XCTFail("Expected thinking delta")
+            return
+        }
+        XCTAssertEqual(piece, "list shape")
+    }
+
+    func testInterleavedThoughtAndMessageStreams() {
+        var mapper = ACPUpdateMapper()
+        var thinking: [String] = []
+        var answer: [String] = []
+        for params in [thoughtChunk("step one"), messageChunk("Hello"), thoughtChunk("step two")] {
+            for event in mapper.events(forUpdate: params) {
+                switch event {
+                case .delta(let piece): answer.append(piece)
+                case .thinkingDelta(let piece): thinking.append(piece)
+                default: XCTFail("Unexpected event \(event)")
+                }
+            }
+        }
+        XCTAssertEqual(thinking, ["step one", "step two"])
+        XCTAssertEqual(answer, ["Hello"])
+        XCTAssertEqual(mapper.accumulatedThinking, "step onestep two")
+        XCTAssertEqual(mapper.accumulatedText, "Hello")
+    }
+
+    func testFinishedEventDoesNotSwallowThinkingAccumulatedByStore() {
+        // The mapper hands thinking out only as deltas; the store owns its
+        // copy. Terminal event carries just the answer text.
+        var mapper = ACPUpdateMapper()
+        _ = mapper.events(forUpdate: thoughtChunk("reasoning"))
+        _ = mapper.events(forUpdate: messageChunk("answer"))
+        guard case .finished(let fullText) = mapper.terminalEvent(stopReason: "end_turn") else {
+            XCTFail("Expected finished event")
+            return
+        }
+        XCTAssertEqual(fullText, "answer")
+        XCTAssertEqual(mapper.accumulatedThinking, "reasoning")
     }
 
     func testNonChunkUpdatesEmitNothing() {

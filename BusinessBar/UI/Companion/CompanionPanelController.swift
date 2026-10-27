@@ -165,6 +165,9 @@ final class FocusablePanel: NSPanel {
 final class ChatStore: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var streamingText: String?
+    /// Reasoning streamed so far for the in-flight answer, rendered in the
+    /// collapsible thinking block.
+    @Published var streamingThinking: String?
     @Published var errorMessage: String?
     @Published var isStreaming = false
     @Published var activityLabel = ""
@@ -173,6 +176,10 @@ final class ChatStore: ObservableObject {
 
     private var streamTask: Task<Void, Never>?
     private var pendingUserPrompt: String?
+    /// Bumped on every reset (new session, clear). Stream completions
+    /// carrying an older generation are dropped so a cancelled stream
+    /// cannot append into the fresh conversation.
+    private var generation = 0
     private let sessionStore: ChatSessionStore
 
     init(sessionStore: ChatSessionStore = .shared) {
@@ -218,7 +225,11 @@ final class ChatStore: ObservableObject {
     }
 
     func startNewSession() {
-        guard !isStreaming else { return }
+        // Cancel any in-flight stream: a fresh chat wins. The stream task
+        // observes the cancellation and finishes on its own; the state
+        // below clears synchronously so the UI reflects the reset now.
+        streamTask?.cancel()
+        generation += 1
         currentSessionID = nil
         messages = []
         errorMessage = nil
@@ -277,7 +288,7 @@ final class ChatStore: ObservableObject {
         return String(trimmed.prefix(60))
     }
 
-    func send(_ text: String, client: LLMClient) {
+    func send(_ text: String, client: LLMClient, effortOverride: String? = nil) {
         guard !text.isEmpty, !isStreaming else { return }
         errorMessage = nil
         pendingUserPrompt = text
@@ -288,6 +299,7 @@ final class ChatStore: ObservableObject {
         // Set synchronously: onSubmit and the Cmd+Return button can both
         // fire in the same run loop turn, before the task body runs.
         isStreaming = true
+        let streamGeneration = generation
 
         streamTask = Task { [weak self] in
             guard let self else { return }
@@ -296,16 +308,22 @@ final class ChatStore: ObservableObject {
             defer {
                 self.isStreaming = false
                 self.streamingText = nil
+                self.streamingThinking = nil
                 self.activityLabel = ""
             }
 
             var assistantText = ""
+            var thinkingText = ""
             // Re-parsing markdown on every delta would burn CPU on long
             // answers, so UI updates are coalesced to ~12 per second.
             var lastUIUpdate = Date()
             let minUIInterval = 1.0 / 12.0
             do {
-                let stream = await client.stream(messages: self.messages, onToolCall: nil)
+                let stream = await client.stream(
+                    messages: self.messages,
+                    onToolCall: nil,
+                    reasoningEffortOverride: effortOverride
+                )
                 for try await event in stream {
                     switch event {
                     case .delta(let piece):
@@ -315,18 +333,36 @@ final class ChatStore: ObservableObject {
                             lastUIUpdate = Date()
                             self.streamingText = assistantText
                         }
+                    case .thinkingDelta(let piece):
+                        thinkingText += piece
+                        self.activityLabel = "Reasoning…"
+                        if Date().timeIntervalSince(lastUIUpdate) >= minUIInterval {
+                            lastUIUpdate = Date()
+                            self.streamingThinking = thinkingText
+                        }
                     case .finished(let fullText):
+                        guard self.generation == streamGeneration else { return }
                         let finalText = fullText.isEmpty ? assistantText : fullText
-                        self.messages.append(ChatMessage(role: .assistant, content: finalText))
+                        self.messages.append(ChatMessage(
+                            role: .assistant,
+                            content: finalText,
+                            thinking: thinkingText.isEmpty ? nil : thinkingText
+                        ))
                         self.pendingUserPrompt = nil
                         self.persistCurrentSession()
                         return
                     case .failed(let message):
+                        guard self.generation == streamGeneration else { return }
                         self.errorMessage = message
                         return
                     case .cancelled:
+                        guard self.generation == streamGeneration else { return }
                         if !assistantText.isEmpty {
-                            self.messages.append(ChatMessage(role: .assistant, content: assistantText))
+                            self.messages.append(ChatMessage(
+                                role: .assistant,
+                                content: assistantText,
+                                thinking: thinkingText.isEmpty ? nil : thinkingText
+                            ))
                             self.persistCurrentSession()
                         }
                         return
@@ -341,7 +377,7 @@ final class ChatStore: ObservableObject {
     }
 
     /// Re-sends the last user prompt after a failure.
-    func retryLast(clientProvider: () -> LLMClient?) {
+    func retryLast(clientProvider: () -> LLMClient?, effortOverride: String? = nil) {
         guard !isStreaming else { return }
         // The failed attempt left the user prompt in the list; drop the
         // trailing prompt so the retry does not duplicate it.
@@ -355,7 +391,22 @@ final class ChatStore: ObservableObject {
             return
         }
         errorMessage = nil
-        send(prompt, client: client)
+        send(prompt, client: client, effortOverride: effortOverride)
+    }
+
+    /// Pulls the last user prompt back into the editor and truncates the
+    /// conversation to before it, so the edited version resends cleanly.
+    /// Returns the prompt text for the draft, nil when there is nothing to
+    /// edit or a stream is in flight.
+    func editLastUserPrompt() -> String? {
+        guard !isStreaming,
+              let index = messages.lastIndex(where: { $0.role == .user }) else { return nil }
+        let prompt = messages[index].content
+        messages.removeSubrange(index...)
+        pendingUserPrompt = nil
+        errorMessage = nil
+        persistCurrentSession()
+        return prompt
     }
 
     func cancel() {
@@ -364,6 +415,7 @@ final class ChatStore: ObservableObject {
 
     func clear() {
         cancel()
+        generation += 1
         messages = []
         errorMessage = nil
         pendingUserPrompt = nil

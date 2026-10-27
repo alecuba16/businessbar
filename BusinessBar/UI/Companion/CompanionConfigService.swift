@@ -145,6 +145,81 @@ enum CompanionConfigService {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
+    // MARK: - Model profiles
+
+    /// Shared store for named model profiles (base URL + model + effort).
+    static let modelProfileStore = ModelProfileStore()
+
+    /// Loads profiles, seeding one from the legacy single-model config the
+    /// first time so existing users keep their working setup.
+    static func modelProfiles() -> [ModelProfile] {
+        let stored = modelProfileStore.load()
+        if !stored.isEmpty { return stored }
+        // Seed from the legacy config once; empty model means the user never
+        // configured the OpenAI backend, so nothing to seed.
+        guard !model().isEmpty else { return [] }
+        let seeded = ModelProfile(
+            name: model(),
+            baseURL: baseURL().absoluteString,
+            model: model(),
+            reasoningEffort: reasoningEnabled() ? reasoningEffort() : nil
+        )
+        modelProfileStore.save([seeded])
+        setSelectedModelProfileID(seeded.id)
+        try? setProfileAPIKey(seeded.id, apiKey())
+        return [seeded]
+    }
+
+    /// The profile the chat panel uses; nil falls back to the legacy config.
+    static func selectedModelProfile() -> ModelProfile? {
+        let profiles = modelProfiles()
+        guard !profiles.isEmpty else { return nil }
+        let storedID = UserDefaults.standard.string(forKey: Constants.Defaults.companionSelectedModelProfile)
+        if let storedID, let id = UUID(uuidString: storedID),
+           let match = profiles.first(where: { $0.id == id }) {
+            return match
+        }
+        return profiles.first
+    }
+
+    static func setSelectedModelProfileID(_ id: UUID) {
+        UserDefaults.standard.set(id.uuidString, forKey: Constants.Defaults.companionSelectedModelProfile)
+    }
+
+    /// Per-profile API key in the Keychain.
+    static func profileAPIKey(id: UUID) -> String {
+        keychainString(ModelProfileStore.keychainKeyPrefix + id.uuidString)
+    }
+
+    static func setProfileAPIKey(_ id: UUID, _ key: String) throws {
+        try KeychainHelper.save(key: ModelProfileStore.keychainKeyPrefix + id.uuidString, data: Data(key.utf8))
+        SettingsSavedBus.announce()
+    }
+
+    /// Deletes a profile and its Keychain key. When the deleted profile
+    /// was selected, selection falls back to the first remaining profile.
+    static func deleteModelProfile(id: UUID) {
+        var profiles = modelProfiles()
+        profiles.removeAll { $0.id == id }
+        modelProfileStore.save(profiles)
+        if let first = profiles.first {
+            setSelectedModelProfileID(first.id)
+        }
+        try? KeychainHelper.delete(key: ModelProfileStore.keychainKeyPrefix + id.uuidString)
+    }
+
+    // MARK: - Ad-hoc chat effort
+
+    /// Effort the chat panel uses for its next request; empty string means
+    /// "use the profile/default effort".
+    static func adhocChatEffort() -> String {
+        UserDefaults.standard.string(forKey: Constants.Defaults.companionAdhocEffort) ?? ""
+    }
+
+    static func setAdhocChatEffort(_ effort: String) {
+        UserDefaults.standard.set(effort, forKey: Constants.Defaults.companionAdhocEffort)
+    }
+
     // MARK: - Reasoning
 
     static func reasoningEnabled() -> Bool {
@@ -278,6 +353,43 @@ enum CompanionConfigService {
             guard isACPConfigured() else { return nil }
             return acpClient()
         }
+    }
+
+    /// Chat panel client: uses the selected model profile when one exists,
+    /// else the legacy single-model config. Fresh per call so profile and
+    /// effort switches take effect on the next message.
+    static func makeChatClient() -> LLMClient? {
+        guard backend() == .openai else { return makeClient() }
+        guard let profile = selectedModelProfile() else { return makeClient() }
+        let key = profileAPIKey(id: profile.id)
+        guard !profile.model.isEmpty, !key.isEmpty else { return nil }
+        var normalized = profile.baseURL
+        while normalized.count > 1 && normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        guard let url = URL(string: normalized) else { return nil }
+        return OpenAICompatClient(
+            configuration: CompanionConfiguration(
+                baseURL: url,
+                model: profile.model,
+                apiKey: key,
+                systemPrompt: systemPrompt(),
+                reasoning: reasoningEnabled(),
+                reasoningEffort: reasoningEnabled()
+                    ? (profile.reasoningEffort ?? reasoningEffort())
+                    : nil,
+                extraHeaders: Dictionary(uniqueKeysWithValues: customHeaders().map { ($0.name, $0.value) })
+            ),
+            tools: searchTools(),
+            toolHandler: searchToolHandler()
+        )
+    }
+
+    /// Effort the chat panel's next request should use: the ad-hoc pick if
+    /// set, else nil so the profile/global default applies.
+    static func chatEffortOverride() -> String? {
+        let adhoc = adhocChatEffort()
+        return adhoc.isEmpty ? nil : adhoc
     }
 
     /// Shared ACP client so chat and rewrite reuse the same process and

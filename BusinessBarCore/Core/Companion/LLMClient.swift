@@ -13,11 +13,27 @@ public struct ChatMessage: Identifiable, Equatable, Codable, Sendable {
     public var id: UUID
     public var role: Role
     public var content: String
+    /// Reasoning the model streamed before the answer. Optional and
+    /// decode-safe: sessions saved before this field existed load fine.
+    public var thinking: String?
 
-    public init(id: UUID = UUID(), role: Role, content: String) {
+    public init(id: UUID = UUID(), role: Role, content: String, thinking: String? = nil) {
         self.id = id
         self.role = role
         self.content = content
+        self.thinking = thinking
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, role, content, thinking
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        role = try container.decode(Role.self, forKey: .role)
+        content = try container.decode(String.self, forKey: .content)
+        thinking = try container.decodeIfPresent(String.self, forKey: .thinking)
     }
 }
 
@@ -27,6 +43,9 @@ public struct ChatMessage: Identifiable, Equatable, Codable, Sendable {
 public enum CompanionEvent: Sendable {
     /// Partial assistant text appended to the running response.
     case delta(String)
+    /// Partial reasoning text appended to the thinking block. Kept apart
+    /// from `delta` so the UI can fold it away from the answer.
+    case thinkingDelta(String)
     /// The model requested a tool call (e.g. web search). `name` identifies it.
     case toolCallRequested(name: String, argumentsJSON: String)
     /// Terminal success. `fullText` is the complete assistant response.
@@ -50,10 +69,23 @@ public protocol LLMClient: Sendable {
     /// `onToolCall` is invoked when the model requests a tool the client
     /// advertised; its return value is fed back into the conversation before
     /// continuing the stream. Pass `nil` when the backend advertises no tools.
+    /// `reasoningEffortOverride` replaces the configured effort for this
+    /// request only (per-template setting); nil keeps the configured one.
     func stream(
         messages: [ChatMessage],
-        onToolCall: ((String, String) async -> String)?
+        onToolCall: ((String, String) async -> String)?,
+        reasoningEffortOverride: String?
     ) async -> AsyncThrowingStream<CompanionEvent, Error>
+}
+
+extension LLMClient {
+    /// Convenience overload preserving the original two-argument call shape.
+    public func stream(
+        messages: [ChatMessage],
+        onToolCall: ((String, String) async -> String)?
+    ) async -> AsyncThrowingStream<CompanionEvent, Error> {
+        await stream(messages: messages, onToolCall: onToolCall, reasoningEffortOverride: nil)
+    }
 }
 
 // MARK: - CompanionConfiguration

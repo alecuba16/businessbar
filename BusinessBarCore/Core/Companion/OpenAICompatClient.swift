@@ -46,13 +46,17 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
 
     public func stream(
         messages: [ChatMessage],
-        onToolCall: ((String, String) async -> String)? = nil
+        onToolCall: ((String, String) async -> String)? = nil,
+        reasoningEffortOverride: String? = nil
     ) async -> AsyncThrowingStream<CompanionEvent, Error> {
         let configuration = self.configuration
         let tools = self.tools
         let maxToolRounds = self.maxToolRounds
         let session = self.session
         let toolHandler = onToolCall ?? storedToolHandler
+        // Per-request effort wins over the configured one; template
+        // overrides and chat-panel ad-hoc picks both land here.
+        let effort = reasoningEffortOverride ?? configuration.reasoningEffort
 
         return AsyncThrowingStream(bufferingPolicy: .unbounded) { (continuation: AsyncThrowingStream<CompanionEvent, Error>.Continuation) in
             let task = Task {
@@ -75,7 +79,7 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
                     if !tools.isEmpty {
                         body["tools"] = tools
                     }
-                    if configuration.reasoning, let effort = configuration.reasoningEffort, !effort.isEmpty {
+                    if configuration.reasoning, let effort, !effort.isEmpty {
                         body["reasoning_effort"] = effort
                     }
 
@@ -133,6 +137,15 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
                                 if let text = delta["content"] as? String, !text.isEmpty {
                                     accumulated += text
                                     continuation.yield(.delta(text))
+                                }
+                                // Reasoning models behind OpenAI-compatible gateways
+                                // stream their reasoning in either field
+                                // depending on the vendor; both go to the
+                                // thinking block, never the answer.
+                                let reasoning = (delta["reasoning"] as? String)
+                                    ?? (delta["reasoning_content"] as? String)
+                                if let piece = reasoning, !piece.isEmpty {
+                                    continuation.yield(.thinkingDelta(piece))
                                 }
                                 if let toolChunks = delta["tool_calls"] as? [[String: Any]] {
                                     ToolCallAccumulator.merge(into: &pendingToolCalls, chunks: toolChunks)
