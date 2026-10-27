@@ -26,6 +26,17 @@ A unified macOS menu bar application combining three essential functionalities:
 - ⏱️ Duration options: 15min, 30min, 1h, 2h, 5h, or indefinite
 - 💡 Optional activity simulation to prevent "Away" status
 
+### LLM Companion
+- ⌨️ Per-template rewrite shortcuts: each prompt template gets its own global shortcut for the selected text, with a toast confirming the trigger and the result
+- ✅ Preferences show a Saved indicator after every change is stored (UserDefaults, Keychain and file-backed settings included), and the Companion tab has the same Accessibility permission check and management as the Badges tab
+- 💬 Floating chat panel that works over fullscreen apps, with markdown rendering (headings, code blocks, tables, links, images), a streaming response with a live status line, and retry on errors
+- 🗂️ Conversation history: sessions are saved on disk and restored on restart, so you can pick up any past chat and continue it. Cleanup by age or all at once from the history drawer, plus auto-clean by age or session count in Preferences
+- 🔌 OpenAI-compatible API or any ACP agent (Gemini, Claude, Codex) over stdio
+- 🧠 Reasoning models: reasoning effort level and custom HTTP headers for gateway deployments
+- 🌐 Optional web search tool: DuckDuckGo, Bing, or Google News (scraped, no key, with engine fallback) or Brave, Tavily, or a custom endpoint (API key)
+- 🔑 API keys stored in the Keychain
+- 🔒 The chat panel and rewrite overlay never replace your text automatically; you choose Replace or Copy
+
 ## Requirements
 
 - macOS 14.0 (Sonoma) or later
@@ -178,7 +189,7 @@ When the values start with `YOUR_`, `GoogleAuthConfig.isConfigured` returns `fal
 BusinessBar requires the following permissions:
 - **Calendar Access** — To read your calendar events
 - **Notifications** — To send meeting reminders
-- **Accessibility** (optional) — To read dock badges and simulate activity
+- **Accessibility** (optional) — To read dock badges and simulate activity; the LLM Companion also uses it to read the selected text for rewrites
 
 ## Usage
 
@@ -187,6 +198,14 @@ BusinessBar requires the following permissions:
 3. Select which calendars to monitor in Preferences
 4. (Optional) Add apps to monitor for notification badges
 5. (Optional) Grant Accessibility permission for badge monitoring
+6. (Optional) Configure the LLM Companion: enable it in Preferences, set the
+   backend (OpenAI-compatible API or an ACP agent command such as
+   `gemini --acp`), record the chat panel shortcut (Cmd+B by default) and
+   assign a shortcut to each rewrite template you want. Default templates
+   ask the model to wrap the result in `<output></output>` tags; the overlay
+   shows only the tagged text, with no model commentary. A template can also
+   opt in to direct replace: when the reply carries the tags, the selection
+   is swapped in place and the overlay is skipped
 
 ## Architecture
 
@@ -199,6 +218,8 @@ BusinessBar is built with:
 - **IOKit** for power assertions
 - **Accessibility API** for dock badge reading
 - **AppAuth** for Google OAuth 2.0 authentication
+- **ACP** (Agent Client Protocol) over JSON-RPC stdio for the companion's agent backend
+- **URLSession byte streams** for OpenAI-compatible SSE streaming
 - **CredentialLoader** — JSON-based credential system (`.local.json` override → `.json` default → placeholder fallback)
 - **AppLogger** — structured logging via OSLog + rotating file logs (`~/Library/Logs/BusinessBar/`)
 - **Sparkle** for in-app auto-updates
