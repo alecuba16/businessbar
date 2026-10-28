@@ -38,6 +38,9 @@ struct ComposerTextView: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
+        // Left gutter for the wrap arrows: continuation rows get the
+        // arrow here, clear of the text itself.
+        textView.textContainerInset = NSSize(width: 14, height: 2)
 
         let scroll = ComposerScrollView()
         scroll.documentView = textView
@@ -257,22 +260,25 @@ final class ComposerNSTextView: NSTextView {
         positionBreakMarkers()
     }
 
-    // Wrap arrows at the end of each fragment the editor wrapped, the
-    // same rounding-back glyph other editors use, plus a paragraph mark
-    // after the last glyph of a line a Return created. Hard breaks stay
-    // visibly distinct from wraps: an arrow means "this line continues",
-    // the paragraph mark means "you pressed Return here". Layers travel
-    // with the document, so scrolled-away markers keep their positions.
+    // Wrap arrow at the start of each row that continues a wrapped
+    // line (the CotEditor convention: the mark sits left of the row
+    // that jumped, not at the end of the wrapped row), plus a
+    // paragraph mark after the last glyph of a line a Return created.
+    // Hard breaks stay visibly distinct from wraps: the arrow means
+    // "this row continues the line above", the paragraph mark means
+    // "you pressed Return here". Layers travel with the document, so
+    // scrolled-away markers keep their positions.
     private func positionBreakMarkers() {
         guard let container = textContainer, let layoutManager = layoutManager else { return }
         layoutManager.ensureLayout(for: container)
         let string = (self.string as NSString)
         var keptLayers: [CATextLayer] = []
 
-        // Enumerate layout fragments: each is one visual row. A row whose
-        // text does not end in a newline continues on the next row, which
-        // is exactly a wrap.
+        // Enumerate layout fragments: each is one visual row. A row
+        // whose text does not end in a newline continues on the next
+        // row; that next row is the wrap jump and carries the arrow.
         var glyph = 0
+        var previousRowEndedInNewline = true
         let totalGlyphs = layoutManager.numberOfGlyphs
         while glyph < totalGlyphs {
             let rangePointer = UnsafeMutablePointer<NSRange>.allocate(capacity: 1)
@@ -281,29 +287,26 @@ final class ComposerNSTextView: NSTextView {
             rangePointer.deallocate()
             let fragmentEnd = glyphRange.location + glyphRange.length
 
-            // Map the fragment's glyph span back to characters to see how
-            // the row ends.
+            if !previousRowEndedInNewline {
+                keptLayers.append(
+                    markerLayer("\u{21A9}", startOfRow: fragment)
+                )
+            }
+
+            // Map the fragment's glyph span back to characters to see
+            // how the row ends.
             let firstChar = mappedCharIndex(ofGlyph: glyphRange.location, in: string, layoutManager: layoutManager)
             let endChar = fragmentEnd >= totalGlyphs
                 ? string.length
                 : mappedCharIndex(ofGlyph: fragmentEnd, in: string, layoutManager: layoutManager)
             let rowEndsInNewline = endChar > firstChar && string.character(at: endChar - 1) == 0x0A
-            // A row that neither ends in a newline nor is the last row
-            // continues on the next row: that is a wrap, and its arrow
-            // belongs here, at the end of the wrapped row. A row ending in
-            // a newline never wraps onward, no matter where its line
-            // started, so the arrow check keys on the row's own ending.
-            if !rowEndsInNewline, fragmentEnd < totalGlyphs {
-                keptLayers.append(
-                    markerLayer("\u{21A9}", endOfRow: fragment, container: container)
-                )
-            } else if rowEndsInNewline {
-                // The paragraph mark sits after the row's last drawn glyph,
-                // not at the row edge: a full-width line and a half-empty
-                // one both read correctly. The newline glyph itself spans
-                // the whole remaining row, so the anchor is the glyph
-                // before it; a row holding only the newline anchors at the
-                // row start.
+            if rowEndsInNewline {
+                // The paragraph mark sits after the row's last drawn
+                // glyph, not at the row edge: a full-width line and a
+                // half-empty one both read correctly. The newline glyph
+                // itself spans the whole remaining row, so the anchor
+                // is the glyph before it; a row holding only the
+                // newline anchors at the row start.
                 let lastTextGlyph = fragmentEnd - 2
                 let anchorX: CGFloat
                 if lastTextGlyph >= glyphRange.location {
@@ -318,6 +321,7 @@ final class ComposerNSTextView: NSTextView {
                     paragraphMarker("\u{00B6}", afterLastGlyphAt: anchorX, in: fragment)
                 )
             }
+            previousRowEndedInNewline = rowEndsInNewline
             glyph = fragmentEnd
         }
 
@@ -346,12 +350,14 @@ final class ComposerNSTextView: NSTextView {
         return string.length
     }
 
-    private func markerLayer(_ symbol: String, endOfRow fragment: CGRect, container: NSTextContainer) -> CATextLayer {
+    private func markerLayer(_ symbol: String, startOfRow fragment: CGRect) -> CATextLayer {
         let layer = markerLayerBase()
         layer.string = symbol
         let origin = textContainerOrigin
+        // The gutter is the container inset; the arrow right-aligns to
+        // the text edge inside it, clear of the first glyph.
         layer.frame = CGRect(
-            x: origin.x + fragment.maxX + container.lineFragmentPadding - markerWidth,
+            x: origin.x - markerWidth,
             y: origin.y + fragment.minY,
             width: markerWidth,
             height: fragment.height

@@ -710,8 +710,8 @@ struct ChatView: View {
                             .font(.system(size: 13))
                             .foregroundStyle(.tertiary)
                             .allowsHitTesting(false)
-                            .padding(.leading, 5)
-                            .padding(.top, 2)
+                            .padding(.leading, 19)
+                            .padding(.top, 4)
                     }
                 }
                 .frame(
