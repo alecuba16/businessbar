@@ -18,6 +18,11 @@ struct ChatView: View {
     @State private var confirmingDeleteAll = false
     @State private var selectedProfileID: UUID?
     @State private var selectedEffort: String
+    /// Tall layout for the composer, restored across restarts.
+    @State private var inputExpanded: Bool
+    /// Panel height from the background geometry reader; the tall input
+    /// scales its cap with the window instead of a fixed line count.
+    @State private var panelHeight: CGFloat = 0
     /// Base64 data URIs staged for the next message. Populated from the
     /// paperclip picker, drops, or pastes; cleared on send.
     @State private var pendingImages: [String] = []
@@ -41,6 +46,7 @@ struct ChatView: View {
         _selectedEffort = State(initialValue: CompanionConfigService.adhocChatEffort().isEmpty
             ? Self.defaultEffortTag
             : CompanionConfigService.adhocChatEffort())
+        _inputExpanded = State(initialValue: CompanionConfigService.chatInputExpanded())
     }
 
     var body: some View {
@@ -49,9 +55,7 @@ struct ChatView: View {
                 historyDrawer
             }
 
-            if sendHandlerIsCommandAware {
-                commandHeader
-            }
+            chatHeader
 
             messageList
 
@@ -97,12 +101,22 @@ struct ChatView: View {
             }
             .frame(width: 0, height: 0)
         )
+        .background(
+            // Track the panel size so the tall input can claim a share of
+            // the window instead of a fixed line budget.
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { panelHeight = geo.size.height }
+                    .onChange(of: geo.size.height) { _, new in panelHeight = new }
+            }
+        )
     }
 
     // MARK: - Controls
 
-    /// Model and reasoning effort pickers. Choices apply to the next
-    /// message, so mid-conversation switches compare models on the same
+    /// Model and reasoning effort pickers, then the working dir. Choices
+    /// apply to the next message, so mid-conversation switches compare
+    /// models on the same
     /// history without restarting anything.
     private var controlBar: some View {
         let providers = CompanionConfigService.chatProviders()
@@ -164,19 +178,12 @@ struct ChatView: View {
                 }
             }
 
-            Spacer(minLength: 0)
+            // The workspace rides the same row as the model pickers, so
+            // the context the prompt runs in is visible at a glance.
+            workingDirButton
+                .layoutPriority(1)
 
-            Button {
-                if let prompt = store.editLastUserPrompt() {
-                    draft = prompt
-                    inputFocused = true
-                }
-            } label: {
-                Image(systemName: "pencil.line")
-            }
-            .buttonStyle(.plain)
-            .help("Edit last prompt (put it back in the editor)")
-            .disabled(!store.messages.contains { $0.role == .user } || store.isStreaming)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -308,6 +315,23 @@ struct ChatView: View {
 
     // MARK: - Message list
 
+    /// Edit affordance only on the latest user prompt: editing pulls that
+    /// prompt back into the composer and truncates the thread there, so
+    /// the updated version resends over the remaining history. While a
+    /// response streams, editing is off (the thread is mid-update).
+    private func editCallback(for message: ChatMessage) -> (() -> Void)? {
+        guard !store.isStreaming,
+              message.role == .user,
+              message.id == store.messages.last(where: { $0.role == .user })?.id
+        else { return nil }
+        return { [self] in
+            if let prompt = store.editLastUserPrompt() {
+                draft = prompt
+                inputFocused = true
+            }
+        }
+    }
+
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -317,8 +341,11 @@ struct ChatView: View {
                     }
 
                     ForEach(store.messages) { message in
-                        MessageBubble(message: message)
-                            .id(message.id)
+                        MessageBubble(
+                            message: message,
+                            onEditPrompt: editCallback(for: message)
+                        )
+                        .id(message.id)
                     }
 
                     // While only reasoning has streamed, the thinking block is
@@ -388,51 +415,84 @@ struct ChatView: View {
         .padding(.top, 60)
     }
 
-    // MARK: - Command tools
+    // MARK: - Chat header
 
-    /// Workspace folder, YOLO toggle, and command tool status. The
-    /// workspace defaults to the user home, so command tools work out of
-    /// the box; the whole dir label is the picker button.
-    private var commandHeader: some View {
+    /// Header row: new chat and history buttons plus the YOLO toggle
+    /// when command tools are active. Session controls live here, next to
+    /// the context they act on, not in the input bar.
+    private var chatHeader: some View {
         HStack(spacing: 8) {
             Button {
-                commandTools.pickWorkspace()
+                withAnimation { showHistory.toggle() }
             } label: {
-                HStack(spacing: 4) {
-                    Text("Working dir:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text((commandTools.effectiveWorkspaceRoot as NSString).lastPathComponent)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                    Image(systemName: "folder")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Image(systemName: "sidebar.left")
+                    .font(.title3)
             }
             .buttonStyle(.plain)
-            .help("\(commandTools.effectiveWorkspaceRoot). Click to choose another folder")
+            .help("Conversation history")
+
+            // square.and.pencil is the macOS Messages glyph for ending
+            // a conversation and starting a new one, so the intent reads
+            // without a label.
+            Button {
+                store.closeAndStartNewSession()
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.title3)
+            }
+            .buttonStyle(.plain)
+            .help("Close this chat and start a new one. The closed chat stays in history.")
+            .disabled(!store.hasClosableSession)
+
+            Divider()
+                .frame(height: 14)
 
             Spacer(minLength: 0)
 
-            Toggle(isOn: $commandTools.yoloEnabled) {
-                Text("Auto-run (YOLO)")
-                    .font(.caption)
+            if sendHandlerIsCommandAware {
+                Toggle(isOn: $commandTools.yoloEnabled) {
+                    Text("Auto-run (YOLO)")
+                        .font(.caption)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(commandTools.yoloEnabled ? .red : .accentColor)
+                .help(
+                    commandTools.yoloEnabled
+                        ? "Commands run without asking. rm and credentials files still prompt."
+                        : "Ask before running anything beyond read-only commands"
+                )
             }
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(commandTools.yoloEnabled ? .red : .accentColor)
-            .help(
-                commandTools.yoloEnabled
-                    ? "Commands run without asking. rm and credentials files still prompt."
-                    : "Ask before running anything beyond read-only commands"
-            )
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(.bar)
     }
+
+    /// The whole dir label is the picker button; the folder icon rides
+    /// along so it reads as one control.
+    private var workingDirButton: some View {
+        Button {
+            commandTools.pickWorkspace()
+        } label: {
+            HStack(spacing: 4) {
+                Text("Working dir:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text((commandTools.effectiveWorkspaceRoot as NSString).lastPathComponent)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                Image(systemName: "folder")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .help("\(commandTools.effectiveWorkspaceRoot). Click to choose another folder")
+    }
+
+    // MARK: - Command tools
 
     /// Inline confirmation card: full command, workspace, plain-words
     /// risk, three decisions.
@@ -559,20 +619,36 @@ struct ChatView: View {
         return model.acceptsImages == true
     }
 
+    /// Height cap for the tall composer. 45% of the panel, floored at
+    /// 160pt so even a small window keeps a usable editor, and it grows
+    /// as the window grows. Before the first layout pass the fallback is
+    /// a sane default.
+    private var inputMaxHeight: CGFloat {
+        guard panelHeight > 0 else { return 220 }
+        return max(160, panelHeight * 0.45)
+    }
+
     private var inputBar: some View {
         VStack(spacing: 6) {
             if !pendingImages.isEmpty {
                 attachmentStrip
             }
             HStack(alignment: .bottom, spacing: 8) {
+                // Expand/collapse the composer between the compact and tall
+                // layouts; arrows point to where the editor grows.
                 Button {
-                    withAnimation { showHistory.toggle() }
+                    inputExpanded.toggle()
+                    CompanionConfigService.setChatInputExpanded(inputExpanded)
                 } label: {
-                    Image(systemName: "sidebar.left")
+                    Image(systemName: inputExpanded
+                        ? "arrow.down.right.and.arrow.up.left"
+                        : "arrow.up.left.and.arrow.down.right")
                         .font(.title3)
                 }
                 .buttonStyle(.plain)
-                .help("Conversation history")
+                .help(inputExpanded
+                    ? "Use the compact input"
+                    : "Use the tall input for longer prompts")
 
                 if selectedModelAcceptsImages {
                     Button {
@@ -599,15 +675,31 @@ struct ChatView: View {
                     .help("Attach images (this model takes text only)")
                 }
 
-                TextField("Ask anything…", text: $draft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...5)
-                    .focused($inputFocused)
-                    .onSubmit { send() }
-                    .onPasteCommand(of: [.image, .fileURL]) { providers in
-                        guard selectedModelAcceptsImages else { return }
-                        stageImages(fromProviders: providers)
-                    }
+                // Scroll view caps the editor frame; the text field inside
+                // sizes to its full content, so long prompts scroll instead
+                // of clipping, and the tall cap follows the window size.
+                ScrollView(showsIndicators: true) {
+                    TextField("Ask anything…", text: $draft, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .focused($inputFocused)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .onSubmit { send() }
+                        // Shift+Return and Option+Return insert a newline so
+                        // multi-line prompts stay keyboard-typed; plain
+                        // Return keeps the send behavior.
+                        .onKeyPress(.return, phases: .down) { press in
+                            guard press.modifiers.contains(.shift)
+                                || press.modifiers.contains(.option) else { return .ignored }
+                            draft += "\n"
+                            return .handled
+                        }
+                        .onPasteCommand(of: [.image, .fileURL]) { providers in
+                            guard selectedModelAcceptsImages else { return }
+                            stageImages(fromProviders: providers)
+                        }
+                }
+                .frame(maxHeight: inputExpanded ? inputMaxHeight : 96)
+                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
 
                 if store.isStreaming || submitting {
                     Button {
@@ -824,6 +916,9 @@ struct MessageBubble: View {
     /// True while only reasoning streams; keeps the thinking block expanded
     /// and the empty answer bubble hidden.
     var streamingThinkingOnly = false
+    /// Edit affordance for the latest user prompt. Non-nil only on the
+    /// last user message while nothing streams; nil everywhere else.
+    var onEditPrompt: (() -> Void)? = nil
 
     /// Whether the user toggled the thinking block themselves; their choice
     /// wins over the automatic open-while-reasoning behavior.
@@ -893,6 +988,16 @@ struct MessageBubble: View {
                 if isStreaming && message.content.isEmpty && !showsThinkingRow {
                     StreamingDots()
                         .padding(.leading, 10)
+                }
+
+                if let onEditPrompt, message.role == .user {
+                    Button(action: onEditPrompt) {
+                        Label("Edit", systemImage: "pencil.line")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Edit this prompt and resend it with the updated text")
                 }
             }
 

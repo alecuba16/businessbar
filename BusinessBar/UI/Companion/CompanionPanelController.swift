@@ -252,6 +252,22 @@ final class ChatStore: ObservableObject {
         onSessionChanged?(session.id)
     }
 
+    /// Whether the current conversation holds anything worth closing:
+    /// a persisted session id or at least one message on screen.
+    var hasClosableSession: Bool {
+        currentSessionID != nil || !messages.isEmpty
+    }
+
+    /// Ends the current conversation and opens a fresh one in its place.
+    /// The closed conversation stays on disk and in history, where the
+    /// configured retention rules govern it like any other saved chat.
+    func closeAndStartNewSession() {
+        guard hasClosableSession else { return }
+        startNewSession()
+        applyConfiguredRetention()
+        reloadHistory()
+    }
+
     func startNewSession() {
         // Cancel any in-flight stream: a fresh chat wins. The stream task
         // observes the cancellation and finishes on its own; the state

@@ -52,6 +52,7 @@ enum Constants {
         static let companionHistoryMaxSessions = "companionHistoryMaxSessions"
         static let companionSelectedModelProfile = "companionSelectedModelProfile"
         static let companionAdhocEffort = "companionAdhocEffort"
+        static let companionInputExpanded = "companionInputExpanded"
         // Logging configuration
         static let loggingEnabled = "loggingEnabled"
         static let fileLoggingEnabled = "fileLoggingEnabled"

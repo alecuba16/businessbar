@@ -463,6 +463,16 @@ enum CompanionConfigService {
         UserDefaults.standard.set(effort, forKey: Constants.Defaults.companionAdhocEffort)
     }
 
+    /// Whether the chat input starts in its tall layout. The toggle in the
+    /// input bar flips it and the choice survives restarts.
+    static func chatInputExpanded() -> Bool {
+        UserDefaults.standard.bool(forKey: Constants.Defaults.companionInputExpanded)
+    }
+
+    static func setChatInputExpanded(_ expanded: Bool) {
+        UserDefaults.standard.set(expanded, forKey: Constants.Defaults.companionInputExpanded)
+    }
+
     // MARK: - Reasoning
 
     static func reasoningEnabled() -> Bool {
