@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Fixed
 - Chat input rework: long lines now wrap to the box width instead of clipping sideways, a scrollbar stays visible whenever the text overflows the box (before: nothing indicated there was more text), and the box scrolls to follow the caret while typing new lines. The composer is a native NSTextView now instead of a SwiftUI TextField, so Return still sends, Shift+Return and Option+Return still insert newlines, image paste/drop and focus-on-open keep working, and the tall/compact toggle and window-following height cap are unchanged
+- Hard line breaks (Shift+Return) now show a ¶ marker at the end of each typed line, so they are visibly distinct from lines that only wrapped at the box width. Wrapped lines get no marker
+- The tall input toggle now sizes the box to one third of the panel height (was 45%), and the box starts at that height when toggled, not only growing up to it
+- The Auto-run (YOLO) toggle appears only when command tools are actually offered to the model: the Command Runner is enabled, the backend is OpenAI-compatible, and the selected model is not a local MLX server (mlx-lsp answers run_command by echoing arguments back, so YOLO there would report success for every command). The toggle also refreshes live while the panel is open when Preferences change, including picking a different model
 
 ## [1.3.0] - 2026-10-28
 ### Added

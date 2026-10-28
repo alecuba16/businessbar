@@ -1,4 +1,5 @@
 import BusinessBarCore
+import Combine
 import Foundation
 
 // MARK: - CompanionConfigService
@@ -11,6 +12,10 @@ import Foundation
 /// effect on the next request without invalidating in-flight streams.
 enum CompanionConfigService {
     static let keychainKey = "com.businessbar.companion.apiKey"
+
+    /// Fires after any companion setting write, so mounted views can
+    /// re-read gates that depend on Preferences state.
+    static var settingsSaved: AnyPublisher<Void, Never> { SettingsSavedBus.publisher }
     static let braveKeychainKey = "com.businessbar.companion.braveKey"
     static let tavilyKeychainKey = "com.businessbar.companion.tavilyKey"
     static let customSearchKeychainKey = "com.businessbar.companion.customSearchKey"
@@ -343,6 +348,7 @@ enum CompanionConfigService {
 
     static func setSelectedModelProfileID(_ id: UUID) {
         UserDefaults.standard.set(id.uuidString, forKey: Constants.Defaults.companionSelectedModelProfile)
+        SettingsSavedBus.announce()
     }
 
     /// Per-provider API key in the Keychain. Same prefix as the legacy

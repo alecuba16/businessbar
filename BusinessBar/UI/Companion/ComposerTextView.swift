@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 /// vertical axis inside a ScrollView clips long lines instead of
 /// wrapping, hides its scroller when idle, and never scrolls to the
 /// caret while typing. NSTextView wraps at the exact box width, keeps
-/// a real scroller whenever text overflows, and scrolls the caret into
+/// a scroller that shows both edges at once, and scrolls the caret into
 /// view as lines are added.
 struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
@@ -40,14 +40,19 @@ struct ComposerTextView: NSViewRepresentable {
 
         let scroll = ComposerScrollView()
         scroll.documentView = textView
-        // The scroller is always drawn (knob fills the track when the
-        // text fits), so overflow state is visible at a glance.
+        // Overlay scroller instead of the classic inset: the text can
+        // use the full box width edge to edge, and the arrows show both
+        // edges at once, so it is always clear whether more text sits
+        // above or below.
         scroll.hasVerticalScroller = true
         scroll.verticalScroller?.controlSize = .mini
+        scroll.verticalScroller?.scrollerStyle = .overlay
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = false
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 2, left: 0, bottom: 2, right: 0)
 
         let coordinator = context.coordinator
         coordinator.textView = textView
@@ -62,9 +67,11 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onDidMoveToWindow = { [weak coordinator] in
             coordinator?.applyPendingFocus()
             coordinator?.syncDocumentHeight()
+            coordinator?.syncScrollerState()
         }
         scroll.onFrameChange = { [weak coordinator] _ in
             coordinator?.syncDocumentHeight()
+            coordinator?.syncScrollerState()
         }
 
         textView.string = text
@@ -91,6 +98,7 @@ struct ComposerTextView: NSViewRepresentable {
 
         coordinator.syncDocumentHeight()
         coordinator.reportHeight()
+        coordinator.syncScrollerState()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -159,6 +167,35 @@ struct ComposerTextView: NSViewRepresentable {
             parent.onContentHeight(height)
         }
 
+        // The scroller mirrors the document edge situation: both
+        // arrows enabled while the text overflows, each arrow disabled
+        // at its own edge, both disabled once everything fits. Derived
+        // from geometry on every content or frame change, so the
+        // indicator is honest without manual event wiring.
+        func syncScrollerState() {
+            guard let textView, let scroll = scrollView,
+                  let scroller = scroll.verticalScroller else { return }
+            let overflow = textView.frame.height > scroll.contentView.bounds.height + 0.5
+            guard overflow else {
+                scroller.doubleValue = 0
+                scroller.isEnabled = false
+                scroller.knobProportion = 1
+                return
+            }
+            let content = scroll.contentView
+            let docHeight = content.documentView?.frame.height ?? 0
+            let travel = docHeight - content.bounds.height
+            guard travel > 0 else {
+                scroller.doubleValue = 0
+                scroller.isEnabled = false
+                scroller.knobProportion = 1
+                return
+            }
+            scroller.isEnabled = true
+            scroller.doubleValue = content.bounds.origin.y / travel
+            scroller.knobProportion = content.bounds.height / docHeight
+        }
+
         // Every text change keeps the caret line on screen: typing
         // past the bottom scrolls instead of hiding the line being
         // written.
@@ -174,6 +211,7 @@ struct ComposerTextView: NSViewRepresentable {
             syncDocumentHeight()
             reportHeight()
             scrollCaretIntoView()
+            syncScrollerState()
         }
 
         func textDidChangeSelection(_ notification: Notification) {
@@ -200,10 +238,86 @@ final class ComposerNSTextView: NSTextView {
     var onReturn: (() -> Void)?
     var onPaste: ((NSPasteboard) -> Void)?
     var onDidMoveToWindow: (() -> Void)?
+    // Internal so validation harnesses can read the marker state.
+    var breakLayer: CATextLayer = {
+        let layer = CATextLayer()
+        layer.string = "¶"
+        layer.fontSize = 9
+        layer.foregroundColor = NSColor.systemGray.withAlphaComponent(0.55).cgColor
+        layer.alignmentMode = .left
+        layer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        return layer
+    }()
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         onDidMoveToWindow?()
+    }
+
+    override func layout() {
+        super.layout()
+        positionBreakMarkers()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        positionBreakMarkers()
+    }
+
+    // ¶ at the end of each line a Return created, so a typed break is
+    // visibly distinct from a wrap. A line whose text wrapped into the
+    // newline fragment (fragment starts above the line's first glyph)
+    // keeps the marker off: the fragment holds text, not the break. The
+    // layer travels with the document, so scrolled-away breaks stay
+    // marked.
+    private func positionBreakMarkers() {
+        guard let container = textContainer, let layoutManager = layoutManager else { return }
+        layoutManager.ensureLayout(for: container)
+        let string = (self.string as NSString)
+        var markers: [CGRect] = []
+        var charIndex = 0
+        while charIndex < string.length {
+            let lineRange = string.lineRange(for: NSRange(location: charIndex, length: 0))
+            let lineEnd = NSMaxRange(lineRange)
+            if string.character(at: lineEnd - 1) == 0x0A {
+                let glyphRange = layoutManager.glyphRange(
+                    forCharacterRange: NSRange(location: lineEnd - 1, length: 1),
+                    actualCharacterRange: nil
+                )
+                if glyphRange.length > 0 {
+                    let newlineFragment = layoutManager.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
+                    let lineStartGlyph = layoutManager.glyphRange(
+                        forCharacterRange: NSRange(location: lineRange.location, length: 1),
+                        actualCharacterRange: nil
+                    )
+                    let lineStartFragment = lineStartGlyph.length > 0
+                        ? layoutManager.lineFragmentRect(forGlyphAt: lineStartGlyph.location, effectiveRange: nil)
+                        : newlineFragment
+                    let lineStartedInThisFragment = abs(newlineFragment.minY - lineStartFragment.minY) < 0.5
+                    if lineStartedInThisFragment {
+                        markers.append(newlineFragment)
+                    }
+                }
+            }
+            charIndex = lineEnd
+        }
+        if markers.isEmpty {
+            if breakLayer.superlayer != nil { breakLayer.removeFromSuperlayer() }
+            return
+        }
+        if breakLayer.superlayer == nil { layer?.addSublayer(breakLayer) }
+        let origin = textContainerOrigin
+        let lineHeight = markers[0].height
+        breakLayer.frame = CGRect(
+            x: origin.x,
+            y: origin.y,
+            width: bounds.width,
+            height: markers.last!.maxY - markers[0].minY
+        )
+        breakLayer.string = markers.enumerated().map { index, _ in
+            index == markers.count - 1 ? "¶" : "¶\n"
+        }.joined()
+        breakLayer.fontSize = lineHeight * 0.55
     }
 
     override func becomeFirstResponder() -> Bool {

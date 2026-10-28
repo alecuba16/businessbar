@@ -23,6 +23,7 @@ struct ChatView: View {
     /// Panel height from the background geometry reader; the tall input
     /// scales its cap with the window instead of a fixed line count.
     @State private var panelHeight: CGFloat = 0
+    @State private var settingsRevision = 0
     /// Base64 data URIs staged for the next message. Populated from the
     /// paperclip picker, drops, or pastes; cleared on send.
     @State private var pendingImages: [String] = []
@@ -92,6 +93,14 @@ struct ChatView: View {
             if !streaming {
                 submitting = false
             }
+        }
+        .onReceive(CompanionConfigService.settingsSaved) { _ in
+            settingsRevision += 1
+            // Tall mode re-syncs from the persisted value so an external
+            // write (probe, future callers) reaches the open panel. The
+            // in-panel toggle writes the same value it flips, so this
+            // assignment is a no-op there.
+            inputExpanded = CompanionConfigService.chatInputExpanded()
         }
         .onAppear { composerFocusRequest += 1 }
         .dropDestination(for: URL.self) { urls, _ in
@@ -455,7 +464,9 @@ struct ChatView: View {
 
             Spacer(minLength: 0)
 
-            if sendHandlerIsCommandAware {
+            // The toggle is read from the gate directly: hiding it on a
+            // stale gate would leave YOLO on with no way to turn it off.
+            if commandToolsEnabledNow {
                 Toggle(isOn: $commandTools.yoloEnabled) {
                     Text("Auto-run (YOLO)")
                         .font(.caption)
@@ -625,13 +636,14 @@ struct ChatView: View {
         return model.acceptsImages == true
     }
 
-    /// Height cap for the tall composer. 45% of the panel, floored at
-    /// 160pt so even a small window keeps a usable editor, and it grows
+    /// Height cap for the tall composer. One third of the panel, floored
+    /// at 160pt so even a small window keeps a usable editor, and it grows
     /// as the window grows. Before the first layout pass the fallback is
-    /// a sane default.
+    /// a sane default. The cap applies to the editor only; the input bar
+    /// adds its padding and the attachment strip on top.
     private var inputMaxHeight: CGFloat {
         guard panelHeight > 0 else { return 220 }
-        return max(160, panelHeight * 0.45)
+        return max(160, panelHeight / 3)
     }
 
     private var inputBar: some View {
@@ -703,10 +715,9 @@ struct ChatView: View {
                     }
                 }
                 .frame(
-                    height: min(
-                        max(composerContentHeight, 26),
-                        inputExpanded ? inputMaxHeight : 96
-                    ),
+                    height: inputExpanded
+                        ? inputMaxHeight
+                        : min(max(composerContentHeight, 26), 96),
                     alignment: .topLeading
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -742,9 +753,24 @@ struct ChatView: View {
         }
     }
 
+    /// True when the chat's outgoing requests actually offer the command
+    /// tools: user enabled them, the backend is OpenAI-compatible, and the
+    /// selected model is not the local MLX server (mlx-lsp serves
+    /// run_command requests by echoing the arguments back, so every
+    /// command would "succeed" with nonsense output).
     private var sendHandlerIsCommandAware: Bool {
-        CompanionConfigService.commandToolsEnabled()
+        commandToolsEnabledNow
+    }
+
+    /// Gate refreshed on settings saves while the panel is open, so the
+    /// YOLO toggle never lingers after the Command Runner is turned off
+    /// in Preferences. The revision counter is read here so SwiftUI
+    /// treats the bus ping as a dependency of the rendered header.
+    private var commandToolsEnabledNow: Bool {
+        _ = settingsRevision
+        return CompanionConfigService.commandToolsEnabled()
             && CompanionConfigService.backend() == .openai
+            && !(CompanionConfigService.selectedModel()?.provider.isLocalMLX == true)
     }
 
     /// Thumbnails of staged images with a remove button each.
