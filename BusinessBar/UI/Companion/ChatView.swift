@@ -21,6 +21,10 @@ struct ChatView: View {
     /// Base64 data URIs staged for the next message. Populated from the
     /// paperclip picker, drops, or pastes; cleared on send.
     @State private var pendingImages: [String] = []
+    /// True from the send button press until the stream starts (or fails
+    /// to start). Covers the server warm-up window where nothing else in
+    /// the panel moves, so the submit never looks dead.
+    @State private var submitting = false
     @FocusState private var inputFocused: Bool
 
     /// Age buckets offered in the cleanup menu.
@@ -63,7 +67,7 @@ struct ChatView: View {
                 errorBanner(error)
             }
 
-            if store.isStreaming {
+            if store.isStreaming || submitting {
                 statusRow
             }
 
@@ -72,6 +76,13 @@ struct ChatView: View {
             inputBar
         }
         .background(.background)
+        .onChange(of: store.isStreaming) { _, streaming in
+            // The stream owns the busy state from its first delta; when
+            // it ends, a leftover submitting flag must not linger.
+            if !streaming {
+                submitting = false
+            }
+        }
         .onAppear { inputFocused = true }
         .dropDestination(for: URL.self) { urls, _ in
             guard selectedModelAcceptsImages else { return false }
@@ -501,7 +512,9 @@ struct ChatView: View {
         HStack(spacing: 6) {
             ProgressView()
                 .controlSize(.small)
-            Text(store.activityLabel.isEmpty ? "Working…" : store.activityLabel)
+            Text(submitting && !store.isStreaming
+                ? "Submitting…"
+                : (store.activityLabel.isEmpty ? "Working…" : store.activityLabel))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 0)
@@ -596,15 +609,19 @@ struct ChatView: View {
                         stageImages(fromProviders: providers)
                     }
 
-                if store.isStreaming {
+                if store.isStreaming || submitting {
                     Button {
-                        store.cancel()
+                        if store.isStreaming {
+                            store.cancel()
+                        } else {
+                            submitting = false
+                        }
                     } label: {
                         Image(systemName: "stop.circle.fill")
                             .font(.title3)
                     }
                     .buttonStyle(.plain)
-                    .help("Stop generating")
+                    .help(store.isStreaming ? "Stop generating" : "Cancel submitting")
                 } else {
                     Button {
                         send()
@@ -716,9 +733,12 @@ struct ChatView: View {
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let images = pendingImages
-        guard !text.isEmpty || !images.isEmpty, !store.isStreaming else { return }
+        guard !text.isEmpty || !images.isEmpty, !store.isStreaming, !submitting else { return }
         draft = ""
         pendingImages = []
+        // Cover the warm-up window (server start, first model load) with
+        // visible progress; the stream takes over the label once it starts.
+        submitting = true
         // Local MLX profiles need the server up before the client call;
         // everything else skips straight through.
         Task { @MainActor in
@@ -728,12 +748,14 @@ struct ChatView: View {
                 store.errorMessage = error.localizedDescription
                 draft = text
                 pendingImages = images
+                submitting = false
                 return
             }
             guard let client = clientProvider() else {
                 store.errorMessage = "No model configured. Set it up in Preferences > Companion."
                 draft = text
                 pendingImages = images
+                submitting = false
                 return
             }
             store.send(
@@ -748,6 +770,11 @@ struct ChatView: View {
                     ? { [weak commandTools] in await commandTools?.drainPendingResults() ?? [] }
                     : nil
             )
+            // store.send sets isStreaming synchronously; if it did not
+            // start (empty prompt raced a stream), drop the busy state.
+            if !store.isStreaming {
+                submitting = false
+            }
         }
     }
 

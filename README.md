@@ -29,7 +29,7 @@ A unified macOS menu bar application combining three essential functionalities:
 ### LLM Companion
 - ⌨️ Per-template rewrite shortcuts: each prompt template gets its own global shortcut for the selected text, with a toast confirming the trigger and the result
 - ✅ Preferences show a Saved indicator after every change is stored (UserDefaults, Keychain and file-backed settings included), and the Companion tab has the same Accessibility permission check and management as the Badges tab
-- 💬 Floating chat panel that works over fullscreen apps, with markdown rendering (headings, code blocks, tables, links, images), a streaming response with a live status line, and retry on errors
+- 💬 Floating chat panel that works over fullscreen apps, with markdown rendering (headings, code blocks, tables, links, images), a streaming response with a live status line, and retry on errors. The send button turns into a stop button the moment you submit: it shows Submitting while the local server warms up, and stops generation once the stream runs
 - 🔀 Providers: each provider is an endpoint (base URL, Keychain key, headers) holding multiple models (system prompt, reasoning toggle, effort with custom values) you can switch mid-conversation from the chat picker; existing setup migrates automatically and the old backend section is gone
 - ✍️ Rewrite actions: templates can replace the selection, insert the reply right after it, or show the overlay; Format for Slack template emits Slack mrkdwn
 - 🎚️ Per-request reasoning effort: pick it per rewrite template, per model, or per chat message, custom values included
@@ -45,6 +45,7 @@ A unified macOS menu bar application combining three essential functionalities:
 - 🖥️ Command tools: run_command, read_file, and list_files scoped to the working dir shown in the chat header (default set in the Command Runner Configure sheet, click the dir label to switch it per session); read-only commands run without asking, everything else shows a confirmation card, and Auto-run (YOLO) skips the prompts (rm and credentials files still ask)
 - 🖼️ Image inputs: models opt in with the Images tickbox (Text is on by default); once a model accepts images the chat input grows a paperclip, drag-and-drop, and paste. Two Qwen3-VL models in the local MLX catalog take images and fit 16GB RAM
 - ➕ Custom MLX models: paste any MLX-format Hugging Face repo id, Check fetches the tech details (architecture, token context, quantization, sizes, fit) before you add it, then it downloads and serves like any curated model
+- 🌐 Live MLX browsing: Browse more models in the local models sheet lists the current mlx-community chat catalog from Hugging Face with Text / Text + Images filters, download counts and sizes, and a sort by size or downloads; Add registers a repo, its Download button stays the only thing that fetches weights
 - 🔑 API keys stored in the Keychain
 - 🔒 The chat panel and rewrite overlay never replace your text automatically; you choose Replace or Copy
 
@@ -226,8 +227,9 @@ BusinessBar requires the following permissions:
 7. (Optional) On-device models: install uv (`brew install uv`), then open
    Preferences > Companion and press Add Local Models in the providers
    section. Download one of the curated MLX
-   models (nothing downloads until you press Download), press Start, and add
-   the Local (MLX) chat model to chat without any API key. Text models serve
+   models (nothing downloads until you press Download), press Use to
+   activate it (this also creates the Local (MLX) chat model), and chat
+   without any API key; the server starts on the first message. Text models serve
    through mlx-lm and the two Qwen3-VL vision models through mlx-vlm, picked
    per model automatically. The server stops
    itself after 5 idle minutes and the next message starts it again. Add more

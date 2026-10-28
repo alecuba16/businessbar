@@ -41,12 +41,16 @@ struct LocalModelsSection: View {
     @State private var activeModelID: String?
     @State private var statusDetail = ""
     @State private var downloadedCache: [String] = []
-    @State private var localProfileCreated = false
     @State private var customRepoText = ""
     @State private var customCheck: MLXRepoInspector.Report?
     @State private var customError: String?
     @State private var customChecking = false
     @State private var customEntries: [MLXModelCatalog.Entry] = []
+    @State private var directoryItems: [MLXModelDirectory.Item] = []
+    @State private var directoryFetching = false
+    @State private var directoryError: String?
+    @State private var directoryFilter: MLXModelCatalog.Kind?
+    @State private var directorySortBySize = false
 
     private let installedRAM = Int64(ProcessInfo.processInfo.physicalMemory)
 
@@ -55,10 +59,6 @@ struct LocalModelsSection: View {
         _idleText = State(initialValue: String(MLXServerConfig.idleMinutes()))
         _keepLoaded = State(initialValue: MLXServerConfig.keepLoaded())
         _activeModelID = State(initialValue: MLXServerConfig.activeModelID())
-        // The sheet rebuilds this view on every open, so seed from the store
-        // instead of assuming the button has not been pressed yet.
-        _localProfileCreated = State(initialValue:
-            CompanionConfigService.chatProviders().contains { $0.isLocalMLX == true })
         _customEntries = State(initialValue: MLXModelCatalog.customEntries)
     }
 
@@ -69,6 +69,7 @@ struct LocalModelsSection: View {
             if let uv = uvPath {
                 serverControls
                 modelCatalog
+                modelDirectory
                 customModelProvisioning
                 serverSettings
             } else {
@@ -101,6 +102,9 @@ struct LocalModelsSection: View {
             text += " Keep loaded is on: the model stays in memory until you stop the server."
         } else {
             text += " The server stops after \(idleText) min without requests; the next message starts it again."
+        }
+        if !directoryItems.isEmpty {
+            text += " Browse lists live models from Hugging Face on your command; adding one only registers it, downloading still needs its Download button."
         }
         return text
     }
@@ -236,17 +240,7 @@ struct LocalModelsSection: View {
             }
             .controlSize(.small)
         } else {
-            if isDownloaded {
-                Button("Delete") {
-                    try? store.delete(modelID: entry.id)
-                    if isCustom {
-                        removeCustomEntry(entry)
-                    }
-                    refreshDownloads()
-                }
-                .controlSize(.small)
-                .help(isCustom ? "Delete the downloaded weights and remove the entry" : "Delete the downloaded weights")
-            } else {
+            if !isDownloaded {
                 Button("Download") {
                     do {
                         try store.startDownload(modelID: entry.id)
@@ -256,12 +250,29 @@ struct LocalModelsSection: View {
                 }
                 .controlSize(.small)
                 .disabled(fit == .wontFit)
-                Button(activeModelID == entry.id ? "Active" : "Use") {
-                    setActiveModel(entry)
+            } else if isCustom {
+                Button("Delete") {
+                    try? store.delete(modelID: entry.id)
+                    removeCustomEntry(entry)
+                    refreshDownloads()
                 }
                 .controlSize(.small)
-                .disabled(activeModelID == entry.id)
+                .help("Delete the downloaded weights and remove the entry")
+            } else {
+                Button("Delete") {
+                    try? store.delete(modelID: entry.id)
+                    refreshDownloads()
+                }
+                .controlSize(.small)
+                .help("Delete the downloaded weights")
             }
+            // Use activates the model and creates the Local (MLX) chat
+            // provider in one step, whether or not weights are on disk yet.
+            Button(activeModelID == entry.id ? "Active" : "Use") {
+                setActiveModel(entry)
+            }
+            .controlSize(.small)
+            .disabled(activeModelID == entry.id)
         }
     }
 
@@ -295,6 +306,150 @@ struct LocalModelsSection: View {
                 )
             )
             .help("Against \(ByteCountFormatter.string(fromByteCount: installedRAM, countStyle: .memory)) of installed memory")
+    }
+
+    // MARK: Live model directory
+
+    /// Live HF catalog on explicit command. Browse fetches the list once;
+    /// filter and sort controls only re-arrange what already arrived. Add
+    /// registers a repo as a custom catalog entry, nothing downloads until
+    /// its Download button is pressed.
+    private var modelDirectory: some View {
+        Group {
+            HStack {
+                Button(directoryFetching ? "Fetching…" : (directoryItems.isEmpty ? "Browse more models" : "Refresh")) {
+                    runDirectoryFetch()
+                }
+                .controlSize(.small)
+                .disabled(directoryFetching)
+                if !directoryItems.isEmpty {
+                    Picker("Filter", selection: $directoryFilter) {
+                        Text("All").tag(MLXModelCatalog.Kind?.none)
+                        Text("Text").tag(MLXModelCatalog.Kind?.some(.text))
+                        Text("Text + Images").tag(MLXModelCatalog.Kind?.some(.textAndImages))
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .frame(maxWidth: 220)
+                    Picker("Sort", selection: $directorySortBySize) {
+                        Text("Downloads").tag(false)
+                        Text("Size").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .frame(maxWidth: 140)
+                }
+            }
+            if directoryFetching {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Fetching MLX chat models from Hugging Face…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            if let error = directoryError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+            ForEach(filteredDirectoryItems) { item in
+                directoryRow(item)
+            }
+        }
+    }
+
+    private var filteredDirectoryItems: [MLXModelDirectory.Item] {
+        var items = directoryItems
+        if let filter = directoryFilter {
+            items = items.filter { $0.kind == filter }
+        }
+        if directorySortBySize {
+            items.sort { lhs, rhs in
+                switch (lhs.sizeBytes, rhs.sizeBytes) {
+                case (let l?, let r?): return l < r
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default: return lhs.downloads > rhs.downloads
+                }
+            }
+        }
+        return items
+    }
+
+    private func directoryRow(_ item: MLXModelDirectory.Item) -> some View {
+        let knownIDs = Set(MLXModelCatalog.entries.map(\.id) + customEntries.map(\.id))
+        let alreadyAdded = knownIDs.contains(item.id)
+        let ramBytes = item.sizeBytes.map { MLXRepoInspector.estimateRAM(sizeBytes: $0) }
+        let fit = ramBytes.map { MLXModelCatalog.fit(ramBytes: $0, installedRAM: installedRAM) }
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(MLXRepoInspector.displayName(fromRepoID: item.id))
+                        .fontWeight(.medium)
+                    if let fit {
+                        fitPill(fit)
+                    }
+                    kindPill(item.kind)
+                }
+                HStack(spacing: 12) {
+                    if let size = item.sizeBytes {
+                        Text("\(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) on disk")
+                    } else {
+                        Text("Size unknown")
+                    }
+                    Text("\(item.downloads) downloads")
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+            Spacer()
+            if alreadyAdded {
+                Text("In catalog")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Button("Add") {
+                    addFromDirectory(item)
+                }
+                .controlSize(.small)
+                .disabled(fit == .wontFit)
+                .help(fit == .wontFit ? "Needs more RAM than this machine has" : "Register this repo in the catalog above")
+            }
+        }
+    }
+
+    private func runDirectoryFetch() {
+        directoryFetching = true
+        directoryError = nil
+        Task {
+            do {
+                let items = try await MLXModelDirectory.fetch()
+                await MainActor.run {
+                    directoryItems = items
+                    directoryFetching = false
+                }
+            } catch {
+                await MainActor.run {
+                    directoryError = error.localizedDescription
+                    directoryFetching = false
+                }
+            }
+        }
+    }
+
+    private func addFromDirectory(_ item: MLXModelDirectory.Item) {
+        let entry = MLXModelCatalog.Entry(
+            id: item.id,
+            displayName: MLXRepoInspector.displayName(fromRepoID: item.id),
+            sizeBytes: item.sizeBytes ?? 0,
+            ramBytes: item.sizeBytes.map { MLXRepoInspector.estimateRAM(sizeBytes: $0) } ?? 0,
+            kind: item.kind
+        )
+        MLXModelCatalog.addCustomEntry(entry)
+        customEntries = MLXModelCatalog.customEntries
+        refreshDownloads()
     }
 
     // MARK: Custom model provisioning
@@ -443,13 +598,6 @@ struct LocalModelsSection: View {
                 .onChange(of: keepLoaded) { _, newValue in
                     MLXServerConfig.setKeepLoaded(newValue)
                 }
-            Button(localProfileCreated ? "Local provider added" : "Add chat provider for local model") {
-                if CompanionConfigService.upsertLocalMLXProvider() != nil {
-                    localProfileCreated = true
-                }
-            }
-            .controlSize(.small)
-            .disabled(activeModelID == nil)
         }
     }
 
@@ -464,9 +612,7 @@ struct LocalModelsSection: View {
     }
 
     private func updateLocalProfile() {
-        if CompanionConfigService.upsertLocalMLXProvider() != nil {
-            localProfileCreated = true
-        }
+        _ = CompanionConfigService.upsertLocalMLXProvider()
     }
 
     private func refreshDownloads() {

@@ -20,6 +20,9 @@ DerivedData/
 
 # Swift Package Manager
 .build/
+.build-cov/
+*.profraw
+*.profdata
 .swiftpm/
 Package.resolved
 
