@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 // MARK: - OutputRingBuffer
@@ -109,6 +110,33 @@ public enum ShellExecutor: Sendable {
         case emptyArgv
     }
 
+    // Every spawned process registers here so app quit can kill children
+    // synchronously; the registry's async sweep may never run that late.
+    private static let quitLock = NSLock()
+    private static var liveProcesses: [Process] = []
+
+    static func registerForQuitKill(_ process: Process) {
+        quitLock.lock()
+        // Prune finished entries on the way in so the table only tracks
+        // processes that can still be killed.
+        liveProcesses.removeAll { !$0.isRunning }
+        liveProcesses.append(process)
+        quitLock.unlock()
+    }
+
+    /// Synchronous last-resort kill for applicationWillTerminate: async
+    /// tasks may never run before the process exits.
+    public static func killAllAtQuit() {
+        quitLock.lock()
+        let processes = liveProcesses
+        liveProcesses.removeAll()
+        quitLock.unlock()
+        for process in processes where process.isRunning {
+            process.terminate()
+            kill(process.processIdentifier, SIGKILL)
+        }
+    }
+
     /// Builds the argv for a permission decision. Tier 0 argv runs as-is
     /// with no shell; everything else runs through zsh -c.
     public static func argv(
@@ -148,6 +176,7 @@ public enum ShellExecutor: Sendable {
         // API keys never flow into child processes.
         env.removeValue(forKey: "OPENAI_API_KEY")
         process.environment = env
+        ShellExecutor.registerForQuitKill(process)
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

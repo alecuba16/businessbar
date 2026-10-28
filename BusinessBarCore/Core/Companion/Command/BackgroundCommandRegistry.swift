@@ -212,10 +212,11 @@ public actor BackgroundCommandRegistry {
     }
 
     /// Takes and clears the queue of finished background results. The
-    /// chat layer drains this before every new request.
-    public func drainPending() -> [CompletedResult] {
-        let drained = pending
-        pending.removeAll()
+    /// chat layer drains this before every new request. Results from other
+    /// sessions stay queued for their own conversations.
+    public func drainPending(sessionID: UUID?) -> [CompletedResult] {
+        let drained = pending.filter { $0.sessionID == sessionID }
+        pending.removeAll { $0.sessionID == sessionID }
         return drained
     }
 

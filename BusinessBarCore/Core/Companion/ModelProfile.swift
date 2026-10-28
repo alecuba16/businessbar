@@ -13,23 +13,28 @@ public struct ModelProfile: Identifiable, Codable, Equatable, Hashable, Sendable
     /// Reasoning effort sent for this profile when reasoning is enabled.
     /// Nil falls back to the global default.
     public var reasoningEffort: String?
+    /// True when the profile points at the app-managed MLX server. Such
+    /// profiles need no API key and the server is started on demand.
+    public var isLocalMLX: Bool?
 
     public init(
         id: UUID = UUID(),
         name: String,
         baseURL: String,
         model: String,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        isLocalMLX: Bool? = nil
     ) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.model = model
         self.reasoningEffort = reasoningEffort
+        self.isLocalMLX = isLocalMLX
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, baseURL, model, reasoningEffort
+        case id, name, baseURL, model, reasoningEffort, isLocalMLX
     }
 
     public init(from decoder: Decoder) throws {
@@ -39,6 +44,7 @@ public struct ModelProfile: Identifiable, Codable, Equatable, Hashable, Sendable
         baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? ""
         reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        isLocalMLX = try container.decodeIfPresent(Bool.self, forKey: .isLocalMLX)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -48,6 +54,7 @@ public struct ModelProfile: Identifiable, Codable, Equatable, Hashable, Sendable
         try container.encode(baseURL, forKey: .baseURL)
         try container.encode(model, forKey: .model)
         try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
+        try container.encodeIfPresent(isLocalMLX, forKey: .isLocalMLX)
     }
 }
 

@@ -28,6 +28,7 @@ struct CompanionTab: View {
     @State private var systemPromptText: String
     @State private var apiKeyText: String
     @State private var searchProviderKind: String
+    @State private var commandToolsEnabled: Bool
     @State private var braveKeyText: String
     @State private var tavilyKeyText: String
     @State private var customSearchEndpointText: String
@@ -61,6 +62,7 @@ struct CompanionTab: View {
         _systemPromptText = State(initialValue: defaults.string(forKey: Constants.Defaults.companionSystemPrompt) ?? "")
         _apiKeyText = State(initialValue: CompanionConfigService.apiKey())
         _searchProviderKind = State(initialValue: CompanionConfigService.searchProviderKind())
+        _commandToolsEnabled = State(initialValue: CompanionConfigService.commandToolsEnabled())
         _braveKeyText = State(initialValue: CompanionConfigService.braveKey())
         _tavilyKeyText = State(initialValue: CompanionConfigService.tavilyKey())
         _customSearchEndpointText = State(initialValue: defaults.string(forKey: Constants.Defaults.companionCustomSearchEndpoint) ?? "")
@@ -195,6 +197,28 @@ struct CompanionTab: View {
                     } footer: {
                         Text("Gives the model a web_search tool. Scraped engines need no key and fall back to each other when one blocks the request; API-key providers store their key in the Keychain. Applies to the OpenAI-compatible backend; ACP agents bring their own tools.")
                     }
+                }
+
+                // MARK: Command tools
+                Section {
+                    Toggle("Command tools", isOn: $commandToolsEnabled)
+                        .onChange(of: commandToolsEnabled) { _, enabled in
+                            CompanionConfigService.setCommandToolsEnabled(enabled)
+                            if enabled {
+                                // AppDelegate owns the notification delegate
+                                // and already asked for authorization at launch.
+                                CommandToolController.registerNotificationCategory()
+                            }
+                        }
+                } header: {
+                    Text("Command execution")
+                } footer: {
+                    Text("Gives the model run_command, read_file, and list_files tools scoped to a folder you pick in the chat panel. Read-only commands run without asking; everything else shows a confirmation card first. Applies to the OpenAI-compatible backend only.")
+                }
+
+                // MARK: Local models
+                if backend == .openai {
+                    LocalModelsSection()
                 }
 
                 // MARK: Templates
@@ -551,7 +575,9 @@ struct ProfileEditorSheet: View {
             TextField("Name", text: $profile.name)
             TextField("Base URL (ends in /v1)", text: $profile.baseURL)
             TextField("Model", text: $profile.model)
-            SecureField("API Key (stored in Keychain)", text: $apiKey)
+            if profile.isLocalMLX != true {
+                SecureField("API Key (stored in Keychain)", text: $apiKey)
+            }
 
             Picker("Default effort", selection: Binding(
                 get: { profile.reasoningEffort ?? "" },

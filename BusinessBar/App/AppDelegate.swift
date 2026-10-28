@@ -69,6 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Async tasks may never run before the process exits, so the kill must
         // be synchronous. Skips the graceful session/cancel round trip.
+        ShellExecutor.killAllAtQuit()
+        MLXServerManager.killAtQuit()
+        MLXModelStore.killAtQuit()
         CompanionConfigService.shutdownACPSync()
     }
 

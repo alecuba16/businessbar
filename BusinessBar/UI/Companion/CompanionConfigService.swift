@@ -208,6 +208,43 @@ enum CompanionConfigService {
         try? KeychainHelper.delete(key: ModelProfileStore.keychainKeyPrefix + id.uuidString)
     }
 
+    // MARK: - Local MLX profile
+
+    /// Creates or updates the preset profile pointing at the managed MLX
+    /// server. Reuses the stored profile id so selection survives updates.
+    static func upsertLocalMLXProfile() -> ModelProfile? {
+        guard let modelID = MLXServerConfig.activeModelID(),
+              MLXModelCatalog.entry(id: modelID) != nil else { return nil }
+        let profile = ModelProfile(
+            name: "Local (MLX)",
+            baseURL: MLXServerConfig.baseURLString(),
+            model: modelID,
+            isLocalMLX: true
+        )
+        var profiles = modelProfiles()
+        if let index = profiles.firstIndex(where: { $0.isLocalMLX == true }) {
+            var updated = profile
+            updated.id = profiles[index].id
+            profiles[index] = updated
+            modelProfileStore.save(profiles)
+            return updated
+        }
+        profiles.append(profile)
+        modelProfileStore.save(profiles)
+        return profile
+    }
+
+    /// Starts or restarts the MLX server when the selected chat profile is
+    /// the local preset. Callers await this before streaming; a nil return
+    /// means no local server is involved and the request can go straight
+    /// out.
+    static func ensureLocalServerIfNeeded() async throws {
+        guard backend() == .openai,
+              let profile = selectedModelProfile(),
+              profile.isLocalMLX == true else { return }
+        try await MLXServerManager.shared.ensureRunning(modelID: profile.model)
+    }
+
     // MARK: - Ad-hoc chat effort
 
     /// Effort the chat panel uses for its next request; empty string means
@@ -358,11 +395,18 @@ enum CompanionConfigService {
     /// Chat panel client: uses the selected model profile when one exists,
     /// else the legacy single-model config. Fresh per call so profile and
     /// effort switches take effect on the next message.
+    ///
+    /// Command tools (when enabled) merge their schemas here and raise
+    /// the tool-round budget: background polling is unusable at 3 rounds.
+    /// The command handler itself is per-panel state, so it flows through
+    /// `stream(onToolCall:)`, not the stored handler.
     static func makeChatClient() -> LLMClient? {
+        let commands = commandToolsEnabled() && backend() == .openai
         guard backend() == .openai else { return makeClient() }
         guard let profile = selectedModelProfile() else { return makeClient() }
         let key = profileAPIKey(id: profile.id)
-        guard !profile.model.isEmpty, !key.isEmpty else { return nil }
+        // Local MLX profiles serve without a key; everything else needs one.
+        guard !profile.model.isEmpty, profile.isLocalMLX == true || !key.isEmpty else { return nil }
         var normalized = profile.baseURL
         while normalized.count > 1 && normalized.hasSuffix("/") {
             normalized.removeLast()
@@ -380,9 +424,34 @@ enum CompanionConfigService {
                     : nil,
                 extraHeaders: Dictionary(uniqueKeysWithValues: customHeaders().map { ($0.name, $0.value) })
             ),
-            tools: searchTools(),
-            toolHandler: searchToolHandler()
+            tools: chatToolSchemas(),
+            toolHandler: searchToolHandler(),
+            maxToolRounds: commands ? 20 : 3
         )
+    }
+
+    /// Schemas offered on the chat panel: search plus command tools when
+    /// the user enabled them. The rewrite flow never gets command tools:
+    /// it passes no per-call handler, so an advertised run_command would
+    /// have nothing behind it.
+    static func chatToolSchemas() -> [[String: Any]] {
+        var schemas = searchTools()
+        if commandToolsEnabled() && backend() == .openai {
+            schemas.append(contentsOf: CommandToolCatalog.toolSchemas())
+        }
+        return schemas
+    }
+
+    // MARK: - Command tools
+
+    /// User-facing switch for the command execution tools. Off by default;
+    /// enabling is an explicit opt-in like the search providers.
+    static func commandToolsEnabled() -> Bool {
+        UserDefaults.standard.bool(forKey: "companion.commandToolsEnabled")
+    }
+
+    static func setCommandToolsEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "companion.commandToolsEnabled")
     }
 
     /// Effort the chat panel's next request should use: the ad-hoc pick if

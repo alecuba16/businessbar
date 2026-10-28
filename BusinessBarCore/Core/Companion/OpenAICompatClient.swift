@@ -57,6 +57,9 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
         // Per-request effort wins over the configured one; template
         // overrides and chat-panel ad-hoc picks both land here.
         let effort = reasoningEffortOverride ?? configuration.reasoningEffort
+        // Old tool outputs are dead weight: only the last few exchanges
+        // keep full output, earlier ones fold to a stub.
+        let messages = Self.truncateOldToolOutputs(messages)
 
         return AsyncThrowingStream(bufferingPolicy: .unbounded) { (continuation: AsyncThrowingStream<CompanionEvent, Error>.Continuation) in
             let task = Task {
@@ -214,6 +217,46 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// Folds tool-output user messages older than the last two exchanges
+    /// into short stubs so history cannot blow the token budget. Tool
+    /// outputs are recognizable by their folding prefixes; ordinary prompts
+    /// pass through untouched.
+    public static func truncateOldToolOutputs(
+        _ messages: [ChatMessage],
+        keepExchanges: Int = 2
+    ) -> [ChatMessage] {
+        // An exchange starts at a genuine user prompt; tool outputs folded
+        // as user messages must not inflate the count, or recent outputs
+        // would fold too.
+        func isToolOutput(_ message: ChatMessage) -> Bool {
+            message.content.hasPrefix("Tool '") ||
+                message.content.hasPrefix("[background command finished]")
+        }
+        var exchangeStarts: [Int] = []
+        for (index, message) in messages.enumerated()
+        where message.role == .user && !isToolOutput(message) {
+            exchangeStarts.append(index)
+        }
+        guard exchangeStarts.count > keepExchanges else { return messages }
+        let cutoff = exchangeStarts[exchangeStarts.count - keepExchanges]
+
+        return messages.enumerated().map { index, message in
+            guard index < cutoff, message.role == .user, isToolOutput(message)
+            else { return message }
+            let lines = message.content.components(separatedBy: "\n")
+            // Label line plus the first output line; the rest collapses
+            // into a count so the model knows output was dropped.
+            var kept = Array(lines.prefix(2))
+            if lines.count > kept.count {
+                kept.append("(\(lines.count - kept.count) more lines omitted)")
+            }
+            var folded = ChatMessage(role: .user, content: kept.joined(separator: "\n"))
+            folded.id = message.id
+            folded.thinking = nil
+            return folded
+        }
+    }
 
     private static func errorBodyText(_ bytes: URLSession.AsyncBytes) async -> String {
         var collected: [UInt8] = []

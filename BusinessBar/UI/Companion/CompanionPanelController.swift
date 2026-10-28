@@ -18,7 +18,24 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
 
     private var panel: NSPanel?
     private let chatStore = ChatStore()
+    /// Command tool state: approvals, background processes, workspace,
+    /// YOLO. One instance lives with the chat store.
+    let commandTools = CommandToolController()
     private var restoredOnLaunch = false
+
+    override init() {
+        super.init()
+        // Session-scoped command state (YOLO, approved prefixes, workspace
+        // folder) follows the conversation: switching chats drops them.
+        chatStore.onSessionChanged = { [weak self] sessionID in
+            guard let self else { return }
+            if let sessionID {
+                self.commandTools.beginSession(sessionID)
+            } else {
+                self.commandTools.endSession()
+            }
+        }
+    }
 
     // Zero resident cost when closed: the controller and its NSPanel are
     // created lazily on first open, and everything event-driven stops when
@@ -42,7 +59,10 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
             restoredOnLaunch = true
             chatStore.restoreMostRecentSession()
         }
-        let view = ChatView(store: chatStore, clientProvider: clientProvider)
+        commandTools.isPanelVisible = { [weak self] in
+            self?.panel?.isVisible ?? false
+        }
+        let view = ChatView(store: chatStore, commandTools: commandTools, clientProvider: clientProvider)
         let hosting = NSHostingView(rootView: view)
 
         if panel == nil {
@@ -85,6 +105,8 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
         panel?.orderOut(nil)
         // Cancel any in-flight stream so no work continues while hidden.
         chatStore.cancel()
+        // An unanswered approval must not stay suspended while hidden.
+        commandTools.denyPendingApproval()
         // Kill the ACP subprocess: nothing companion-related outlives the UI.
         Task { await CompanionConfigService.shutdownACP() }
     }
@@ -142,6 +164,7 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         chatStore.cancel()
+        commandTools.denyPendingApproval()
     }
 }
 
@@ -181,6 +204,10 @@ final class ChatStore: ObservableObject {
     /// cannot append into the fresh conversation.
     private var generation = 0
     private let sessionStore: ChatSessionStore
+    /// Called after any conversation reset (new session, clear) with the
+    /// id the next request will belong to. The command tool uses it to
+    /// drop session-scoped approvals, YOLO, prefixes, and workspace.
+    var onSessionChanged: ((UUID?) -> Void)?
 
     init(sessionStore: ChatSessionStore = .shared) {
         self.sessionStore = sessionStore
@@ -222,6 +249,7 @@ final class ChatStore: ObservableObject {
         messages = session.messages
         errorMessage = nil
         pendingUserPrompt = nil
+        onSessionChanged?(session.id)
     }
 
     func startNewSession() {
@@ -234,6 +262,7 @@ final class ChatStore: ObservableObject {
         messages = []
         errorMessage = nil
         pendingUserPrompt = nil
+        onSessionChanged?(nil)
     }
 
     func deleteSession(id: UUID) {
@@ -288,7 +317,13 @@ final class ChatStore: ObservableObject {
         return String(trimmed.prefix(60))
     }
 
-    func send(_ text: String, client: LLMClient, effortOverride: String? = nil) {
+    func send(
+        _ text: String,
+        client: LLMClient,
+        effortOverride: String? = nil,
+        commandToolHandler: ((String, String) async -> String)? = nil,
+        pendingBackgroundResults: (() async -> [BackgroundCommandRegistry.CompletedResult])? = nil
+    ) {
         guard !text.isEmpty, !isStreaming else { return }
         errorMessage = nil
         pendingUserPrompt = text
@@ -314,6 +349,17 @@ final class ChatStore: ObservableObject {
 
             var assistantText = ""
             var thinkingText = ""
+            // Finished background commands fold into the conversation as
+            // synthetic user messages before the request, so the model sees
+            // outcomes it could not wait for earlier.
+            if let drain = pendingBackgroundResults {
+                for result in await drain() {
+                    self.messages.append(ChatMessage(
+                        role: .user,
+                        content: "[background command finished] \(result.command) exited with code \(result.exitCode)\n\(result.output)"
+                    ))
+                }
+            }
             // Re-parsing markdown on every delta would burn CPU on long
             // answers, so UI updates are coalesced to ~12 per second.
             var lastUIUpdate = Date()
@@ -321,7 +367,7 @@ final class ChatStore: ObservableObject {
             do {
                 let stream = await client.stream(
                     messages: self.messages,
-                    onToolCall: nil,
+                    onToolCall: commandToolHandler,
                     reasoningEffortOverride: effortOverride
                 )
                 for try await event in stream {
@@ -377,7 +423,12 @@ final class ChatStore: ObservableObject {
     }
 
     /// Re-sends the last user prompt after a failure.
-    func retryLast(clientProvider: () -> LLMClient?, effortOverride: String? = nil) {
+    func retryLast(
+        clientProvider: () -> LLMClient?,
+        effortOverride: String? = nil,
+        commandToolHandler: ((String, String) async -> String)? = nil,
+        pendingBackgroundResults: (() async -> [BackgroundCommandRegistry.CompletedResult])? = nil
+    ) {
         guard !isStreaming else { return }
         // The failed attempt left the user prompt in the list; drop the
         // trailing prompt so the retry does not duplicate it.
@@ -391,7 +442,13 @@ final class ChatStore: ObservableObject {
             return
         }
         errorMessage = nil
-        send(prompt, client: client, effortOverride: effortOverride)
+        send(
+            prompt,
+            client: client,
+            effortOverride: effortOverride,
+            commandToolHandler: commandToolHandler,
+            pendingBackgroundResults: pendingBackgroundResults
+        )
     }
 
     /// Pulls the last user prompt back into the editor and truncates the
@@ -420,5 +477,6 @@ final class ChatStore: ObservableObject {
         errorMessage = nil
         pendingUserPrompt = nil
         currentSessionID = nil
+        onSessionChanged?(nil)
     }
 }

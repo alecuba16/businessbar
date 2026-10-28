@@ -455,4 +455,24 @@ public struct CommandPermissionParser: Sendable {
         }
         return false
     }
+
+    /// Deny-wins rule for YOLO mode: these still prompt even when the user
+    /// has bypass switched on. `rm` always modifies files, and credentials
+    /// files must never be exfiltrated through the chat channel. Checking
+    /// the raw string catches them even inside shell syntax that would
+    /// otherwise classify as a single command.
+    public static func isDangerousCommand(_ command: String) -> Bool {
+        guard let tokens = tokenize(command) else { return true }
+        let loweredTokens = tokens.map { $0.lowercased() }
+        if loweredTokens.contains("rm") { return true }
+        // .env and similar credential files, by path basename.
+        let credentialBases: Set<String> = [".env", ".env.local", ".env.production"]
+        for token in loweredTokens {
+            let base = (token as NSString).lastPathComponent
+            if credentialBases.contains(base) { return true }
+            // Common shell redirection onto a credentials file reads it.
+            if base.hasPrefix(".env") { return true }
+        }
+        return false
+    }
 }

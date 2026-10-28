@@ -9,6 +9,7 @@ import SwiftUI
 /// render verbatim so what was asked is always readable.
 struct ChatView: View {
     @ObservedObject var store: ChatStore
+    @ObservedObject var commandTools: CommandToolController
     let clientProvider: () -> LLMClient?
 
     @State private var draft: String = ""
@@ -24,8 +25,9 @@ struct ChatView: View {
     /// "default" means no ad-hoc effort; the profile/global default applies.
     private static let defaultEffortTag = "__default__"
 
-    init(store: ChatStore, clientProvider: @escaping () -> LLMClient?) {
+    init(store: ChatStore, commandTools: CommandToolController, clientProvider: @escaping () -> LLMClient?) {
         self.store = store
+        self.commandTools = commandTools
         self.clientProvider = clientProvider
         _selectedProfileID = State(initialValue: CompanionConfigService.selectedModelProfile()?.id)
         _selectedEffort = State(initialValue: CompanionConfigService.adhocChatEffort().isEmpty
@@ -39,7 +41,19 @@ struct ChatView: View {
                 historyDrawer
             }
 
+            if sendHandlerIsCommandAware {
+                commandHeader
+            }
+
             messageList
+
+            if let approval = commandTools.approvalRequest {
+                approvalCard(approval)
+            }
+
+            if !commandTools.backgroundProcesses.isEmpty {
+                backgroundProcessSection
+            }
 
             if let error = store.errorMessage {
                 errorBanner(error)
@@ -344,6 +358,116 @@ struct ChatView: View {
         .padding(.top, 60)
     }
 
+    // MARK: - Command tools
+
+    /// Workspace folder, YOLO toggle, and command tool status. The
+    /// workspace gate reads "pick a folder" until one is chosen: every
+    /// command tool errors out without it.
+    private var commandHeader: some View {
+        HStack(spacing: 8) {
+            Button {
+                commandTools.pickWorkspace()
+            } label: {
+                Label(
+                    commandTools.workspaceRoot.map { ($0 as NSString).lastPathComponent }
+                        ?? "Choose folder…",
+                    systemImage: "folder"
+                )
+                .lineLimit(1)
+            }
+            .controlSize(.small)
+            .help(commandTools.workspaceRoot ?? "Commands run only inside this folder")
+
+            Spacer(minLength: 0)
+
+            Toggle(isOn: $commandTools.yoloEnabled) {
+                Text("Auto-run")
+                    .font(.caption)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(commandTools.yoloEnabled ? .red : .accentColor)
+            .help(
+                commandTools.yoloEnabled
+                    ? "Commands run without asking. rm and credentials files still prompt."
+                    : "Ask before running anything beyond read-only commands"
+            )
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.bar)
+    }
+
+    /// Inline confirmation card: full command, workspace, plain-words
+    /// risk, three decisions.
+    private func approvalCard(_ request: CommandApprovalRequest) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Run this command?")
+                .font(.callout.weight(.semibold))
+            Text(request.command)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+                .background(.bar)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            Text("\(request.reason.label). Working folder: \((request.workspaceRoot as NSString).lastPathComponent)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Allow Once") {
+                    commandTools.decide(.allowOnce)
+                }
+                .controlSize(.small)
+                Button("Always This Session") {
+                    commandTools.decide(.alwaysThisSession)
+                }
+                .controlSize(.small)
+                Spacer(minLength: 0)
+                Button("Deny", role: .destructive) {
+                    commandTools.decide(.denied)
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .background(Color.yellow.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal)
+        .padding(.bottom, 4)
+    }
+
+    /// Background commands with live status and Stop. Sits below the
+    /// stream so it stays usable while the model writes.
+    private var backgroundProcessSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(commandTools.backgroundProcesses) { process in
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(process.running ? Color.green : Color.secondary)
+                        .frame(width: 6, height: 6)
+                    Text(process.command)
+                        .font(.caption)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if process.running {
+                        Button("Stop") {
+                            Task { await commandTools.stopBackgroundProcess(process.id) }
+                        }
+                        .controlSize(.mini)
+                    } else {
+                        Text("exit \(process.exitCode ?? -1)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 6)
+            }
+        }
+        .padding(.vertical, 4)
+        .background(.bar)
+    }
+
     // MARK: - Status
 
     /// One-line activity indicator while the model works. The label names
@@ -373,7 +497,7 @@ struct ChatView: View {
                 .lineLimit(3)
             Spacer(minLength: 0)
             Button("Retry") {
-                store.retryLast(clientProvider: clientProvider)
+                retry()
             }
             .controlSize(.small)
             Button {
@@ -432,15 +556,64 @@ struct ChatView: View {
         .background(.bar)
     }
 
+    private var sendHandlerIsCommandAware: Bool {
+        CompanionConfigService.commandToolsEnabled()
+            && CompanionConfigService.backend() == .openai
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !store.isStreaming else { return }
-        guard let client = clientProvider() else {
-            store.errorMessage = "No model configured. Set it up in Preferences > Companion."
-            return
-        }
         draft = ""
-        store.send(text, client: client, effortOverride: CompanionConfigService.chatEffortOverride())
+        // Local MLX profiles need the server up before the client call;
+        // everything else skips straight through.
+        Task { @MainActor in
+            do {
+                try await CompanionConfigService.ensureLocalServerIfNeeded()
+            } catch {
+                store.errorMessage = error.localizedDescription
+                draft = text
+                return
+            }
+            guard let client = clientProvider() else {
+                store.errorMessage = "No model configured. Set it up in Preferences > Companion."
+                draft = text
+                return
+            }
+            store.send(
+                text,
+                client: client,
+                effortOverride: CompanionConfigService.chatEffortOverride(),
+                commandToolHandler: sendHandlerIsCommandAware
+                    ? commandTools.makePanelToolHandler()
+                    : nil,
+                pendingBackgroundResults: sendHandlerIsCommandAware
+                    ? { [weak commandTools] in await commandTools?.drainPendingResults() ?? [] }
+                    : nil
+            )
+        }
+    }
+
+    private func retry() {
+        // Local MLX profiles need the server up before the client call.
+        Task { @MainActor in
+            do {
+                try await CompanionConfigService.ensureLocalServerIfNeeded()
+            } catch {
+                store.errorMessage = error.localizedDescription
+                return
+            }
+            store.retryLast(
+                clientProvider: clientProvider,
+                effortOverride: CompanionConfigService.chatEffortOverride(),
+                commandToolHandler: sendHandlerIsCommandAware
+                    ? commandTools.makePanelToolHandler()
+                    : nil,
+                pendingBackgroundResults: sendHandlerIsCommandAware
+                    ? { [weak commandTools] in await commandTools?.drainPendingResults() ?? [] }
+                    : nil
+            )
+        }
     }
 }
 
