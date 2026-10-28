@@ -5,6 +5,10 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Fixed
+- Chat input rework: long lines now wrap to the box width instead of clipping sideways, a scrollbar stays visible whenever the text overflows the box (before: nothing indicated there was more text), and the box scrolls to follow the caret while typing new lines. The composer is a native NSTextView now instead of a SwiftUI TextField, so Return still sends, Shift+Return and Option+Return still insert newlines, image paste/drop and focus-on-open keep working, and the tall/compact toggle and window-following height cap are unchanged
+
 ## [1.3.0] - 2026-10-28
 ### Added
 - LLM Companion: a rewrite shortcut for the selected text with configurable prompt templates, and a floating chat panel that works over fullscreen apps. Backends: any OpenAI-compatible API or an ACP agent over stdio (for example `gemini --acp`). Optional web search tool via Brave, Tavily, or a custom endpoint; keys live in the Keychain. Rewrite results are shown with Replace/Copy actions, never applied automatically

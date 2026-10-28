@@ -30,7 +30,13 @@ struct ChatView: View {
     /// to start). Covers the server warm-up window where nothing else in
     /// the panel moves, so the submit never looks dead.
     @State private var submitting = false
-    @FocusState private var inputFocused: Bool
+    /// Focus request counter for the composer: bumped whenever the
+    /// composer should grab keyboard focus (panel open, prompt pulled
+    /// back for editing). The native view applies each bump once.
+    @State private var composerFocusRequest = 0
+    /// Measured height of the composer text, so the box grows with the
+    /// content up to the layout cap.
+    @State private var composerContentHeight: CGFloat = 26
 
     /// Age buckets offered in the cleanup menu.
     private let cleanupAgeChoices = [7, 30, 90]
@@ -87,7 +93,7 @@ struct ChatView: View {
                 submitting = false
             }
         }
-        .onAppear { inputFocused = true }
+        .onAppear { composerFocusRequest += 1 }
         .dropDestination(for: URL.self) { urls, _ in
             guard selectedModelAcceptsImages else { return false }
             stageImages(from: urls.filter { $0.hasDirectoryPath == false })
@@ -327,7 +333,7 @@ struct ChatView: View {
         return { [self] in
             if let prompt = store.editLastUserPrompt() {
                 draft = prompt
-                inputFocused = true
+                composerFocusRequest += 1
             }
         }
     }
@@ -675,31 +681,35 @@ struct ChatView: View {
                     .help("Attach images (this model takes text only)")
                 }
 
-                // Scroll view caps the editor frame; the text field inside
-                // sizes to its full content, so long prompts scroll instead
-                // of clipping, and the tall cap follows the window size.
-                ScrollView(showsIndicators: true) {
-                    TextField("Ask anything…", text: $draft, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .focused($inputFocused)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .onSubmit { send() }
-                        // Shift+Return and Option+Return insert a newline so
-                        // multi-line prompts stay keyboard-typed; plain
-                        // Return keeps the send behavior.
-                        .onKeyPress(.return, phases: .down) { press in
-                            guard press.modifiers.contains(.shift)
-                                || press.modifiers.contains(.option) else { return .ignored }
-                            draft += "\n"
-                            return .handled
-                        }
-                        .onPasteCommand(of: [.image, .fileURL]) { providers in
-                            guard selectedModelAcceptsImages else { return }
-                            stageImages(fromProviders: providers)
-                        }
+                // Native composer: wraps at the box width, grows with
+                // the content up to the layout cap, shows a scroller
+                // exactly while the text overflows, and keeps the caret
+                // visible while typing.
+                ZStack(alignment: .topLeading) {
+                    ComposerTextView(
+                        text: $draft,
+                        focusRequest: $composerFocusRequest,
+                        onReturn: { send() },
+                        onPaste: { handleComposerPaste($0) },
+                        onContentHeight: { composerContentHeight = $0 }
+                    )
+                    if draft.isEmpty {
+                        Text("Ask anything…")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.tertiary)
+                            .allowsHitTesting(false)
+                            .padding(.leading, 5)
+                            .padding(.top, 2)
+                    }
                 }
-                .frame(maxHeight: inputExpanded ? inputMaxHeight : 96)
-                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                .frame(
+                    height: min(
+                        max(composerContentHeight, 26),
+                        inputExpanded ? inputMaxHeight : 96
+                    ),
+                    alignment: .topLeading
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 if store.isStreaming || submitting {
                     Button {
@@ -820,6 +830,44 @@ struct ChatView: View {
         DispatchQueue.main.async {
             pendingImages.append(uri)
         }
+    }
+
+    /// Paste hook for the native composer. Items carrying image bytes or
+    /// a file URL wrap into providers and stage as attachments when the
+    /// model takes images; any other paste stays plain text.
+    private func handleComposerPaste(_ pasteboard: NSPasteboard) {
+        guard selectedModelAcceptsImages else { return }
+        var providers: [NSItemProvider] = []
+        for item in pasteboard.pasteboardItems ?? [] {
+            if let provider = provider(forPasteboardItem: item) {
+                providers.append(provider)
+            }
+        }
+        guard !providers.isEmpty else { return }
+        stageImages(fromProviders: providers)
+    }
+
+    /// Wraps a pasteboard item into a provider for the staging
+    /// pipeline, preferring image types so `loadDataRepresentation`
+    /// yields the image bytes directly.
+    private func provider(forPasteboardItem item: NSPasteboardItem) -> NSItemProvider? {
+        let typeIDs = item.types.map(\.rawValue)
+        guard let typeID = typeIDs.first(where: { UTType($0)?.conforms(to: .image) == true })
+            ?? typeIDs.first(where: { $0 == UTType.fileURL.identifier }) else { return nil }
+        // Image bytes are registered as-is; a file URL item carries
+        // the serialized URL, which the staging pipeline parses back.
+        guard let data = item.data(forType: NSPasteboard.PasteboardType(typeID)) else {
+            return nil
+        }
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(
+            forTypeIdentifier: typeID,
+            visibility: .all
+        ) { completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
     }
 
     private func send() {
