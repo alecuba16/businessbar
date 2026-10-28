@@ -56,7 +56,7 @@ public final class ScrapedSearchProvider: SearchProvider, @unchecked Sendable {
     }
 
     /// Primary first, then the other engines in a fixed order.
-    static func engines(after primary: ScrapedSearchEngine) -> [ScrapedSearchEngine] {
+    public static func engines(after primary: ScrapedSearchEngine) -> [ScrapedSearchEngine] {
         let rotation = ScrapedSearchEngine.allCases
         guard let start = rotation.firstIndex(of: primary) else { return rotation }
         return Array(rotation[start...]) + Array(rotation[..<start])
@@ -122,7 +122,7 @@ public final class ScrapedSearchProvider: SearchProvider, @unchecked Sendable {
     }
 
     /// The anomaly page carries the challenge script but zero result links.
-    static func looksLikeChallenge(_ html: String) -> Bool {
+    public static func looksLikeChallenge(_ html: String) -> Bool {
         !html.contains("result__a") && (html.contains("anomaly") || html.contains("challenge"))
     }
 
@@ -172,7 +172,7 @@ public final class ScrapedSearchProvider: SearchProvider, @unchecked Sendable {
     /// scanned in two passes (opening tag, then inner text) so attribute
     /// order in the markup does not matter; titles and snippets are
     /// ordered lists zipped by position.
-    static func parseDuckDuckGo(html: String) -> [SearchResultItem]? {
+    public static func parseDuckDuckGo(html: String) -> [SearchResultItem]? {
         let anchorRegex = try? NSRegularExpression(
             pattern: #"<a\b([^>]*)>([\s\S]*?)</a>"#)
         let hrefRegex = try? NSRegularExpression(pattern: #"href="([^"]+)""#)
@@ -207,7 +207,7 @@ public final class ScrapedSearchProvider: SearchProvider, @unchecked Sendable {
     }
 
     /// DDG wraps result URLs in `//duckduckgo.com/l/?uddg=<encoded>`.
-    static func unwrapDDGRedirect(_ href: String) -> String? {
+    public static func unwrapDDGRedirect(_ href: String) -> String? {
         guard let marker = href.range(of: "uddg=") else {
             return href.hasPrefix("http") ? href : nil
         }
@@ -218,7 +218,7 @@ public final class ScrapedSearchProvider: SearchProvider, @unchecked Sendable {
 
     /// Shared RSS parser for Bing and Google News: `<item>` blocks with
     /// title, link and description children.
-    static func parseRSS(data: Data) -> [SearchResultItem]? {
+    public static func parseRSS(data: Data) -> [SearchResultItem]? {
         let xml = String(decoding: data, as: UTF8.self)
         guard let itemRegex = try? NSRegularExpression(pattern: #"<item>([\s\S]*?)</item>"#) else {
             return nil
@@ -256,7 +256,7 @@ public final class ScrapedSearchProvider: SearchProvider, @unchecked Sendable {
     }
 
     /// Removes simple HTML tags without regex: keep text outside `<...>` pairs.
-    static func stripTags(_ text: String) -> String {
+    public static func stripTags(_ text: String) -> String {
         var result = ""
         var insideTag = false
         for char in text {
@@ -274,7 +274,7 @@ public final class ScrapedSearchProvider: SearchProvider, @unchecked Sendable {
     /// RSS descriptions are XML-escaped HTML (`&lt;a&gt;...&lt;/a&gt;&amp;nbsp;`).
     /// Unescape first so embedded markup becomes real tags, strip them,
     /// then unescape again for entities that were double-escaped.
-    static func cleanRSSText(_ raw: String) -> String {
+    public static func cleanRSSText(_ raw: String) -> String {
         var text = stripTags(unescapeXML(raw))
         if text.contains("&") {
             text = unescapeXML(text)

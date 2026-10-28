@@ -22,9 +22,13 @@ public enum MLXEnvironment {
         "/usr/local/bin/uvx",
     ]
 
+    /// Test seam: overrides the candidate list so a harness can point uv
+    /// resolution at a fake binary. Nil keeps the production list.
+    public static var uvSearchPathsOverride: [String]?
+
     /// Finds the uv binary, or nil when none is installed.
     public static func locateUV() -> String? {
-        for path in uvSearchPaths {
+        for path in uvSearchPathsOverride ?? uvSearchPaths {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
                !isDir.boolValue {
@@ -99,7 +103,8 @@ public enum MLXEnvironment {
         return path
     }
 
-    private static var cachedPythons: [String: String] = [:]
+    /// Test seam: resolution cache; harnesses can prime or clear it.
+    public static var cachedPythons: [String: String] = [:]
 
     /// True when a quick localhost bind test says the port is free. Ports
     /// get grabbed by unrelated apps (seen with Okta Verify), so this check

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Test seams for harness coverage: ChatSessionStore accepts an explicit
+  directory (the shared instance keeps the default Application Support
+  location), the uv/python resolution paths and the search response parsing
+  helpers are reachable from harnesses, so the coverage suite can drive the
+  process and network layers against fakes instead of real downloads
+
+### Fixed
+- ACP agent chats no longer hang forever after the agent finishes a turn: the client never resolved the session/prompt response, so the stream stayed open with the spinner running and the panel stuck on isStreaming. Turn responses now resolve the prompt continuation and end the stream with the agent's stop reason
+
 ### Changed
 - The chat panel now shows a Submitting… status row with a spinner and turns the send button into a stop button the moment you submit, covering the server warm-up window (local MLX server start, first vision-model load) where previously nothing in the panel moved after pressing send with an image. The button cancels the submission before the stream starts and stops generation afterwards
 - Local model rows now show Use and Delete after download instead of only Delete: previously the Use button only appeared before downloading, so a downloaded model could never be activated, which also left the Add chat provider button permanently disabled. Use activates the model and creates the Local (MLX) chat provider in one step, and the now-redundant Add chat provider button is gone

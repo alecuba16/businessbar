@@ -361,7 +361,18 @@ public final class ACPAgentClient: LLMClient, @unchecked Sendable {
             handler?(events)
 
         case .response(let id, let result):
-            resume(handshake: id, with: .success(result))
+            // Both request kinds resolve here: handshakes (initialize,
+            // session/new) and prompt turns. The stop reason rides in the
+            // result payload; agents that omit it still end the turn.
+            lock.lock()
+            let promptCont = pendingPrompts[id]
+            pendingPrompts[id] = nil
+            lock.unlock()
+            if let promptCont {
+                promptCont.resume(returning: .stopped(stopReason: result?["stopReason"] as? String))
+            } else {
+                resume(handshake: id, with: .success(result))
+            }
 
         case .errorResponse(let id, let code, let message):
             resume(handshake: id, with: .failure(ACPError.agentError(code: code, message: message)))

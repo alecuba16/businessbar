@@ -45,6 +45,11 @@ public final class MLXServerManager: ObservableObject {
     /// Shared instance. The app owns exactly one server.
     public static let shared = MLXServerManager()
 
+    /// Test seam: overrides the venv python start() spawns (defaults to
+    /// MLXEnvironment.resolveServerPython). Harnesses point this at a
+    /// fake server binary.
+    public static var pythonPathOverride: String?
+
     @Published public private(set) var state: State = .stopped
     @Published public private(set) var residentBytes: Int64 = 0
 
@@ -94,7 +99,8 @@ public final class MLXServerManager: ObservableObject {
 
         do {
             let python = try await Task.detached(priority: .userInitiated) {
-                try MLXEnvironment.resolveServerPython(for: entry.kind)
+                if let override = await MLXServerManager.pythonPathOverride { return override }
+                return try MLXEnvironment.resolveServerPython(for: entry.kind)
             }.value
 
             let serverModule = entry.kind == .textAndImages

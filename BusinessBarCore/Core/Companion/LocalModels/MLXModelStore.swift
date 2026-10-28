@@ -27,6 +27,10 @@ public final class MLXModelStore: ObservableObject {
     /// Shared instance; one download at a time.
     public static let shared = MLXModelStore()
 
+    /// Test seam: overrides the uv path startDownload spawns (defaults to
+    /// locateUV()). Harnesses point this at a fake downloader.
+    public static var uvPathOverride: String?
+
     private var process: Process?
     private var progressTask: Task<Void, Never>?
 
@@ -38,7 +42,7 @@ public final class MLXModelStore: ObservableObject {
         guard download == nil else {
             throw StoreError.downloadAlreadyRunning
         }
-        guard let uv = MLXEnvironment.locateUV() else {
+        guard let uv = Self.uvPathOverride ?? MLXEnvironment.locateUV() else {
             throw MLXEnvironment.EnvironmentError.uvNotFound
         }
         guard let entry = MLXModelCatalog.entry(id: modelID) else {

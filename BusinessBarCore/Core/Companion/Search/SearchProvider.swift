@@ -51,13 +51,13 @@ public protocol SearchProvider: Sendable {
 
 // MARK: - Shared request helpers
 
-enum SearchProviderSupport {
+public enum SearchProviderSupport {
     /// Providers cap results server-side; anything outside 1...10 is not useful.
-    static func clampedResultCount(_ maxResults: Int) -> Int {
+    public static func clampedResultCount(_ maxResults: Int) -> Int {
         min(max(1, maxResults), 10)
     }
 
-    static func decodedItems(
+    public static func decodedItems(
         from data: Data,
         response: URLResponse,
         snippetKeys: [String] = ["snippet"]
@@ -85,7 +85,7 @@ enum SearchProviderSupport {
         }
     }
 
-    static func transportError(_ error: Error) -> SearchProviderError {
+    public static func transportError(_ error: Error) -> SearchProviderError {
         SearchProviderError.transport(error.localizedDescription)
     }
 }
@@ -136,7 +136,7 @@ public final class BraveSearchProvider: SearchProvider, @unchecked Sendable {
     }
 
     /// Removes simple HTML tags without regex: keep text outside `<...>` pairs.
-    static func stripTags(_ text: String) -> String {
+    public static func stripTags(_ text: String) -> String {
         var result = ""
         var insideTag = false
         for char in text {

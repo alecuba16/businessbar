@@ -53,13 +53,15 @@ public final class ChatSessionStore: @unchecked Sendable {
     private let decoder: JSONDecoder
     private let ioQueue = DispatchQueue(label: "com.businessbar.chatsessions", qos: .utility)
 
-    private init(directoryURL: URL? = nil) {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("BusinessBar", isDirectory: true)
-            .appendingPathComponent("ChatSessions", isDirectory: true)
-        self.directoryURL = directoryURL ?? base
+    /// Store rooted at the real Application Support directory (the shared
+    /// instance and any default construction keep this location).
+    private convenience init() {
+        self.init(directoryURL: ChatSessionStore.defaultDirectoryURL())
+    }
+
+    /// Store rooted at an explicit directory (test and harness isolation).
+    public init(directoryURL: URL) {
+        self.directoryURL = directoryURL
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -70,7 +72,15 @@ public final class ChatSessionStore: @unchecked Sendable {
         decoder.dateDecodingStrategy = .iso8601
         self.decoder = decoder
 
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+    }
+
+    private static func defaultDirectoryURL() -> URL {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!
+            .appendingPathComponent("BusinessBar", isDirectory: true)
+            .appendingPathComponent("ChatSessions", isDirectory: true)
     }
 
     /// ISO8601 keeps the files readable but drops sub-second precision,
