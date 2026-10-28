@@ -145,104 +145,238 @@ enum CompanionConfigService {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    // MARK: - Model profiles
+    // MARK: - Providers and models
 
-    /// Shared store for named model profiles (base URL + model + effort).
-    static let modelProfileStore = ModelProfileStore()
+    /// Shared store for providers (endpoint + models + effort).
+    static let chatProviderStore = ChatProviderStore()
 
-    /// Loads profiles, seeding one from the legacy single-model config the
-    /// first time so existing users keep their working setup.
-    static func modelProfiles() -> [ModelProfile] {
-        let stored = modelProfileStore.load()
-        if !stored.isEmpty { return stored }
+    /// Loads providers, migrating a stored legacy `[ModelProfile]` blob once,
+    /// then seeding from the legacy single-model config when both stores are
+    /// empty so existing users keep their working setup. Legacy global fields
+    /// (system prompt, reasoning, effort, headers) attach to the seeded or
+    /// migrated models exactly once so removing the old backend section
+    /// loses nothing.
+    static func chatProviders() -> [ChatProvider] {
+        let stored = chatProviderStore.load()
+        if !stored.isEmpty {
+            attachLegacyFieldsIfNeeded(to: stored)
+            return stored
+        }
         // Seed from the legacy config once; empty model means the user never
         // configured the OpenAI backend, so nothing to seed.
-        guard !model().isEmpty else { return [] }
-        let seeded = ModelProfile(
-            name: model(),
+        guard !model().isEmpty, !baseURL().absoluteString.isEmpty else { return [] }
+        let seededProvider = ChatProvider(
+            name: "Default",
             baseURL: baseURL().absoluteString,
-            model: model(),
-            reasoningEffort: reasoningEnabled() ? reasoningEffort() : nil
+            models: [
+                ChatModel(
+                    name: model(),
+                    model: model(),
+                    systemPrompt: systemPrompt().isEmpty ? nil : systemPrompt(),
+                    reasoningEnabled: reasoningEnabled(),
+                    reasoningEffort: reasoningEnabled() ? reasoningEffort() : nil
+                )
+            ]
         )
-        modelProfileStore.save([seeded])
-        setSelectedModelProfileID(seeded.id)
-        try? setProfileAPIKey(seeded.id, apiKey())
-        return [seeded]
+        chatProviderStore.save([seededProvider])
+        setSelectedModelProfileID(seededProvider.models[0].id)
+        try? setProviderAPIKey(seededProvider.id, apiKey())
+        try? setProviderHeaders(id: seededProvider.id, customHeaders())
+        markLegacyFieldsAttached()
+        return [seededProvider]
     }
 
-    /// The profile the chat panel uses; nil falls back to the legacy config.
-    static func selectedModelProfile() -> ModelProfile? {
-        let profiles = modelProfiles()
-        guard !profiles.isEmpty else { return nil }
-        let storedID = UserDefaults.standard.string(forKey: Constants.Defaults.companionSelectedModelProfile)
-        if let storedID, let id = UUID(uuidString: storedID),
-           let match = profiles.first(where: { $0.id == id }) {
-            return match
+    /// Legacy globals were copied into providers once; the flag makes the
+    /// copy idempotent so later edits to per-model fields are never
+    /// overwritten by a re-read of the old defaults.
+    private static func legacyFieldsAttached() -> Bool {
+        UserDefaults.standard.bool(forKey: "companion.legacyFieldsAttachedToProviders")
+    }
+
+    private static func markLegacyFieldsAttached() {
+        UserDefaults.standard.set(true, forKey: "companion.legacyFieldsAttachedToProviders")
+    }
+
+    /// One-time copy of the legacy global fields (system prompt, reasoning
+    /// toggle and effort, headers) into migrated providers and their models.
+    /// Runs once across launches: after it fires, per-model edits stick and
+    /// the old defaults are never re-read.
+    private static func attachLegacyFieldsIfNeeded(to providers: [ChatProvider]) {
+        guard !legacyFieldsAttached() else { return }
+        // Nothing to copy when the old backend was never configured.
+        guard !model().isEmpty else {
+            markLegacyFieldsAttached()
+            return
         }
-        return profiles.first
+        let headers = customHeaders()
+        let prompt = systemPrompt()
+        let reasoningOn = reasoningEnabled()
+        let effort = reasoningEffort()
+        var updated = providers
+        for index in updated.indices {
+            if !headers.isEmpty {
+                try? setProviderHeaders(id: updated[index].id, headers)
+            }
+            for modelIndex in updated[index].models.indices where updated[index].models[modelIndex].systemPrompt == nil
+                && updated[index].models[modelIndex].reasoningEnabled == nil {
+                if !prompt.isEmpty {
+                    updated[index].models[modelIndex].systemPrompt = prompt
+                }
+                updated[index].models[modelIndex].reasoningEnabled = reasoningOn
+                if reasoningOn, updated[index].models[modelIndex].reasoningEffort == nil,
+                   !effort.isEmpty {
+                    updated[index].models[modelIndex].reasoningEffort = effort
+                }
+            }
+        }
+        chatProviderStore.save(updated)
+        markLegacyFieldsAttached()
+    }
+
+    /// The (provider, model) pair the chat panel uses; nil falls back to
+    /// the legacy single-model config.
+    static func selectedModel() -> (provider: ChatProvider, model: ChatModel)? {
+        let providers = chatProviders()
+        guard !providers.isEmpty else { return nil }
+        let storedID = UserDefaults.standard.string(forKey: Constants.Defaults.companionSelectedModelProfile)
+        if let storedID, let id = UUID(uuidString: storedID) {
+            for provider in providers {
+                if let model = provider.model(id: id) {
+                    return (provider, model)
+                }
+            }
+            // A migrated selection still holds the legacy profile id, which
+            // became the provider id; resolve it to that provider's first
+            // model so the user keeps their chosen endpoint.
+            for provider in providers where provider.id == id {
+                if let first = provider.models.first {
+                    return (provider, first)
+                }
+            }
+        }
+        // Fall back to the first provider's first model.
+        guard let provider = providers.first, let model = provider.models.first else { return nil }
+        return (provider, model)
+    }
+
+    /// Backward-compatible accessor: the selected pair flattened into the
+    /// legacy profile shape for code that only needs endpoint + model string.
+    static func selectedModelProfile() -> ModelProfile? {
+        guard let (provider, model) = selectedModel() else { return nil }
+        return ModelProfile(
+            id: model.id,
+            name: model.name,
+            baseURL: provider.baseURL,
+            model: model.model,
+            reasoningEffort: model.reasoningEffort,
+            isLocalMLX: provider.isLocalMLX
+        )
     }
 
     static func setSelectedModelProfileID(_ id: UUID) {
         UserDefaults.standard.set(id.uuidString, forKey: Constants.Defaults.companionSelectedModelProfile)
     }
 
-    /// Per-profile API key in the Keychain.
-    static func profileAPIKey(id: UUID) -> String {
-        keychainString(ModelProfileStore.keychainKeyPrefix + id.uuidString)
+    /// Per-provider API key in the Keychain. Same prefix as the legacy
+    /// per-profile keys, so migrated providers keep working keys.
+    static func providerAPIKey(id: UUID) -> String {
+        keychainString(ChatProviderStore.keychainKeyPrefix + id.uuidString)
     }
 
-    static func setProfileAPIKey(_ id: UUID, _ key: String) throws {
-        try KeychainHelper.save(key: ModelProfileStore.keychainKeyPrefix + id.uuidString, data: Data(key.utf8))
+    static func setProviderAPIKey(_ id: UUID, _ key: String) throws {
+        try KeychainHelper.save(key: ChatProviderStore.keychainKeyPrefix + id.uuidString, data: Data(key.utf8))
         SettingsSavedBus.announce()
     }
 
-    /// Deletes a profile and its Keychain key. When the deleted profile
-    /// was selected, selection falls back to the first remaining profile.
-    static func deleteModelProfile(id: UUID) {
-        var profiles = modelProfiles()
-        profiles.removeAll { $0.id == id }
-        modelProfileStore.save(profiles)
-        if let first = profiles.first {
-            setSelectedModelProfileID(first.id)
-        }
-        try? KeychainHelper.delete(key: ModelProfileStore.keychainKeyPrefix + id.uuidString)
+    /// Deletes a provider and its Keychain key. Selection falls back to the
+    /// first remaining provider and model when the deleted one held it.
+    static func deleteProvider(id: UUID) {
+        var providers = chatProviders()
+        providers.removeAll { $0.id == id }
+        chatProviderStore.save(providers)
+        try? KeychainHelper.delete(key: ChatProviderStore.keychainKeyPrefix + id.uuidString)
     }
 
-    // MARK: - Local MLX profile
+    /// Deletes a single model from its provider, keeping the provider.
+    static func deleteModel(id: UUID, in providerID: UUID) {
+        var providers = chatProviders()
+        guard let index = providers.firstIndex(where: { $0.id == providerID }) else { return }
+        providers[index].models.removeAll { $0.id == id }
+        chatProviderStore.save(providers)
+    }
 
-    /// Creates or updates the preset profile pointing at the managed MLX
-    /// server. Reuses the stored profile id so selection survives updates.
-    static func upsertLocalMLXProfile() -> ModelProfile? {
+    // MARK: - Per-provider headers (Keychain)
+
+    /// Headers sent with every request to this provider. Values can be
+    /// secrets, so the list lives in the Keychain as JSON, never inside the
+    /// UserDefaults blob.
+    static let providerHeadersKeychainKeyPrefix =
+        "com.businessbar.companion.provider.headers."
+
+    static func providerHeaders(id: UUID) -> [(name: String, value: String)] {
+        guard let data = try? KeychainHelper.load(key: providerHeadersKeychainKeyPrefix + id.uuidString),
+              let raw = try? JSONDecoder().decode([[String: String]].self, from: data)
+        else { return [] }
+        return raw.compactMap { pair in
+            guard let name = pair["name"], let value = pair["value"] else { return nil }
+            return (name, value)
+        }
+    }
+
+    static func setProviderHeaders(id: UUID, _ headers: [(name: String, value: String)]) throws {
+        let raw = headers.map { ["name": $0.name, "value": $0.value] }
+        guard let data = try? JSONEncoder().encode(raw) else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        try KeychainHelper.save(key: providerHeadersKeychainKeyPrefix + id.uuidString, data: data)
+        SettingsSavedBus.announce()
+    }
+
+    // MARK: - Local MLX provider
+
+    /// Creates or updates the preset provider pointing at the managed MLX
+    /// server. Provider id stays stable across updates, and its single model
+    /// follows the active catalog model.
+    static func upsertLocalMLXProvider() -> ChatProvider? {
         guard let modelID = MLXServerConfig.activeModelID(),
               MLXModelCatalog.entry(id: modelID) != nil else { return nil }
-        let profile = ModelProfile(
+        let modelName = MLXModelCatalog.entry(id: modelID)?.displayName ?? modelID
+        let model = ChatModel(name: modelName, model: modelID)
+        let provider = ChatProvider(
             name: "Local (MLX)",
             baseURL: MLXServerConfig.baseURLString(),
-            model: modelID,
+            models: [model],
             isLocalMLX: true
         )
-        var profiles = modelProfiles()
-        if let index = profiles.firstIndex(where: { $0.isLocalMLX == true }) {
-            var updated = profile
-            updated.id = profiles[index].id
-            profiles[index] = updated
-            modelProfileStore.save(profiles)
+        var providers = chatProviders()
+        if let index = providers.firstIndex(where: { $0.isLocalMLX == true }) {
+            var updated = provider
+            updated.id = providers[index].id
+            // Keep the existing model id when the catalog model has not
+            // changed so selection survives updates.
+            if let existing = providers[index].models.first, existing.model == modelID {
+                var kept = model
+                kept.id = existing.id
+                updated.models = [kept]
+            }
+            providers[index] = updated
+            chatProviderStore.save(providers)
             return updated
         }
-        profiles.append(profile)
-        modelProfileStore.save(profiles)
-        return profile
+        providers.append(provider)
+        chatProviderStore.save(providers)
+        return provider
     }
 
-    /// Starts or restarts the MLX server when the selected chat profile is
+    /// Starts or restarts the MLX server when the selected chat model is
     /// the local preset. Callers await this before streaming; a nil return
     /// means no local server is involved and the request can go straight
     /// out.
     static func ensureLocalServerIfNeeded() async throws {
         guard backend() == .openai,
-              let profile = selectedModelProfile(),
-              profile.isLocalMLX == true else { return }
-        try await MLXServerManager.shared.ensureRunning(modelID: profile.model)
+              let (provider, model) = selectedModel(),
+              provider.isLocalMLX == true else { return }
+        try await MLXServerManager.shared.ensureRunning(modelID: model.model)
     }
 
     // MARK: - Ad-hoc chat effort
@@ -345,9 +479,12 @@ enum CompanionConfigService {
 
     // MARK: - Client
 
-    /// True when the OpenAI-compatible backend is usable.
+    /// True when the OpenAI-compatible backend is usable: the selected
+    /// provider's model and key resolve.
     static func isOpenAIConfigured() -> Bool {
-        !model().isEmpty && !apiKey().isEmpty
+        guard let (provider, model) = selectedModel() else { return false }
+        let key = providerAPIKey(id: provider.id)
+        return !model.model.isEmpty && (provider.isLocalMLX == true || !key.isEmpty)
     }
 
     /// True when the ACP backend is usable: a command is set.
@@ -372,28 +509,24 @@ enum CompanionConfigService {
     static func makeClient() -> LLMClient? {
         switch backend() {
         case .openai:
-            guard isOpenAIConfigured() else { return nil }
-            return OpenAICompatClient(
-                configuration: CompanionConfiguration(
-                    baseURL: baseURL(),
-                    model: model(),
-                    apiKey: apiKey(),
-                    systemPrompt: systemPrompt(),
-                    reasoning: reasoningEnabled(),
-                    reasoningEffort: reasoningEnabled() ? reasoningEffort() : nil,
-                    extraHeaders: Dictionary(uniqueKeysWithValues: customHeaders().map { ($0.name, $0.value) })
-                ),
-                tools: searchTools(),
-                toolHandler: searchToolHandler()
-            )
+            // Providers fully own the OpenAI endpoint now: the default
+            // model's provider carries base URL, key, headers and per-model
+            // reasoning, so the rewrite path and the chat panel resolve the
+            // same way.
+            return makeChatClient()
         case .acp:
-            guard isACPConfigured() else { return nil }
-            return acpClient()
+            return acpConfiguredClient()
         }
     }
 
-    /// Chat panel client: uses the selected model profile when one exists,
-    /// else the legacy single-model config. Fresh per call so profile and
+    /// ACP client when configured, else nil so callers surface setup.
+    private static func acpConfiguredClient() -> LLMClient? {
+        guard isACPConfigured() else { return nil }
+        return acpClient()
+    }
+
+    /// Chat panel client: uses the selected provider+model when one exists,
+    /// else the legacy single-model config. Fresh per call so model and
     /// effort switches take effect on the next message.
     ///
     /// Command tools (when enabled) merge their schemas here and raise
@@ -402,12 +535,14 @@ enum CompanionConfigService {
     /// `stream(onToolCall:)`, not the stored handler.
     static func makeChatClient() -> LLMClient? {
         let commands = commandToolsEnabled() && backend() == .openai
-        guard backend() == .openai else { return makeClient() }
-        guard let profile = selectedModelProfile() else { return makeClient() }
-        let key = profileAPIKey(id: profile.id)
-        // Local MLX profiles serve without a key; everything else needs one.
-        guard !profile.model.isEmpty, profile.isLocalMLX == true || !key.isEmpty else { return nil }
-        var normalized = profile.baseURL
+        guard backend() == .openai else { return acpConfiguredClient() }
+        // Providers own the endpoint now; no selected model means the
+        // backend is not configured (the rewrite path shares this rule).
+        guard let (provider, model) = selectedModel() else { return nil }
+        let key = providerAPIKey(id: provider.id)
+        // Local MLX providers serve without a key; everything else needs one.
+        guard !model.model.isEmpty, provider.isLocalMLX == true || !key.isEmpty else { return nil }
+        var normalized = provider.baseURL
         while normalized.count > 1 && normalized.hasSuffix("/") {
             normalized.removeLast()
         }
@@ -415,14 +550,16 @@ enum CompanionConfigService {
         return OpenAICompatClient(
             configuration: CompanionConfiguration(
                 baseURL: url,
-                model: profile.model,
+                model: model.model,
                 apiKey: key,
-                systemPrompt: systemPrompt(),
-                reasoning: reasoningEnabled(),
-                reasoningEffort: reasoningEnabled()
-                    ? (profile.reasoningEffort ?? reasoningEffort())
+                systemPrompt: model.systemPrompt ?? "",
+                reasoning: model.reasoningEnabled == true,
+                reasoningEffort: model.reasoningEnabled == true
+                    ? (model.reasoningEffort ?? "medium")
                     : nil,
-                extraHeaders: Dictionary(uniqueKeysWithValues: customHeaders().map { ($0.name, $0.value) })
+                extraHeaders: Dictionary(
+                    uniqueKeysWithValues: providerHeaders(id: provider.id).map { ($0.name, $0.value) }
+                )
             ),
             tools: chatToolSchemas(),
             toolHandler: searchToolHandler(),

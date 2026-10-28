@@ -23,10 +23,6 @@ struct CompanionTab: View {
     @StateObject private var accessibilityPermission = AccessibilityPermissionModel()
 
     @State private var backend: CompanionConfigService.Backend
-    @State private var baseURLText: String
-    @State private var modelText: String
-    @State private var systemPromptText: String
-    @State private var apiKeyText: String
     @State private var searchProviderKind: String
     @State private var commandToolsEnabled: Bool
     @State private var braveKeyText: String
@@ -36,31 +32,24 @@ struct CompanionTab: View {
     @State private var customSearchKeyText: String
     @State private var acpCommandText: String
     @State private var acpArgumentsText: String
-    @State private var reasoningEnabled: Bool
-    @State private var reasoningEffort: String
-    @State private var customEffortText: String
-    @State private var headerPairs: [HeaderPair]
     @State private var historyMaxAgeDays: Int
     @State private var historyMaxSessions: Int
     @State private var templates: [PromptTemplate]
     @State private var editingTemplate: PromptTemplate?
     @State private var showsTemplateEditor = false
     @State private var keychainError: String?
-    @State private var profiles: [ModelProfile]
-    @State private var editingProfile: ModelProfile?
-    @State private var showsProfileEditor = false
+    @State private var providers: [ChatProvider]
+    @State private var editingProvider: ChatProvider?
+    @State private var editingModel: (provider: ChatProvider, model: ChatModel)?
+    @State private var showsProviderEditor = false
+    @State private var showsModelEditor = false
+    @State private var showsLocalModels = false
 
     private let templateStore = TemplateStore()
 
     init() {
         let defaults = UserDefaults.standard
         _backend = State(initialValue: CompanionConfigService.backend())
-        _baseURLText = State(initialValue: defaults.string(forKey: Constants.Defaults.companionBaseURL)
-            ?? Constants.DefaultValues.companionBaseURL)
-        _modelText = State(initialValue: defaults.string(forKey: Constants.Defaults.companionModel)
-            ?? Constants.DefaultValues.companionModel)
-        _systemPromptText = State(initialValue: defaults.string(forKey: Constants.Defaults.companionSystemPrompt) ?? "")
-        _apiKeyText = State(initialValue: CompanionConfigService.apiKey())
         _searchProviderKind = State(initialValue: CompanionConfigService.searchProviderKind())
         _commandToolsEnabled = State(initialValue: CompanionConfigService.commandToolsEnabled())
         _braveKeyText = State(initialValue: CompanionConfigService.braveKey())
@@ -70,20 +59,10 @@ struct CompanionTab: View {
         _customSearchKeyText = State(initialValue: CompanionConfigService.customSearchKey())
         _acpCommandText = State(initialValue: CompanionConfigService.acpCommand())
         _acpArgumentsText = State(initialValue: CompanionConfigService.acpArguments().joined(separator: " "))
-        _reasoningEnabled = State(initialValue: CompanionConfigService.reasoningEnabled())
-        let storedEffort = CompanionConfigService.reasoningEffort()
-        // Non-preset stored values keep the Custom row selected with the
-        // text field carrying the actual string.
-        _reasoningEffort = State(initialValue:
-            CompanionConfigService.effortLevels.contains(storedEffort) ? storedEffort : "__custom__")
-        _customEffortText = State(initialValue: storedEffort)
-        _headerPairs = State(initialValue: CompanionConfigService.customHeaders().map {
-            HeaderPair(name: $0.name, value: $0.value)
-        })
         _historyMaxAgeDays = State(initialValue: CompanionConfigService.historyMaxAgeDays())
         _historyMaxSessions = State(initialValue: CompanionConfigService.historyMaxSessions())
         _templates = State(initialValue: TemplateStore().load())
-        _profiles = State(initialValue: CompanionConfigService.modelProfiles())
+        _providers = State(initialValue: CompanionConfigService.chatProviders())
     }
 
     var body: some View {
@@ -115,63 +94,134 @@ struct CompanionTab: View {
                         CompanionConfigService.setBackend(newValue)
                     }
 
-                    if backend == .openai {
-                        openAIFields
-                    } else {
+                    if backend == .acp {
                         acpFields
                     }
                 } header: {
                     Text("Model Backend")
                 } footer: {
                     Text(backend == .openai
-                        ? "Any OpenAI-compatible endpoint. The API key is stored in the Keychain."
+                        ? "OpenAI-compatible endpoints are configured as providers below."
                         : "Runs a local ACP agent over stdio, for example 'gemini --acp' or 'claude --acp'. The process starts with the chat panel and stops when it closes.")
                 }
 
-                // MARK: Profiles
-                if backend == .openai {
+                if backend == .openai, !providers.isEmpty {
+                    // MARK: Default chat model
                     Section {
-                        ForEach(profiles) { profile in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(profile.name)
-                                        .fontWeight(.medium)
-                                    Text("\(profile.model) · \(profile.baseURL)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
+                        Picker("Default chat model", selection: Binding(
+                            get: { CompanionConfigService.selectedModel()?.model.id },
+                            set: { newValue in
+                                if let newValue {
+                                    CompanionConfigService.setSelectedModelProfileID(newValue)
+                                    providers = CompanionConfigService.chatProviders()
                                 }
-                                Spacer()
-                                if CompanionConfigService.selectedModelProfile()?.id == profile.id {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.accentColor)
-                                        .help("Selected for chat")
+                            }
+                        )) {
+                            ForEach(providers) { provider in
+                                Section(provider.name) {
+                                    ForEach(provider.models) { model in
+                                        Text(model.name).tag(Optional(model.id))
+                                    }
                                 }
-                                Button("Edit") {
-                                    editingProfile = profile
-                                    showsProfileEditor = true
-                                }
-                                .controlSize(.small)
-                                Button {
-                                    CompanionConfigService.deleteModelProfile(id: profile.id)
-                                    profiles = CompanionConfigService.modelProfiles()
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .foregroundColor(.red)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Delete this profile")
                             }
                         }
+                    } header: {
+                        Text("Chat")
+                    } footer: {
+                        Text("Used by the chat panel and rewrite shortcuts when no per-message model is picked.")
+                    }
+                }
 
-                        Button("Add Profile") {
-                            editingProfile = nil
-                            showsProfileEditor = true
+                // MARK: Providers
+                if backend == .openai {
+                    Section {
+                        ForEach(providers) { provider in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(provider.name)
+                                            .fontWeight(.medium)
+                                        Text(provider.baseURL)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    if provider.isLocalMLX == true {
+                                        Text("Local")
+                                            .font(.caption2)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.accentColor.opacity(0.15))
+                                            .clipShape(Capsule())
+                                    }
+                                    Button("Edit") {
+                                        editingProvider = provider
+                                        showsProviderEditor = true
+                                    }
+                                    .controlSize(.small)
+                                    Button {
+                                        CompanionConfigService.deleteProvider(id: provider.id)
+                                        providers = CompanionConfigService.chatProviders()
+                                    } label: {
+                                        Image(systemName: "trash")
+                                            .foregroundColor(.red)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Delete this provider and its models")
+                                }
+
+                                ForEach(provider.models) { model in
+                                    HStack {
+                                        Text(model.name)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        if CompanionConfigService.selectedModel()?.model.id == model.id {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundColor(.accentColor)
+                                                .help("Selected for chat")
+                                        }
+                                        Button("Edit") {
+                                            editingModel = (provider, model)
+                                            showsModelEditor = true
+                                        }
+                                        .controlSize(.small)
+                                        Button {
+                                            CompanionConfigService.deleteModel(id: model.id, in: provider.id)
+                                            providers = CompanionConfigService.chatProviders()
+                                        } label: {
+                                            Image(systemName: "minus.circle")
+                                                .foregroundColor(.red)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("Remove this model")
+                                    }
+                                    .padding(.leading, 12)
+                                }
+
+                                Button("Add Model") {
+                                    editingModel = (provider, ChatModel(name: "", model: ""))
+                                    showsModelEditor = true
+                                }
+                                .controlSize(.small)
+                                .padding(.leading, 12)
+                            }
+                            .padding(.vertical, 2)
+                        }
+
+                        HStack {
+                            Button("Add Provider") {
+                                editingProvider = nil
+                                showsProviderEditor = true
+                            }
+                            Button("Add Local Models") {
+                                showsLocalModels = true
+                            }
                         }
                     } header: {
-                        Text("Model Profiles")
+                        Text("Providers")
                     } footer: {
-                        Text("Named endpoint presets the chat panel can switch between mid-conversation. The profile with the checkmark is the chat default; rewrite templates keep using the backend fields above. Keys are stored in the Keychain per profile.")
+                        Text("Each provider is an endpoint with its own key and one or more models. The model with the checkmark is the chat default; rewrite templates follow it. Add Local Models opens the on-device setup with its own downloads.")
                     }
                 }
 
@@ -216,11 +266,6 @@ struct CompanionTab: View {
                     Text("Gives the model run_command, read_file, and list_files tools scoped to a folder you pick in the chat panel. Read-only commands run without asking; everything else shows a confirmation card first. Applies to the OpenAI-compatible backend only.")
                 }
 
-                // MARK: Local models
-                if backend == .openai {
-                    LocalModelsSection()
-                }
-
                 // MARK: Templates
                 Section {
                     ForEach($templates) { $template in
@@ -228,8 +273,8 @@ struct CompanionTab: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(template.name)
                                     .fontWeight(.medium)
-                                if template.autoReplace {
-                                    Text("Replaces directly when the reply has output tags")
+                                if template.action != .overlay {
+                                    Text(template.action.label)
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
                                 }
@@ -265,7 +310,7 @@ struct CompanionTab: View {
                 } header: {
                     Text("Rewrite Templates")
                 } footer: {
-                    Text("Use [placeholder] where the selected text goes. Assign a shortcut to a template to run that rewrite on the selection from any app. Wrap the reply in <output></output> tags in your prompt and only that text is used, with no model commentary. Templates with direct replace skip the overlay and swap the selection in place when the reply carries the tags.")
+                    Text("Use [placeholder] where the selected text goes. Assign a shortcut to a template to run that rewrite on the selection from any app. Wrap the reply in <output></output> tags in your prompt and only that text is used, with no model commentary. Replace selection swaps the selection in place when the reply carries the tags; insert after keeps the selection and adds the reply right after it. Both fall back to the overlay when direct writing is not possible.")
                 }
 
                 // MARK: History
@@ -354,117 +399,49 @@ struct CompanionTab: View {
                 showsTemplateEditor = false
             }
         }
-        .sheet(isPresented: $showsProfileEditor) {
-            ProfileEditorSheet(profile: editingProfile) { saved, apiKey in
-                if let index = profiles.firstIndex(where: { $0.id == saved.id }) {
-                    profiles[index] = saved
+        .sheet(isPresented: $showsProviderEditor) {
+            ProviderEditorSheet(provider: editingProvider) { saved, apiKey, headers in
+                if let index = providers.firstIndex(where: { $0.id == saved.id }) {
+                    providers[index] = saved
                 } else {
-                    profiles.append(saved)
+                    providers.append(saved)
                 }
-                CompanionConfigService.modelProfileStore.save(profiles)
+                CompanionConfigService.chatProviderStore.save(providers)
                 if !apiKey.isEmpty {
                     do {
-                        try CompanionConfigService.setProfileAPIKey(saved.id, apiKey)
+                        try CompanionConfigService.setProviderAPIKey(saved.id, apiKey)
                         keychainError = nil
                     } catch {
                         keychainError = "Could not save the API key: \(error.localizedDescription)"
                     }
                 }
-                showsProfileEditor = false
+                do {
+                    try CompanionConfigService.setProviderHeaders(id: saved.id, headers)
+                } catch {
+                    keychainError = "Could not save the headers: \(error.localizedDescription)"
+                }
+                showsProviderEditor = false
             }
         }
-    }
-
-    private var openAIFields: some View {
-        Group {
-            TextField("Base URL (ends in /v1)", text: $baseURLText)
-                .onChange(of: baseURLText) { _, newValue in
-                    if let url = URL(string: newValue.trimmingCharacters(in: .whitespaces)) {
-                        CompanionConfigService.setBaseURL(url)
-                    }
-                }
-
-            TextField("Model", text: $modelText)
-                .onChange(of: modelText) { _, newValue in
-                    CompanionConfigService.setModel(newValue)
-                }
-
-            SecureField("API Key (stored in Keychain)", text: $apiKeyText)
-                .onChange(of: apiKeyText) { _, newValue in
-                    do {
-                        try CompanionConfigService.setAPIKey(newValue)
-                        keychainError = nil
-                    } catch {
-                        keychainError = "Could not save the API key: \(error.localizedDescription)"
-                    }
-                }
-
-            if let keychainError {
-                Text(keychainError)
-                    .font(.caption)
-                    .foregroundColor(.red)
-            }
-
-            TextField("System prompt (optional)", text: $systemPromptText, axis: .vertical)
-                .lineLimit(2...4)
-                .onChange(of: systemPromptText) { _, newValue in
-                    CompanionConfigService.setSystemPrompt(newValue)
-                }
-
-            Toggle("Reasoning model", isOn: $reasoningEnabled)
-                .onChange(of: reasoningEnabled) { _, newValue in
-                    CompanionConfigService.setReasoningEnabled(newValue)
-                }
-
-            if reasoningEnabled {
-                Picker("Reasoning effort", selection: $reasoningEffort) {
-                    ForEach(CompanionConfigService.effortLevels, id: \.self) { level in
-                        Text(level.capitalized).tag(level)
-                    }
-                    Text("Custom").tag("__custom__")
-                }
-                .onChange(of: reasoningEffort) { _, newValue in
-                    if newValue != "__custom__" {
-                        CompanionConfigService.setReasoningEffort(newValue)
-                    }
-                }
-                if reasoningEffort == "__custom__" {
-                    TextField("Custom effort value", text: $customEffortText)
-                        .onChange(of: customEffortText) { _, newValue in
-                            if !newValue.isEmpty {
-                                CompanionConfigService.setReasoningEffort(newValue)
-                            }
+        .sheet(isPresented: $showsModelEditor) {
+            if let editingModel {
+                ModelEditorSheet(model: editingModel.model) { saved in
+                    if let providerIndex = providers.firstIndex(where: { $0.id == editingModel.provider.id }) {
+                        if let modelIndex = providers[providerIndex].models.firstIndex(where: { $0.id == saved.id }) {
+                            providers[providerIndex].models[modelIndex] = saved
+                        } else {
+                            providers[providerIndex].models.append(saved)
                         }
-                }
-            }
-
-            ForEach($headerPairs) { $pair in
-                HStack {
-                    TextField("Header name", text: $pair.name)
-                    SecureField("Value", text: $pair.value)
-                    Button {
-                        headerPairs.removeAll { $0.id == pair.id }
-                        saveHeaders()
-                    } label: {
-                        Image(systemName: "minus.circle.fill")
+                        CompanionConfigService.chatProviderStore.save(providers)
                     }
-                    .buttonStyle(.borderless)
-                    .help("Remove header")
+                    showsModelEditor = false
                 }
-                .onChange(of: pair.name) { _, _ in saveHeaders() }
-                .onChange(of: pair.value) { _, _ in saveHeaders() }
             }
-
-            Button("Add Header") {
-                headerPairs.append(HeaderPair(name: "", value: ""))
-                saveHeaders()
-            }
-
-            if !isConfigured {
-                Text("Enter an API key to use the companion.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+        }
+        .sheet(isPresented: $showsLocalModels, onDismiss: {
+            providers = CompanionConfigService.chatProviders()
+        }) {
+            LocalModelsSheet()
         }
     }
 
@@ -526,66 +503,137 @@ struct CompanionTab: View {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
         NSWorkspace.shared.open(url)
     }
-
-    private func saveHeaders() {
-        let pairs = headerPairs
-            .filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
-            .map { (name: $0.name.trimmingCharacters(in: .whitespaces), value: $0.value) }
-        try? CompanionConfigService.setCustomHeaders(pairs)
-    }
-
-    private var isConfigured: Bool {
-        !modelText.trimmingCharacters(in: .whitespaces).isEmpty
-            && !apiKeyText.isEmpty
-    }
 }
 
-// MARK: - HeaderPair
+// MARK: - ProviderEditorSheet
 
-/// Editable row for one custom request header.
-private struct HeaderPair: Identifiable {
-    let id = UUID()
-    var name: String
-    var value: String
-}
-
-// MARK: - ProfileEditorSheet
-
-/// Sheet for creating and editing a model profile: name, endpoint, model,
-/// default reasoning effort, and the per-profile API key.
-struct ProfileEditorSheet: View {
-    @State private var profile: ModelProfile
+/// Sheet for creating and editing a provider: name, endpoint, per-provider
+/// API key and request headers. Models are managed in the list below the
+/// provider row.
+struct ProviderEditorSheet: View {
+    @State private var provider: ChatProvider
     @State private var apiKey: String
-    let onSave: (ModelProfile, String) -> Void
+    @State private var headers: [EditableHeaderPair]
+    let onSave: (ChatProvider, String, [(name: String, value: String)]) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
-    init(profile: ModelProfile?, onSave: @escaping (ModelProfile, String) -> Void) {
-        let initial = profile ?? ModelProfile(name: "", baseURL: "", model: "")
-        _profile = State(initialValue: initial)
-        _apiKey = State(initialValue: CompanionConfigService.profileAPIKey(id: initial.id))
+    init(provider: ChatProvider?, onSave: @escaping (ChatProvider, String, [(name: String, value: String)]) -> Void) {
+        let initial = provider ?? ChatProvider(name: "", baseURL: "", models: [])
+        _provider = State(initialValue: initial)
+        _apiKey = State(initialValue: CompanionConfigService.providerAPIKey(id: initial.id))
+        _headers = State(initialValue: CompanionConfigService.providerHeaders(id: initial.id).map {
+            EditableHeaderPair(name: $0.name, value: $0.value)
+        })
         self.onSave = onSave
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(profile.name.isEmpty ? "New Profile" : "Edit Profile")
+            Text(provider.name.isEmpty ? "New Provider" : "Edit Provider")
                 .font(.headline)
 
-            TextField("Name", text: $profile.name)
-            TextField("Base URL (ends in /v1)", text: $profile.baseURL)
-            TextField("Model", text: $profile.model)
-            if profile.isLocalMLX != true {
+            TextField("Name", text: $provider.name)
+            TextField("Base URL (ends in /v1)", text: $provider.baseURL)
+            if provider.isLocalMLX != true {
                 SecureField("API Key (stored in Keychain)", text: $apiKey)
             }
 
-            Picker("Default effort", selection: Binding(
-                get: { profile.reasoningEffort ?? "" },
-                set: { profile.reasoningEffort = $0.isEmpty ? nil : $0 }
-            )) {
-                Text("Global default").tag("")
-                ForEach(CompanionConfigService.effortLevels, id: \.self) { level in
-                    Text(level.capitalized).tag(level)
+            ForEach($headers) { $pair in
+                HStack {
+                    TextField("Header name", text: $pair.name)
+                    SecureField("Value", text: $pair.value)
+                    Button {
+                        headers.removeAll { $0.id == pair.id }
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove header")
+                }
+            }
+            Button("Add Header") {
+                headers.append(EditableHeaderPair(name: "", value: ""))
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    let trimmed = headers
+                        .filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
+                        .map { (name: $0.name.trimmingCharacters(in: .whitespaces), value: $0.value) }
+                    onSave(provider, apiKey, trimmed)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(provider.name.isEmpty || provider.baseURL.isEmpty)
+            }
+        }
+        .frame(width: 420, height: 360)
+        .padding()
+    }
+}
+
+/// Identifiable header pair for the provider editor rows.
+private struct EditableHeaderPair: Identifiable {
+    var id = UUID()
+    var name: String
+    var value: String
+}
+
+// MARK: - ModelEditorSheet
+
+/// Sheet for one model inside a provider: display name, model string,
+/// system prompt, and the Reasoning checkbox gating the effort picker.
+struct ModelEditorSheet: View {
+    @State private var model: ChatModel
+    let onSave: (ChatModel) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    /// Picker selection: "__custom__" reveals the custom effort text field;
+    /// non-preset stored values keep it selected on open.
+    @State private var effortSelection: String
+    @State private var customEffort: String
+
+    init(model: ChatModel, onSave: @escaping (ChatModel) -> Void) {
+        _model = State(initialValue: model)
+        let stored = model.reasoningEffort ?? ""
+        _effortSelection = State(initialValue:
+            CompanionConfigService.effortLevels.contains(stored) || stored.isEmpty
+                ? stored : "__custom__")
+        _customEffort = State(initialValue: stored)
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(model.name.isEmpty ? "New Model" : "Edit Model")
+                .font(.headline)
+
+            TextField("Name", text: $model.name)
+            TextField("Model string, for example gpt-4o-mini", text: $model.model)
+            TextField("System prompt (optional)", text: Binding(
+                get: { model.systemPrompt ?? "" },
+                set: { model.systemPrompt = $0.isEmpty ? nil : $0 }
+            ), axis: .vertical)
+                .lineLimit(2...4)
+
+            Toggle("Reasoning", isOn: Binding(
+                get: { model.reasoningEnabled ?? false },
+                set: { model.reasoningEnabled = $0 }
+            ))
+
+            if model.reasoningEnabled == true {
+                Picker("Effort", selection: $effortSelection) {
+                    ForEach(CompanionConfigService.effortLevels, id: \.self) { level in
+                        Text(level.capitalized).tag(level)
+                    }
+                    Text("Custom").tag("__custom__")
+                }
+                if effortSelection == "__custom__" {
+                    TextField("Custom effort value", text: $customEffort)
                 }
             }
 
@@ -593,14 +641,21 @@ struct ProfileEditorSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
-                    onSave(profile, apiKey)
+                    if model.reasoningEnabled == true {
+                        model.reasoningEffort = effortSelection == "__custom__"
+                            ? customEffort
+                            : effortSelection
+                    } else {
+                        model.reasoningEffort = nil
+                    }
+                    onSave(model)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(profile.name.isEmpty || profile.model.isEmpty || profile.baseURL.isEmpty)
+                .disabled(model.name.isEmpty || model.model.isEmpty)
             }
         }
-        .frame(width: 420, height: 280)
+        .frame(width: 420, height: 360)
         .padding()
     }
 }
@@ -647,7 +702,17 @@ struct TemplateEditorSheet: View {
             TextField("Prompt, use [placeholder] for the selection", text: $template.prompt, axis: .vertical)
                 .lineLimit(4...10)
 
-            Toggle("Replace directly when the reply has output tags", isOn: $template.autoReplace)
+            Picker("Action", selection: Binding(
+                get: { template.action },
+                set: { template.action = $0 }
+            )) {
+                Text("Show overlay").tag(TemplateAction.overlay)
+                Text("Replace selection").tag(TemplateAction.replace)
+                Text("Insert after selection").tag(TemplateAction.append)
+            }
+            .onChange(of: template.action) { _, _ in
+                template.autoReplace = template.action == .replace
+            }
 
             Picker("Reasoning effort", selection: $effortSelection) {
                 Text("Default").tag("default")

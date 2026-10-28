@@ -109,18 +109,35 @@ final class RewriteCoordinator: ObservableObject {
             let output = RewriteOutputCapture.capture(from: result)
             let finalOutput = output.isEmpty ? result : output
 
-            // 3. Auto-replace: a template opted in, the model honored the
-            // tags and the selection is AX-replaceable. Everything else
-            // falls back to the overlay so the result is never lost.
-            if template.autoReplace, tagged, let selection, selection.viaAccessibility {
-                AppLogger.info("rewrite: auto-replace for \(template.name)", category: "Companion")
-                let succeeded = await self.selectionService.replaceSelection(with: finalOutput)
-                if succeeded {
-                    ToastCenter.shared.show("Replaced with \(template.name)", icon: "checkmark.circle", duration: 1.2)
-                    return
+            // 3. Dispatch on the template action. Insert-after and replace
+            // need an AX-replaceable selection; anything else (or a failed
+            // direct write) falls back to the overlay so the result is
+            // never lost.
+            switch template.action {
+            case .overlay:
+                break
+            case .replace:
+                if tagged, let selection, selection.viaAccessibility {
+                    AppLogger.info("rewrite: auto-replace for \(template.name)", category: "Companion")
+                    let succeeded = await self.selectionService.replaceSelection(with: finalOutput)
+                    if succeeded {
+                        ToastCenter.shared.show("Replaced with \(template.name)", icon: "checkmark.circle", duration: 1.2)
+                        return
+                    }
+                    AppLogger.error("rewrite: auto-replace AX write failed, showing overlay", category: "Companion")
+                    ToastCenter.shared.show("Could not replace directly, review the result", icon: "exclamationmark.triangle", duration: 2.5)
                 }
-                AppLogger.error("rewrite: auto-replace AX write failed, showing overlay", category: "Companion")
-                ToastCenter.shared.show("Could not replace directly, review the result", icon: "exclamationmark.triangle", duration: 2.5)
+            case .append:
+                if let selection, selection.viaAccessibility {
+                    AppLogger.info("rewrite: insert-after for \(template.name)", category: "Companion")
+                    let succeeded = await self.selectionService.insertAfterSelection(finalOutput)
+                    if succeeded {
+                        ToastCenter.shared.show("Inserted \(template.name) after selection", icon: "checkmark.circle", duration: 1.2)
+                        return
+                    }
+                    AppLogger.error("rewrite: insert-after AX write failed, showing overlay", category: "Companion")
+                    ToastCenter.shared.show("Could not insert directly, review the result", icon: "exclamationmark.triangle", duration: 2.5)
+                }
             }
 
             RewriteOverlayController.shared.present(

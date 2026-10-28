@@ -230,6 +230,37 @@ public final class SelectionService: @unchecked Sendable {
         return await replaceSelection(with: newText)
     }
 
+    /// Inserts `newText` immediately after the selection's end. The
+    /// selected text stays in the document but the range collapses to a
+    /// caret at the insertion point. AX only: the range dance has no safe
+    /// clipboard equivalent, and a paste would overwrite the selection.
+    /// Callers fall back to the overlay when this returns false so the
+    /// reply is never lost.
+    public func insertAfterSelection(_ newText: String) async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { [self] in
+                let succeeded = insertAfterSelectionViaAX(newText)
+                if succeeded {
+                    AppLogger.info("insertAfterSelection: inserted after selection", category: "Companion")
+                } else {
+                    AppLogger.error("insertAfterSelection: AX insert failed", category: "Companion")
+                }
+                continuation.resume(returning: succeeded)
+            }
+        }
+    }
+
+    /// Same as ``insertAfterSelection(_:)`` after the caller has returned key
+    /// focus to the app that owns the selection.
+    public func insertAfterSelectionInOwner(
+        of selection: CapturedSelection, _ newText: String
+    ) async -> Bool {
+        if selection.ownerProcessIdentifier != 0 {
+            await Self.activateApplication(pid: selection.ownerProcessIdentifier)
+        }
+        return await insertAfterSelection(newText)
+    }
+
     /// Re-activates the app that owned the selection without raising all its
     /// windows, then gives the run loop one turn so focus settles before
     /// keystrokes are posted (Maccy, Clipy and espanso all paste after the
@@ -386,6 +417,44 @@ public final class SelectionService: @unchecked Sendable {
         return (keyCode, flags)
     }
 
+    /// AX-only insert: collapse the selection to a caret at its end, then
+    /// write the text through kAXSelectedText, which inserts at the caret.
+    /// Walks ancestors like the capture/replace paths because some apps
+    /// host the selection on a parent element.
+    private func insertAfterSelectionViaAX(_ newText: String) -> Bool {
+        guard let element = Self.focusedElement() else { return false }
+        if Self.elementIsSecure(element) { return false }
+
+        var walkUp: CFTypeRef? = element
+        var hops = 0
+        while let current = walkUp, hops < 5 {
+            let candidate = unsafeBitCast(current, to: AXUIElement.self)
+            if let range = Self.selectedTextRange(of: candidate) {
+                // Collapse to the end of the selection, then insert there.
+                var caret = CFRange(location: range.location + range.length, length: 0)
+                if let axValue = AXValueCreate(.cfRange, &caret),
+                    AXUIElementSetAttributeValue(
+                        candidate, kAXSelectedTextRangeAttribute as CFString, axValue
+                    ) == .success,
+                    AXUIElementSetAttributeValue(
+                        candidate, kAXSelectedTextAttribute as CFString, newText as CFTypeRef
+                    ) == .success {
+                    return true
+                }
+            }
+            var parent: CFTypeRef?
+            if AXUIElementCopyAttributeValue(
+                candidate, kAXParentAttribute as CFString, &parent
+            ) == .success {
+                walkUp = parent
+            } else {
+                walkUp = nil
+            }
+            hops += 1
+        }
+        return false
+    }
+
     private static func selectedTextRange(of element: AXUIElement) -> NSRange? {
         var rangeRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -463,9 +532,11 @@ public final class SelectionService: @unchecked Sendable {
         return false
     }
 
+    /// Electron apps ignore AX text queries until this attribute is set
+    /// once; Chromium-based browsers and Slack both need the nudge.
     private static func wakeChromiumIfNeeded(bundleIdentifier: String?) {
         guard let id = bundleIdentifier,
-              id.contains("chromium") || id == "com.google.Chrome",
+              id.contains("chromium") || id == "com.google.Chrome" || id.contains("slack"),
               let app = NSWorkspace.shared.frontmostApplication
         else { return }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)

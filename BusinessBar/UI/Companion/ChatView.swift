@@ -29,7 +29,7 @@ struct ChatView: View {
         self.store = store
         self.commandTools = commandTools
         self.clientProvider = clientProvider
-        _selectedProfileID = State(initialValue: CompanionConfigService.selectedModelProfile()?.id)
+        _selectedProfileID = State(initialValue: CompanionConfigService.selectedModel()?.model.id)
         _selectedEffort = State(initialValue: CompanionConfigService.adhocChatEffort().isEmpty
             ? Self.defaultEffortTag
             : CompanionConfigService.adhocChatEffort())
@@ -81,24 +81,27 @@ struct ChatView: View {
 
     // MARK: - Controls
 
-    /// Model profile and reasoning effort pickers. Choices apply to the next
+    /// Model and reasoning effort pickers. Choices apply to the next
     /// message, so mid-conversation switches compare models on the same
     /// history without restarting anything.
     private var controlBar: some View {
-        let profiles = CompanionConfigService.modelProfiles()
+        let providers = CompanionConfigService.chatProviders()
         let isACP = CompanionConfigService.backend() == .acp
         return HStack(spacing: 8) {
-            if !isACP, !profiles.isEmpty {
+            if !isACP, !providers.isEmpty {
                 Picker("Model", selection: Binding(
                     get: { selectedProfileID },
                     set: { newValue in
                         selectedProfileID = newValue
                         if let newValue {
                             CompanionConfigService.setSelectedModelProfileID(newValue)
-                            // A different profile changes the effective model;
+                            // A different model changes the effective effort;
                             // its stored effort becomes the baseline.
-                            if let profile = profiles.first(where: { $0.id == newValue }),
-                               let effort = profile.reasoningEffort, !effort.isEmpty {
+                            let effort = providers
+                                .flatMap(\.models)
+                                .first { $0.id == newValue }?
+                                .reasoningEffort
+                            if let effort, !effort.isEmpty {
                                 selectedEffort = effort
                                 CompanionConfigService.setAdhocChatEffort(effort)
                             } else {
@@ -108,14 +111,21 @@ struct ChatView: View {
                         }
                     }
                 )) {
-                    ForEach(profiles) { profile in
-                        Text(profile.name).tag(Optional(profile.id))
+                    ForEach(providers) { provider in
+                        Section(provider.name) {
+                            ForEach(provider.models) { model in
+                                Text(model.name).tag(Optional(model.id))
+                            }
+                        }
                     }
                 }
                 .controlSize(.small)
                 .frame(maxWidth: 180)
 
-                if CompanionConfigService.reasoningEnabled() {
+                if let selected = providers
+                    .flatMap(\.models)
+                    .first(where: { $0.id == selectedProfileID }),
+                    selected.reasoningEnabled == true {
                     Picker("Effort", selection: $selectedEffort) {
                         Text("Default").tag(Self.defaultEffortTag)
                         ForEach(CompanionConfigService.effortLevels, id: \.self) { level in

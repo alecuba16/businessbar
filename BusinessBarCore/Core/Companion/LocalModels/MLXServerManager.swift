@@ -251,7 +251,10 @@ public final class MLXServerManager: ObservableObject {
         idleTimer = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(minutes) * 60_000_000_000)
             guard let self, self.state.isRunning, !Task.isCancelled else { return }
-            guard Date().timeIntervalSince(self.lastRequestAt) >= TimeInterval(minutes * 60) else {
+            // The timer sleeps from the moment activity was stamped, so the
+            // window has fully elapsed by wake; a small tolerance covers the
+            // sleep starting a beat after the stamp.
+            guard Date().timeIntervalSince(self.lastRequestAt) >= TimeInterval(minutes * 60 - 1) else {
                 self.scheduleIdleTimer()
                 return
             }

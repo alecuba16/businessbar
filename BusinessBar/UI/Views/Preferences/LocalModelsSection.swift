@@ -1,6 +1,31 @@
 import BusinessBarCore
 import SwiftUI
 
+// MARK: - LocalModelsSheet
+
+/// Sheet wrapper for the on-device MLX setup: server controls, model
+/// catalog with explicit downloads, and server settings. The presenting
+/// tab refreshes its providers list when the sheet dismisses.
+struct LocalModelsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                LocalModelsSection()
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(minWidth: 520, minHeight: 480)
+    }
+}
+
 // MARK: - LocalModelsSection
 
 /// Preferences section for the on-device MLX server: requirement check,
@@ -24,6 +49,10 @@ struct LocalModelsSection: View {
         _idleText = State(initialValue: String(MLXServerConfig.idleMinutes()))
         _keepLoaded = State(initialValue: MLXServerConfig.keepLoaded())
         _activeModelID = State(initialValue: MLXServerConfig.activeModelID())
+        // The sheet rebuilds this view on every open, so seed from the store
+        // instead of assuming the button has not been pressed yet.
+        _localProfileCreated = State(initialValue:
+            CompanionConfigService.chatProviders().contains { $0.isLocalMLX == true })
     }
 
     private var uvPath: String? { MLXEnvironment.locateUV() }
@@ -255,8 +284,8 @@ struct LocalModelsSection: View {
                 .onChange(of: keepLoaded) { _, newValue in
                     MLXServerConfig.setKeepLoaded(newValue)
                 }
-            Button(localProfileCreated ? "Local profile added" : "Add chat profile for local model") {
-                if CompanionConfigService.upsertLocalMLXProfile() != nil {
+            Button(localProfileCreated ? "Local provider added" : "Add chat provider for local model") {
+                if CompanionConfigService.upsertLocalMLXProvider() != nil {
                     localProfileCreated = true
                 }
             }
@@ -276,7 +305,9 @@ struct LocalModelsSection: View {
     }
 
     private func updateLocalProfile() {
-        _ = CompanionConfigService.upsertLocalMLXProfile()
+        if CompanionConfigService.upsertLocalMLXProvider() != nil {
+            localProfileCreated = true
+        }
     }
 
     private func refreshDownloads() {

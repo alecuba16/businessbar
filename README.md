@@ -30,8 +30,9 @@ A unified macOS menu bar application combining three essential functionalities:
 - ⌨️ Per-template rewrite shortcuts: each prompt template gets its own global shortcut for the selected text, with a toast confirming the trigger and the result
 - ✅ Preferences show a Saved indicator after every change is stored (UserDefaults, Keychain and file-backed settings included), and the Companion tab has the same Accessibility permission check and management as the Badges tab
 - 💬 Floating chat panel that works over fullscreen apps, with markdown rendering (headings, code blocks, tables, links, images), a streaming response with a live status line, and retry on errors
-- 🔀 Model profiles: named endpoint presets (base URL, model, effort, per-profile key) you can switch mid-conversation from the chat panel; the first one is seeded from your existing setup
-- 🎚️ Per-request reasoning effort: pick it per rewrite template, per profile, per chat message, or globally, custom values included
+- 🔀 Providers: each provider is an endpoint (base URL, Keychain key, headers) holding multiple models (system prompt, reasoning toggle, effort with custom values) you can switch mid-conversation from the chat picker; existing setup migrates automatically and the old backend section is gone
+- ✍️ Rewrite actions: templates can replace the selection, insert the reply right after it, or show the overlay; Format for Slack template emits Slack mrkdwn
+- 🎚️ Per-request reasoning effort: pick it per rewrite template, per model, or per chat message, custom values included
 - ✏️ Edit last prompt: pull your previous question back into the editor, tweak it, and resend over the remaining history; Cmd+N starts a fresh session
 - 💭 Collapsible thinking block: reasoning from ACP agents and OpenAI-compatible reasoning models streams live above the answer, folds once the answer starts, and stays with the saved message
 - 🔗 Agent links render as clickable markdown, and chat links open only http, https, mailto and tel schemes
@@ -206,11 +207,26 @@ BusinessBar requires the following permissions:
 6. (Optional) Configure the LLM Companion: enable it in Preferences, set the
    backend (OpenAI-compatible API or an ACP agent command such as
    `gemini --acp`), record the chat panel shortcut (Cmd+B by default) and
-   assign a shortcut to each rewrite template you want. Default templates
+   assign a shortcut to each rewrite template you want. For the OpenAI
+   backend, add a provider (base URL, API key, headers) and models under it
+   (model string, system prompt, Reasoning toggle with effort), then pick
+   the default chat model. Default templates
    ask the model to wrap the result in `<output></output>` tags; the overlay
    shows only the tagged text, with no model commentary. A template can also
-   opt in to direct replace: when the reply carries the tags, the selection
-   is swapped in place and the overlay is skipped
+   pick a direct action: Replace swaps the tagged reply into the selection in
+   place, and Insert after selection writes it right after the caret, falling
+   back to the overlay when the app does not support in-place writes. The
+   Format for Slack template asks for Slack mrkdwn and inserts after the
+   selection
+7. (Optional) On-device models: install uv (`brew install uv`), then open
+   Preferences > Companion and press Add Local Models in the providers
+   section. Download one of the curated MLX
+   models (nothing downloads until you press Download), press Start, and add
+   the Local (MLX) chat model to chat without any API key. The server stops
+   itself after 5 idle minutes and the next message starts it again. Add more
+   models under the same provider or more providers in Preferences >
+   Companion; existing model profiles migrate to the new providers layout on
+   first launch
 
 ## Architecture
 
