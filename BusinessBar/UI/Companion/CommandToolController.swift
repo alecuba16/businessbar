@@ -49,6 +49,14 @@ final class CommandToolController: ObservableObject {
     @Published var workspaceRoot: String?
     @Published var yoloEnabled = false
 
+    /// Workspace commands actually run in: the picked folder, the default
+    /// from Preferences, or the user home, in that order, so command tools
+    /// work before any pick.
+    var effectiveWorkspaceRoot: String {
+        workspaceRoot
+            ?? CompanionConfigService.commandDefaultWorkingDir()
+    }
+
     /// Approved Tier 1 prefix rules for this session, built from "Always
     /// this session" decisions. Never persisted.
     private var sessionPrefixes: [String] = []
@@ -88,7 +96,8 @@ final class CommandToolController: ObservableObject {
         sessionPrefixes = []
         yoloEnabled = false
         // The workspace folder is session-scoped by design: each new
-        // conversation picks its own.
+        // conversation picks its own, starting from the Preferences
+        // default.
         workspaceRoot = nil
         Task { await refreshBackgroundProcesses() }
     }
@@ -117,7 +126,7 @@ final class CommandToolController: ObservableObject {
         reason: CommandRisk
     ) async -> CommandApprovalRequest.Decision {
         let decision = await withCheckedContinuation { (continuation: CheckedContinuation<CommandApprovalRequest.Decision, Never>) in
-            let root = workspaceRoot ?? "(no workspace folder selected)"
+            let root = effectiveWorkspaceRoot
             let request = CommandApprovalRequest(
                 command: command,
                 reason: reason,
@@ -181,9 +190,9 @@ final class CommandToolController: ObservableObject {
         let searchHandler = CompanionConfigService.searchToolHandler()
         let controller = self
         return { name, argumentsJSON in
-            if name == "web_search" {
+            if name == "web_search" || name == "github_search" {
                 return await searchHandler?(name, argumentsJSON)
-                    ?? "Error: web search is not configured"
+                    ?? "Error: \(name) is not configured"
             }
             return await controller.handleToolCall(name: name, argumentsJSON: argumentsJSON)
         }
@@ -219,9 +228,10 @@ final class CommandToolController: ObservableObject {
         guard let (command, background) = CommandToolCatalog.decodeRunCommandArguments(json) else {
             return "error: run_command needs a command string"
         }
-        guard let root = workspaceRoot, !root.isEmpty else {
+        guard !effectiveWorkspaceRoot.isEmpty else {
             return "error: no workspace folder selected. Ask the user to pick one in the panel header."
         }
+        let root = effectiveWorkspaceRoot
 
         var permission = CommandPermissionParser.classify(command, sessionPrefixes: sessionPrefixes)
         if case .needsConfirmation = permission, yoloEnabled,
@@ -281,9 +291,10 @@ final class CommandToolController: ObservableObject {
 
     private func readFile(_ json: [String: Any]) -> String {
         let (path, offset, limit) = CommandToolCatalog.decodeReadFileArguments(json)
-        guard let root = workspaceRoot, !root.isEmpty else {
+        guard !effectiveWorkspaceRoot.isEmpty else {
             return "error: no workspace folder selected. Ask the user to pick one in the panel header."
         }
+        let root = effectiveWorkspaceRoot
         guard let absolute = WorkspacePathGuard.resolve(path, root: root) else {
             return "error: path is outside the workspace folder"
         }
@@ -301,9 +312,10 @@ final class CommandToolController: ObservableObject {
 
     private func listFiles(_ json: [String: Any]) -> String {
         let (path, recursive) = CommandToolCatalog.decodeListFilesArguments(json)
-        guard let root = workspaceRoot, !root.isEmpty else {
+        guard !effectiveWorkspaceRoot.isEmpty else {
             return "error: no workspace folder selected. Ask the user to pick one in the panel header."
         }
+        let root = effectiveWorkspaceRoot
         guard let absolute = WorkspacePathGuard.resolve(path, root: root) else {
             return "error: path is outside the workspace folder"
         }

@@ -319,15 +319,16 @@ final class ChatStore: ObservableObject {
 
     func send(
         _ text: String,
+        images: [String]? = nil,
         client: LLMClient,
         effortOverride: String? = nil,
         commandToolHandler: ((String, String) async -> String)? = nil,
         pendingBackgroundResults: (() async -> [BackgroundCommandRegistry.CompletedResult])? = nil
     ) {
-        guard !text.isEmpty, !isStreaming else { return }
+        guard !text.isEmpty || !(images ?? []).isEmpty, !isStreaming else { return }
         errorMessage = nil
         pendingUserPrompt = text
-        messages.append(ChatMessage(role: .user, content: text))
+        messages.append(ChatMessage(role: .user, content: text, images: images))
         // Persist the prompt immediately: a crash mid-stream still leaves
         // the question recoverable in history.
         persistCurrentSession()
@@ -413,7 +414,9 @@ final class ChatStore: ObservableObject {
                         }
                         return
                     case .toolCallRequested(let name, _):
-                        self.activityLabel = name == "web_search" ? "Searching the web…" : "Using \(name)…"
+                        self.activityLabel = name == "web_search"
+                            ? "Searching the web…"
+                            : (name == "github_search" ? "Searching GitHub…" : "Using \(name)…")
                     }
                 }
             } catch {

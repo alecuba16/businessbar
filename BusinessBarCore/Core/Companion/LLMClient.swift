@@ -16,16 +16,21 @@ public struct ChatMessage: Identifiable, Equatable, Codable, Sendable {
     /// Reasoning the model streamed before the answer. Optional and
     /// decode-safe: sessions saved before this field existed load fine.
     public var thinking: String?
+    /// Images attached to this message as base64 data URIs
+    /// (data:image/png;base64,...). Kept on user messages; assistant
+    /// messages never carry them. Decode-safe for old sessions.
+    public var images: [String]?
 
-    public init(id: UUID = UUID(), role: Role, content: String, thinking: String? = nil) {
+    public init(id: UUID = UUID(), role: Role, content: String, thinking: String? = nil, images: [String]? = nil) {
         self.id = id
         self.role = role
         self.content = content
         self.thinking = thinking
+        self.images = images
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, thinking
+        case id, role, content, thinking, images
     }
 
     public init(from decoder: Decoder) throws {
@@ -34,6 +39,7 @@ public struct ChatMessage: Identifiable, Equatable, Codable, Sendable {
         role = try container.decode(Role.self, forKey: .role)
         content = try container.decode(String.self, forKey: .content)
         thinking = try container.decodeIfPresent(String.self, forKey: .thinking)
+        images = try container.decodeIfPresent([String].self, forKey: .images)
     }
 }
 

@@ -15,6 +15,7 @@ enum CompanionConfigService {
     static let tavilyKeychainKey = "com.businessbar.companion.tavilyKey"
     static let customSearchKeychainKey = "com.businessbar.companion.customSearchKey"
     static let customHeadersKeychainKey = "com.businessbar.companion.customHeaders"
+    static let githubSearchKeychainKey = "com.businessbar.companion.githubSearchKey"
 
     // MARK: - Backend selection
 
@@ -91,6 +92,19 @@ enum CompanionConfigService {
 
     static func setSearchProviderKind(_ kind: String) {
         UserDefaults.standard.set(kind, forKey: Constants.Defaults.companionSearchProvider)
+        // Remember the last real choice so toggling the tool off and back
+        // on restores it instead of resetting to a default.
+        if kind != "none" {
+            UserDefaults.standard.set(kind, forKey: Constants.Defaults.companionLastSearchProvider)
+        }
+        SettingsSavedBus.announce()
+    }
+
+    /// The kind the web search tool should return to when re-enabled:
+    /// the last used kind, or the scraped default that needs no key.
+    static func lastSearchProviderKind() -> String {
+        UserDefaults.standard.string(forKey: Constants.Defaults.companionLastSearchProvider)
+            ?? "scrape-ddg"
     }
 
     static func customSearchEndpoint() -> URL? {
@@ -101,6 +115,15 @@ enum CompanionConfigService {
 
     static func setCustomSearchEndpoint(_ url: URL?) {
         UserDefaults.standard.set(url?.absoluteString ?? "", forKey: Constants.Defaults.companionCustomSearchEndpoint)
+        SettingsSavedBus.announce()
+    }
+
+    /// Persists the endpoint text as typed. Template URLs contain `{query}`
+    /// which `URL(string:)` percent-encodes, so the raw string is the only
+    /// faithful roundtrip; `customSearchEndpoint()` still parses it into a URL.
+    static func setCustomSearchEndpointText(_ raw: String) {
+        UserDefaults.standard.set(raw, forKey: Constants.Defaults.companionCustomSearchEndpoint)
+        SettingsSavedBus.announce()
     }
 
     static func customSearchHeaderName() -> String {
@@ -137,6 +160,51 @@ enum CompanionConfigService {
 
     static func setCustomSearchKey(_ key: String) throws {
         try KeychainHelper.save(key: customSearchKeychainKey, data: Data(key.utf8))
+        SettingsSavedBus.announce()
+    }
+
+    /// Extra headers for the custom search endpoint, Keychain-stored as
+    /// JSON like provider headers, because values can be tokens.
+    static func customSearchHeaders() -> [(name: String, value: String)] {
+        guard let data = try? KeychainHelper.load(key: customHeadersKeychainKey),
+              let raw = try? JSONDecoder().decode([[String: String]].self, from: data)
+        else { return [] }
+        return raw.compactMap { pair in
+            guard let name = pair["name"], let value = pair["value"] else { return nil }
+            return (name, value)
+        }
+    }
+
+    static func setCustomSearchHeaders(_ headers: [(name: String, value: String)]) throws {
+        let raw = headers.map { ["name": $0.name, "value": $0.value] }
+        guard let data = try? JSONEncoder().encode(raw) else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        try KeychainHelper.save(key: customHeadersKeychainKey, data: data)
+        SettingsSavedBus.announce()
+    }
+
+    // MARK: - GitHub code search
+
+    /// GitHub search token (personal access token) from the Keychain.
+    static func githubSearchKey() -> String {
+        keychainString(githubSearchKeychainKey)
+    }
+
+    static func setGitHubSearchKey(_ key: String) throws {
+        try KeychainHelper.save(key: githubSearchKeychainKey, data: Data(key.utf8))
+        SettingsSavedBus.announce()
+    }
+
+    /// User switch for the github_search tool. Off by default; the tool
+    /// is only advertised when this is on AND a token exists, so the model
+    /// can never see a tool that cannot run.
+    static func githubSearchEnabled() -> Bool {
+        UserDefaults.standard.bool(forKey: Constants.Defaults.companionGitHubSearchEnabled)
+    }
+
+    static func setGitHubSearchEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Constants.Defaults.companionGitHubSearchEnabled)
         SettingsSavedBus.announce()
     }
 
@@ -339,9 +407,13 @@ enum CompanionConfigService {
     /// follows the active catalog model.
     static func upsertLocalMLXProvider() -> ChatProvider? {
         guard let modelID = MLXServerConfig.activeModelID(),
-              MLXModelCatalog.entry(id: modelID) != nil else { return nil }
-        let modelName = MLXModelCatalog.entry(id: modelID)?.displayName ?? modelID
-        let model = ChatModel(name: modelName, model: modelID)
+              let entry = MLXModelCatalog.entry(id: modelID) else { return nil }
+        let model = ChatModel(
+            name: entry.displayName,
+            model: modelID,
+            acceptsText: true,
+            acceptsImages: entry.kind == .textAndImages
+        )
         let provider = ChatProvider(
             name: "Local (MLX)",
             baseURL: MLXServerConfig.baseURLString(),
@@ -589,6 +661,23 @@ enum CompanionConfigService {
 
     static func setCommandToolsEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: "companion.commandToolsEnabled")
+        SettingsSavedBus.announce()
+    }
+
+    /// Default working dir for new chat sessions. Falls back to home so
+    /// the tools work before any pick, same rule as the chat header.
+    static func commandDefaultWorkingDir() -> String {
+        let raw = UserDefaults.standard.string(forKey: Constants.Defaults.companionCommandDefaultWorkingDir)
+        guard let raw, !raw.isEmpty,
+              FileManager.default.fileExists(atPath: raw) else {
+            return NSHomeDirectory()
+        }
+        return raw
+    }
+
+    static func setCommandDefaultWorkingDir(_ path: String) {
+        UserDefaults.standard.set(path, forKey: Constants.Defaults.companionCommandDefaultWorkingDir)
+        SettingsSavedBus.announce()
     }
 
     /// Effort the chat panel's next request should use: the ad-hoc pick if
@@ -652,10 +741,18 @@ enum CompanionConfigService {
 
     // MARK: - Search tool plumbing
 
-    /// Tool schemas offered to the model; empty when search is disabled.
+    /// Tool schemas offered to the model: web_search when a provider
+    /// resolves, github_search when enabled with a token. Empty when both
+    /// are unavailable.
     static func searchTools() -> [[String: Any]] {
-        guard makeSearchProvider() != nil else { return [] }
-        return [SearchToolCatalog.webSearchToolSchema()]
+        var schemas: [[String: Any]] = []
+        if makeSearchProvider() != nil {
+            schemas.append(SearchToolCatalog.webSearchToolSchema())
+        }
+        if makeGitHubSearchProvider() != nil {
+            schemas.append(SearchToolCatalog.githubSearchToolSchema())
+        }
+        return schemas
     }
 
     /// Resolves the configured search provider, nil when disabled or a
@@ -678,24 +775,49 @@ enum CompanionConfigService {
             return TavilySearchProvider(apiKey: key)
         case "custom":
             guard let endpoint = customSearchEndpoint() else { return nil }
-            return CustomSearchProvider(
-                endpoint: endpoint,
-                headerName: customSearchHeaderName().isEmpty ? nil : customSearchHeaderName(),
-                headerValue: customSearchKey().isEmpty ? nil : customSearchKey()
-            )
+            var headers = customSearchHeaders()
+            // Legacy single header migrates into the list on first use.
+            if headers.isEmpty {
+                let name = customSearchHeaderName()
+                let value = customSearchKey()
+                if !name.isEmpty, !value.isEmpty {
+                    headers = [(name, value)]
+                }
+            }
+            return CustomSearchProvider(endpoint: endpoint, headers: headers)
         default:
             return nil
         }
     }
 
-    /// Returns the onToolCall handler wiring web_search to the provider,
-    /// or nil when search is disabled.
+    /// GitHub code search provider, nil when the toggle is off or no
+    /// token is stored.
+    static func makeGitHubSearchProvider() -> GitHubSearchProvider? {
+        guard githubSearchEnabled() else { return nil }
+        let token = githubSearchKey()
+        guard !token.isEmpty else { return nil }
+        return GitHubSearchProvider(token: token)
+    }
+
+    /// Returns the onToolCall handler routing web_search and github_search
+    /// to their providers, or nil when neither is available.
     static func searchToolHandler() -> ((String, String) async -> String)?
     {
-        guard let provider = makeSearchProvider() else { return nil }
+        let webProvider = makeSearchProvider()
+        let githubProvider = makeGitHubSearchProvider()
+        guard webProvider != nil || githubProvider != nil else { return nil }
         return { name, argumentsJSON in
-            guard name == "web_search" else {
+            let provider: SearchProvider?
+            switch name {
+            case "web_search":
+                provider = webProvider
+            case "github_search":
+                provider = githubProvider
+            default:
                 return "Error: unknown tool \(name)"
+            }
+            guard let provider else {
+                return "Error: \(name) is not configured"
             }
             guard let query = Self.query(fromArgumentsJSON: argumentsJSON) else {
                 return "Error: missing 'query' argument"

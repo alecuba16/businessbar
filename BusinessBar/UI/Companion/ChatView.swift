@@ -1,6 +1,7 @@
 import BusinessBarCore
 import MarkdownUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - ChatView
 
@@ -17,6 +18,9 @@ struct ChatView: View {
     @State private var confirmingDeleteAll = false
     @State private var selectedProfileID: UUID?
     @State private var selectedEffort: String
+    /// Base64 data URIs staged for the next message. Populated from the
+    /// paperclip picker, drops, or pastes; cleared on send.
+    @State private var pendingImages: [String] = []
     @FocusState private var inputFocused: Bool
 
     /// Age buckets offered in the cleanup menu.
@@ -69,6 +73,11 @@ struct ChatView: View {
         }
         .background(.background)
         .onAppear { inputFocused = true }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard selectedModelAcceptsImages else { return false }
+            stageImages(from: urls.filter { $0.hasDirectoryPath == false })
+            return true
+        }
         .background(
             // Hidden anchors give the panel-scoped shortcuts a place to
             // live without stealing menu-key-equivalents from other apps.
@@ -371,27 +380,33 @@ struct ChatView: View {
     // MARK: - Command tools
 
     /// Workspace folder, YOLO toggle, and command tool status. The
-    /// workspace gate reads "pick a folder" until one is chosen: every
-    /// command tool errors out without it.
+    /// workspace defaults to the user home, so command tools work out of
+    /// the box; the whole dir label is the picker button.
     private var commandHeader: some View {
         HStack(spacing: 8) {
             Button {
                 commandTools.pickWorkspace()
             } label: {
-                Label(
-                    commandTools.workspaceRoot.map { ($0 as NSString).lastPathComponent }
-                        ?? "Choose folder…",
-                    systemImage: "folder"
-                )
-                .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text("Working dir:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text((commandTools.effectiveWorkspaceRoot as NSString).lastPathComponent)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                    Image(systemName: "folder")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .controlSize(.small)
-            .help(commandTools.workspaceRoot ?? "Commands run only inside this folder")
+            .buttonStyle(.plain)
+            .help("\(commandTools.effectiveWorkspaceRoot). Click to choose another folder")
 
             Spacer(minLength: 0)
 
             Toggle(isOn: $commandTools.yoloEnabled) {
-                Text("Auto-run")
+                Text("Auto-run (YOLO)")
                     .font(.caption)
             }
             .toggleStyle(.switch)
@@ -523,47 +538,89 @@ struct ChatView: View {
 
     // MARK: - Input
 
+    /// True when the currently selected model takes image inputs, so the
+    /// paperclip and drop/paste paths are worth showing.
+    private var selectedModelAcceptsImages: Bool {
+        guard CompanionConfigService.backend() == .openai else { return false }
+        guard let (_, model) = CompanionConfigService.selectedModel() else { return false }
+        return model.acceptsImages == true
+    }
+
     private var inputBar: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            Button {
-                withAnimation { showHistory.toggle() }
-            } label: {
-                Image(systemName: "sidebar.left")
-                    .font(.title3)
+        VStack(spacing: 6) {
+            if !pendingImages.isEmpty {
+                attachmentStrip
             }
-            .buttonStyle(.plain)
-            .help("Conversation history")
-
-            TextField("Ask anything…", text: $draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...5)
-                .focused($inputFocused)
-                .onSubmit { send() }
-
-            if store.isStreaming {
+            HStack(alignment: .bottom, spacing: 8) {
                 Button {
-                    store.cancel()
+                    withAnimation { showHistory.toggle() }
                 } label: {
-                    Image(systemName: "stop.circle.fill")
+                    Image(systemName: "sidebar.left")
                         .font(.title3)
                 }
                 .buttonStyle(.plain)
-                .help("Stop generating")
-            } else {
-                Button {
-                    send()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title3)
+                .help("Conversation history")
+
+                if selectedModelAcceptsImages {
+                    Button {
+                        pickImages()
+                    } label: {
+                        Image(systemName: "paperclip")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Attach images")
+                } else {
+                    Button {
+                        let alert = NSAlert()
+                        alert.messageText = "This model does not take images"
+                        alert.informativeText = "Pick a model with the Images capability in the model editor (the Images tickbox) or switch to a vision model like Qwen3-VL in the model picker."
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                    } label: {
+                        Image(systemName: "paperclip")
+                            .font(.title3)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Attach images (this model takes text only)")
                 }
-                .buttonStyle(.plain)
-                .disabled(draft.isEmpty)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help("Send (Cmd+Return)")
+
+                TextField("Ask anything…", text: $draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...5)
+                    .focused($inputFocused)
+                    .onSubmit { send() }
+                    .onPasteCommand(of: [.image, .fileURL]) { providers in
+                        guard selectedModelAcceptsImages else { return }
+                        stageImages(fromProviders: providers)
+                    }
+
+                if store.isStreaming {
+                    Button {
+                        store.cancel()
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop generating")
+                } else {
+                    Button {
+                        send()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(draft.isEmpty && pendingImages.isEmpty)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .help("Send (Cmd+Return)")
+                }
             }
+            .padding(10)
+            .background(.bar)
         }
-        .padding(10)
-        .background(.bar)
     }
 
     private var sendHandlerIsCommandAware: Bool {
@@ -571,10 +628,97 @@ struct ChatView: View {
             && CompanionConfigService.backend() == .openai
     }
 
+    /// Thumbnails of staged images with a remove button each.
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(pendingImages.indices, id: \.self) { index in
+                    if let image = ChatAttachment.dataURIToImage(pendingImages[index]) {
+                        ZStack(alignment: .topTrailing) {
+                            Image(nsImage: image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 48, height: 48)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            Button {
+                                pendingImages.remove(at: index)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .offset(x: 4, y: -4)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+        }
+        .frame(height: 56)
+    }
+
+    /// File picker for image attachments. Only shown when the selected
+    /// model accepts images.
+    private func pickImages() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK else { return }
+        stageImages(from: panel.urls)
+    }
+
+    private func stageImages(from urls: [URL]) {
+        for url in urls {
+            guard let type = UTType(filenameExtension: url.pathExtension),
+                type.conforms(to: .image)
+            else { continue }
+            if let dataURI = ChatAttachment.urlToDataURI(url) {
+                pendingImages.append(dataURI)
+            }
+        }
+    }
+
+    /// Paste path: item providers carry either raw image data or a file
+    /// URL. Both end up as staged data URIs.
+    private func stageImages(fromProviders providers: [NSItemProvider]) {
+        for provider in providers {
+            if let typeID = provider.registeredTypeIdentifiers.first(where: {
+                UTType($0)?.conforms(to: .image) == true
+            }) {
+                let mime = UTType(typeID)?.preferredMIMEType ?? "image/png"
+                provider.loadDataRepresentation(forTypeIdentifier: typeID) { data, _ in
+                    guard let data else { return }
+                    appendImageURI(data: data, mime: mime)
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    guard let data = item as? Data,
+                        let url = URL(dataRepresentation: data, relativeTo: nil)
+                    else { return }
+                    DispatchQueue.main.async {
+                        if let dataURI = ChatAttachment.urlToDataURI(url) {
+                            pendingImages.append(dataURI)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func appendImageURI(data: Data, mime: String) {
+        let uri = "data:\(mime);base64,\(data.base64EncodedString())"
+        DispatchQueue.main.async {
+            pendingImages.append(uri)
+        }
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !store.isStreaming else { return }
+        let images = pendingImages
+        guard !text.isEmpty || !images.isEmpty, !store.isStreaming else { return }
         draft = ""
+        pendingImages = []
         // Local MLX profiles need the server up before the client call;
         // everything else skips straight through.
         Task { @MainActor in
@@ -583,15 +727,18 @@ struct ChatView: View {
             } catch {
                 store.errorMessage = error.localizedDescription
                 draft = text
+                pendingImages = images
                 return
             }
             guard let client = clientProvider() else {
                 store.errorMessage = "No model configured. Set it up in Preferences > Companion."
                 draft = text
+                pendingImages = images
                 return
             }
             store.send(
                 text,
+                images: images.isEmpty ? nil : images,
                 client: client,
                 effortOverride: CompanionConfigService.chatEffortOverride(),
                 commandToolHandler: sendHandlerIsCommandAware
@@ -690,14 +837,30 @@ struct MessageBubble: View {
                 }
 
                 if !streamingThinkingOnly {
-                    MarkdownContent(text: message.content, role: message.role)
-                        .padding(10)
-                        .background(
-                            message.role == .user
-                                ? Color.accentColor.opacity(0.18)
-                                : Color(nsColor: .controlBackgroundColor)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    if let images = message.images, !images.isEmpty, message.role == .user {
+                        VStack(alignment: .trailing, spacing: 4) {
+                            ForEach(images.indices, id: \.self) { index in
+                                if let image = ChatAttachment.dataURIToImage(images[index]) {
+                                    Image(nsImage: image)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(maxWidth: 220, maxHeight: 160)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                    }
+                    if !message.content.isEmpty {
+                        MarkdownContent(text: message.content, role: message.role)
+                            .padding(10)
+                            .background(
+                                message.role == .user
+                                    ? Color.accentColor.opacity(0.18)
+                                    : Color(nsColor: .controlBackgroundColor)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
                 }
 
                 if isStreaming && message.content.isEmpty && !showsThinkingRow {
@@ -847,5 +1010,26 @@ enum MarkdownThemeFactory {
                 FontFamilyVariant(.monospaced)
                 FontSize(.em(0.9))
             }
+    }
+}
+
+// MARK: - ChatAttachment
+
+/// File to data-URI conversion for image attachments. Data URIs are the
+/// storage format for ChatMessage.images and what OpenAI-compatible
+/// servers expect in image_url parts.
+enum ChatAttachment {
+    static func urlToDataURI(_ url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let ext = url.pathExtension.lowercased()
+        let mime = UTType(filenameExtension: ext)?.preferredMIMEType ?? "image/png"
+        return "data:\(mime);base64,\(data.base64EncodedString())"
+    }
+
+    static func dataURIToImage(_ dataURI: String) -> NSImage? {
+        guard let comma = dataURI.firstIndex(of: ",") else { return nil }
+        let base64 = String(dataURI[dataURI.index(after: comma)...])
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return NSImage(data: data)
     }
 }

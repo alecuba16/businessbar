@@ -5,19 +5,49 @@ import Foundation
 /// Curated on-device MLX models. Downloads happen only through the explicit
 /// download flow in preferences; nothing here touches the network.
 public enum MLXModelCatalog {
-    public struct Entry: Identifiable, Sendable, Hashable {
+    /// What a catalog model accepts as input. Vision models run through
+    /// mlx-vlm's OpenAI-compatible server; text models through mlx-lm's.
+    public enum Kind: String, Sendable, Hashable, Codable {
+        case text
+        case textAndImages
+
+        public var label: String {
+            switch self {
+            case .text: return "Text"
+            case .textAndImages: return "Text + Images"
+            }
+        }
+    }
+
+    public struct Entry: Identifiable, Sendable, Hashable, Codable {
         public let id: String
         public let displayName: String
         /// Approximate download size on disk, bytes.
         public let sizeBytes: Int64
         /// Rough resident-RAM need while serving, bytes.
         public let ramBytes: Int64
+        /// Input modality; decides the server package that serves it.
+        public let kind: Kind
 
-        public init(id: String, displayName: String, sizeBytes: Int64, ramBytes: Int64) {
+        public init(id: String, displayName: String, sizeBytes: Int64, ramBytes: Int64, kind: Kind) {
             self.id = id
             self.displayName = displayName
             self.sizeBytes = sizeBytes
             self.ramBytes = ramBytes
+            self.kind = kind
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id, displayName, sizeBytes, ramBytes, kind
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(String.self, forKey: .id)
+            displayName = try container.decode(String.self, forKey: .displayName)
+            sizeBytes = try container.decode(Int64.self, forKey: .sizeBytes)
+            ramBytes = try container.decode(Int64.self, forKey: .ramBytes)
+            kind = try container.decodeIfPresent(Kind.self, forKey: .kind) ?? .text
         }
     }
 
@@ -37,45 +67,111 @@ public enum MLXModelCatalog {
 
     public static let entries: [Entry] = [
         Entry(
+            id: "mlx-community/Qwen3-0.6B-4bit",
+            displayName: "Qwen3 0.6B",
+            sizeBytes: 420_000_000,
+            ramBytes: 850_000_000,
+            kind: .text
+        ),
+        Entry(
             id: "mlx-community/Llama-3.2-1B-Instruct-4bit",
             displayName: "Llama 3.2 1B Instruct",
             sizeBytes: 660_000_000,
-            ramBytes: 1_100_000_000
+            ramBytes: 1_100_000_000,
+            kind: .text
+        ),
+        Entry(
+            id: "mlx-community/Qwen3-VL-2B-Instruct-4bit",
+            displayName: "Qwen3-VL 2B",
+            sizeBytes: 1_700_000_000,
+            ramBytes: 4_400_000_000,
+            kind: .textAndImages
         ),
         Entry(
             id: "mlx-community/Llama-3.2-3B-Instruct-4bit",
             displayName: "Llama 3.2 3B Instruct",
             sizeBytes: 1_930_000_000,
-            ramBytes: 2_700_000_000
-        ),
-        Entry(
-            id: "mlx-community/Qwen3-0.6B-4bit",
-            displayName: "Qwen3 0.6B",
-            sizeBytes: 420_000_000,
-            ramBytes: 850_000_000
+            ramBytes: 2_700_000_000,
+            kind: .text
         ),
         Entry(
             id: "mlx-community/Qwen3-4B-Instruct-2507-4bit",
             displayName: "Qwen3 4B Instruct",
             sizeBytes: 2_350_000_000,
-            ramBytes: 3_200_000_000
+            ramBytes: 3_200_000_000,
+            kind: .text
         ),
         Entry(
-            id: "mlx-community/Qwen3-8B-4bit",
-            displayName: "Qwen3 8B",
-            sizeBytes: 4_600_000_000,
-            ramBytes: 5_500_000_000
+            id: "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+            displayName: "Qwen3-VL 4B",
+            sizeBytes: 3_090_000_000,
+            ramBytes: 6_000_000_000,
+            kind: .textAndImages
         ),
         Entry(
             id: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
             displayName: "Qwen2.5 Coder 7B",
             sizeBytes: 4_060_000_000,
-            ramBytes: 5_000_000_000
+            ramBytes: 5_000_000_000,
+            kind: .text
+        ),
+        Entry(
+            id: "mlx-community/Qwen3-8B-4bit",
+            displayName: "Qwen3 8B",
+            sizeBytes: 4_600_000_000,
+            ramBytes: 5_500_000_000,
+            kind: .text
         ),
     ]
 
     public static func entry(id: String) -> Entry? {
-        entries.first { $0.id == id }
+        entries.first { $0.id == id } ?? customEntries.first { $0.id == id }
+    }
+
+    // MARK: Custom entries
+
+    /// User-added repos, persisted so the catalog survives restarts.
+    /// Stored in UserDefaults as a JSON array; sizes and kind come from
+    /// the repo check at add time.
+    public static var customEntries: [Entry] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: customEntriesKey),
+                  let decoded = try? JSONDecoder().decode([Entry].self, from: data)
+            else { return [] }
+            return decoded
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            UserDefaults.standard.set(data, forKey: customEntriesKey)
+        }
+    }
+
+    private static let customEntriesKey = "companionMLXCustomEntries"
+
+    /// Adds a custom entry unless the repo id already exists. Returns the
+    /// final entry list.
+    @discardableResult
+    public static func addCustomEntry(_ entry: Entry) -> [Entry] {
+        var current = customEntries
+        guard !current.contains(where: { $0.id == entry.id }) else { return current }
+        current.append(entry)
+        customEntries = current
+        return current
+    }
+
+    /// Removes a custom entry by repo id. Curated entries cannot be
+    /// removed through this path. Also clears the active model when it
+    /// pointed at the removed repo.
+    public static func removeCustomEntry(id: String) {
+        customEntries = customEntries.filter { $0.id != id }
+        if MLXServerConfig.activeModelID() == id {
+            MLXServerConfig.setActiveModelID(nil)
+        }
+    }
+
+    /// True when the repo id belongs to the curated list.
+    public static func isCurated(id: String) -> Bool {
+        entries.contains { $0.id == id }
     }
 
     /// Fit pill against installed RAM. The model needs ramBytes resident

@@ -204,44 +204,94 @@ public final class TavilySearchProvider: SearchProvider, @unchecked Sendable {
 // MARK: - CustomSearchProvider
 
 /// Escape hatch for arbitrary user-supplied search endpoints.
-/// Decodes tolerantly: top-level `results` or `data`, item keys
-/// url/link and content/snippet/description.
+///
+/// Two modes share one decoder. URL-template mode: the endpoint contains
+/// a `{query}` placeholder (and optionally `{count}`), the query goes into
+/// the URL percent-encoded, and custom headers ride along. Legacy POST
+/// mode: no placeholder means the old body form, kept so existing setups
+/// keep working.
 public final class CustomSearchProvider: SearchProvider, @unchecked Sendable {
     public let name = "Custom"
 
     private let endpoint: URL
-    private let headerName: String?
-    private let headerValue: String?
+    private let headers: [(name: String, value: String)]
     private let session: URLSession
 
     public init(
         endpoint: URL,
-        headerName: String? = nil,
-        headerValue: String? = nil,
+        headers: [(name: String, value: String)] = [],
         session: URLSession = .shared
     ) {
         self.endpoint = endpoint
-        self.headerName = headerName
-        self.headerValue = headerValue
+        self.headers = headers
         self.session = session
     }
 
-    public func search(query: String, maxResults: Int) async throws -> [SearchResultItem] {
-        let body: [String: Any] = [
-            "query": query,
-            "max_results": SearchProviderSupport.clampedResultCount(maxResults)
-        ]
-        guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
-            throw SearchProviderError.decoding("could not encode request body")
+    /// Old single-header initializer kept for callers that have not
+    /// migrated to the header list form.
+    public convenience init(
+        endpoint: URL,
+        headerName: String?,
+        headerValue: String?,
+        session: URLSession = .shared
+    ) {
+        let header: [(name: String, value: String)]
+        if let headerName, !headerName.isEmpty, let headerValue {
+            header = [(name: headerName, value: headerValue)]
+        } else {
+            header = []
         }
+        self.init(endpoint: endpoint, headers: header, session: session)
+    }
 
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let headerName, let headerValue, !headerName.isEmpty {
-            request.setValue(headerValue, forHTTPHeaderField: headerName)
+    /// True when the endpoint contains the URL-template placeholder and
+    /// template mode applies. `URL(string:)` percent-encodes curly braces, so
+    /// both the raw and the encoded form must be accepted as template input.
+    public static func isTemplateURL(_ endpoint: URL) -> Bool {
+        endpoint.absoluteString.contains("{query}")
+            || endpoint.absoluteString.contains("%7Bquery%7D")
+    }
+
+    /// Substitutes `{query}` and `{count}` in a template URL. The query is
+    /// percent-encoded so qualifiers and symbols survive. Handles the raw
+    /// brace form and the percent-encoded form left behind by `URL(string:)`.
+    public static func expandedTemplateURL(
+        _ template: URL,
+        query: String,
+        count: Int
+    ) -> URL? {
+        var raw = template.absoluteString
+        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        raw = raw.replacingOccurrences(of: "{query}", with: encodedQuery)
+        raw = raw.replacingOccurrences(of: "%7Bquery%7D", with: encodedQuery)
+        raw = raw.replacingOccurrences(of: "{count}", with: String(count))
+        raw = raw.replacingOccurrences(of: "%7Bcount%7D", with: String(count))
+        return URL(string: raw)
+    }
+
+    public func search(query: String, maxResults: Int) async throws -> [SearchResultItem] {
+        let count = SearchProviderSupport.clampedResultCount(maxResults)
+
+        var request: URLRequest
+        if Self.isTemplateURL(endpoint),
+           let expanded = Self.expandedTemplateURL(endpoint, query: query, count: count) {
+            request = URLRequest(url: expanded)
+        } else {
+            let body: [String: Any] = [
+                "query": query,
+                "max_results": count
+            ]
+            guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
+                throw SearchProviderError.decoding("could not encode request body")
+            }
+            request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = payload
         }
-        request.httpBody = payload
+        for header in headers where !header.name.isEmpty {
+            request.setValue(header.value, forHTTPHeaderField: header.name)
+        }
         request.timeoutInterval = 10
 
         do {
@@ -254,7 +304,7 @@ public final class CustomSearchProvider: SearchProvider, @unchecked Sendable {
         }
     }
 
-    static func decodeItems(from data: Data, response: URLResponse) throws -> [SearchResultItem] {
+    public static func decodeItems(from data: Data, response: URLResponse) throws -> [SearchResultItem] {
         guard let http = response as? HTTPURLResponse else {
             throw SearchProviderError.decoding("unexpected non-HTTP response")
         }
@@ -280,6 +330,82 @@ public final class CustomSearchProvider: SearchProvider, @unchecked Sendable {
     }
 }
 
+// MARK: - GitHubSearchProvider
+
+/// Client for the GitHub code search endpoint. Requires a token: the
+/// endpoint is authenticated-only and caps at 10 requests per minute.
+public final class GitHubSearchProvider: SearchProvider, @unchecked Sendable {
+    public let name = "GitHub Code Search"
+
+    private let token: String
+    private let session: URLSession
+
+    public init(token: String, session: URLSession = .shared) {
+        self.token = token
+        self.session = session
+    }
+
+    public func search(query: String, maxResults: Int) async throws -> [SearchResultItem] {
+        guard !token.isEmpty else { throw SearchProviderError.notConfigured }
+
+        var components = URLComponents(string: "https://api.github.com/search/code")!
+        components.queryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "per_page", value: String(SearchProviderSupport.clampedResultCount(maxResults)))
+        ]
+
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        // The text-match media type asks for fragments with the matching
+        // terms, which is the only snippet source the endpoint offers.
+        request.setValue("application/vnd.github.text-match+json", forHTTPHeaderField: "Accept")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.timeoutInterval = 10
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            return try Self.decodeItems(from: data, response: response)
+        } catch let error as SearchProviderError {
+            throw error
+        } catch {
+            throw SearchProviderSupport.transportError(error)
+        }
+    }
+
+    public static func decodeItems(from data: Data, response: URLResponse) throws -> [SearchResultItem] {
+        guard let http = response as? HTTPURLResponse else {
+            throw SearchProviderError.decoding("unexpected non-HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 403 {
+                throw SearchProviderError.http(403)
+            }
+            throw SearchProviderError.http(http.statusCode)
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = json["items"] as? [[String: Any]]
+        else {
+            throw SearchProviderError.decoding("missing items array")
+        }
+        return raw.compactMap { item in
+            guard let repo = item["repository"] as? [String: Any],
+                  let repoName = repo["full_name"] as? String,
+                  let htmlURL = item["html_url"] as? String
+            else { return nil }
+            let path = item["path"] as? String ?? ""
+            // First text-match fragment is the matching code, the best
+            // snippet the endpoint provides.
+            let fragment = (item["text_matches"] as? [[String: Any]])?
+                .first?["fragment"] as? String ?? ""
+            return SearchResultItem(
+                title: "\(repoName)/\(path)",
+                url: htmlURL,
+                snippet: fragment
+            )
+        }
+    }
+}
+
 // MARK: - SearchToolCatalog
 
 /// OpenAI tool schema and output shaping for the web_search tool.
@@ -297,6 +423,29 @@ public enum SearchToolCatalog {
                         "query": [
                             "type": "string",
                             "description": "The search query to run on the web."
+                        ]
+                    ],
+                    "required": ["query"]
+                ]
+            ]
+        ]
+    }
+
+    /// OpenAI-format schema for the `github_search` code search tool.
+    /// Qualifiers are documented in the description because the model has
+    /// no other way to learn the endpoint's query syntax.
+    public static func githubSearchToolSchema() -> [String: Any] {
+        [
+            "type": "function",
+            "function": [
+                "name": "github_search",
+                "description": "Search for code on GitHub. Supports qualifiers like repo:owner/name, org:name, user:name, language:python, path:src, and filename:. Requires at least one search term. Best for finding real code, definitions, or usage examples in public and accessible private repositories.",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "query": [
+                            "type": "string",
+                            "description": "GitHub code search query with optional qualifiers, for example 'parseJSON language:swift repo:apple/swift'"
                         ]
                     ],
                     "required": ["query"]

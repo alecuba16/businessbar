@@ -73,11 +73,14 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
 
                 var toolRounds = 0
                 streamLoop: while true {
-                    // Build the request body.
+                    // Build the request body. Messages with images use the
+                    // OpenAI content-parts array (text + image_url parts);
+                    // plain messages keep the compact string form every
+                    // server accepts.
                     var body: [String: Any] = [
                         "model": configuration.model,
                         "stream": true,
-                        "messages": workingMessages.map { ["role": $0.role.rawValue, "content": $0.content] }
+                        "messages": workingMessages.map(Self.requestMessage)
                     ]
                     if !tools.isEmpty {
                         body["tools"] = tools
@@ -217,6 +220,23 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// Encodes one message for the request body. Messages with images use
+    /// the OpenAI content-parts form (text part plus one image_url part per
+    /// attachment, data URIs); everything else stays the plain string form.
+    public static func requestMessage(_ message: ChatMessage) -> [String: Any] {
+        guard let images = message.images, !images.isEmpty else {
+            return ["role": message.role.rawValue, "content": message.content]
+        }
+        var parts: [[String: Any]] = []
+        if !message.content.isEmpty {
+            parts.append(["type": "text", "text": message.content])
+        }
+        for dataURI in images {
+            parts.append(["type": "image_url", "image_url": ["url": dataURI]])
+        }
+        return ["role": message.role.rawValue, "content": parts]
+    }
 
     /// Folds tool-output user messages older than the last two exchanges
     /// into short stubs so history cannot blow the token budget. Tool

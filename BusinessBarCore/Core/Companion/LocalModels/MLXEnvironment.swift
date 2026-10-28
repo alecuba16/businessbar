@@ -34,23 +34,32 @@ public enum MLXEnvironment {
         return nil
     }
 
-    /// Resolves the venv python that `uvx --from mlx-lm` uses. Cached in
-    /// process memory; the result is a stable path under ~/.cache/uv.
-    public static func resolveServerPython(timeout: TimeInterval = 120) throws -> String {
-        if let cached = cachedPython, FileManager.default.fileExists(atPath: cached) {
+    /// Resolves the venv python that `uv tool run --from <package>` uses.
+    /// Cached in process memory; the result is a stable path under ~/.cache/uv.
+    /// Text models run on mlx-lm; vision models on mlx-vlm.
+    public static func resolveServerPython(
+        for kind: MLXModelCatalog.Kind = .text,
+        timeout: TimeInterval = 120
+    ) throws -> String {
+        let cacheKey = kind.rawValue
+        if let cached = cachedPythons[cacheKey], FileManager.default.fileExists(atPath: cached) {
             return cached
         }
         guard let uv = locateUV() else {
             throw EnvironmentError.uvNotFound
         }
+        let package = kind == .textAndImages ? "mlx-vlm" : "mlx-lm"
+        let importCheck = kind == .textAndImages
+            ? "import sys, mlx_vlm; print(sys.executable)"
+            : "import sys, mlx_lm; print(sys.executable)"
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: uv)
         process.arguments = [
-            "tool", "run", "--from", "mlx-lm", "python", "-c",
-            "import sys, mlx_lm; print(sys.executable)",
+            "tool", "run", "--from", package, "python", "-c",
+            importCheck,
         ]
-        // The resolution itself may need to download mlx-lm on a fresh
+        // The resolution itself may need to install the package on a fresh
         // machine; that is the one-time bootstrap the requirement line in
         // preferences warns about, not a model download.
         process.environment = ProcessInfo.processInfo.environment
@@ -67,14 +76,14 @@ public enum MLXEnvironment {
             }
             if process.isRunning {
                 process.terminate()
-                throw EnvironmentError.resolveFailed("mlx-lm setup timed out")
+                throw EnvironmentError.resolveFailed("\(package) setup timed out")
             }
         } else {
             process.waitUntilExit()
         }
         guard process.terminationStatus == 0 else {
             throw EnvironmentError.resolveFailed(
-                "mlx-lm setup failed (exit \(process.terminationStatus))"
+                "\(package) setup failed (exit \(process.terminationStatus))"
             )
         }
 
@@ -86,11 +95,11 @@ public enum MLXEnvironment {
             FileManager.default.fileExists(atPath: path) else {
             throw EnvironmentError.resolveFailed("could not read python path")
         }
-        cachedPython = path
+        cachedPythons[cacheKey] = path
         return path
     }
 
-    private static var cachedPython: String?
+    private static var cachedPythons: [String: String] = [:]
 
     /// True when a quick localhost bind test says the port is free. Ports
     /// get grabbed by unrelated apps (seen with Okta Verify), so this check

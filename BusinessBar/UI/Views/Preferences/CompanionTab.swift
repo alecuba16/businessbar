@@ -23,13 +23,6 @@ struct CompanionTab: View {
     @StateObject private var accessibilityPermission = AccessibilityPermissionModel()
 
     @State private var backend: CompanionConfigService.Backend
-    @State private var searchProviderKind: String
-    @State private var commandToolsEnabled: Bool
-    @State private var braveKeyText: String
-    @State private var tavilyKeyText: String
-    @State private var customSearchEndpointText: String
-    @State private var customSearchHeaderNameText: String
-    @State private var customSearchKeyText: String
     @State private var acpCommandText: String
     @State private var acpArgumentsText: String
     @State private var historyMaxAgeDays: Int
@@ -50,13 +43,6 @@ struct CompanionTab: View {
     init() {
         let defaults = UserDefaults.standard
         _backend = State(initialValue: CompanionConfigService.backend())
-        _searchProviderKind = State(initialValue: CompanionConfigService.searchProviderKind())
-        _commandToolsEnabled = State(initialValue: CompanionConfigService.commandToolsEnabled())
-        _braveKeyText = State(initialValue: CompanionConfigService.braveKey())
-        _tavilyKeyText = State(initialValue: CompanionConfigService.tavilyKey())
-        _customSearchEndpointText = State(initialValue: defaults.string(forKey: Constants.Defaults.companionCustomSearchEndpoint) ?? "")
-        _customSearchHeaderNameText = State(initialValue: CompanionConfigService.customSearchHeaderName())
-        _customSearchKeyText = State(initialValue: CompanionConfigService.customSearchKey())
         _acpCommandText = State(initialValue: CompanionConfigService.acpCommand())
         _acpArgumentsText = State(initialValue: CompanionConfigService.acpArguments().joined(separator: " "))
         _historyMaxAgeDays = State(initialValue: CompanionConfigService.historyMaxAgeDays())
@@ -227,43 +213,7 @@ struct CompanionTab: View {
 
                 // MARK: Search
                 if backend == .openai {
-                    Section {
-                        Picker("Web search", selection: $searchProviderKind) {
-                            Text("Disabled").tag("none")
-                            Text("DuckDuckGo (scraped)").tag("scrape-ddg")
-                            Text("Bing (scraped)").tag("scrape-bing")
-                            Text("Google News (scraped)").tag("scrape-google-news")
-                            Text("Brave (API key)").tag("brave")
-                            Text("Tavily (API key)").tag("tavily")
-                            Text("Custom (API key)").tag("custom")
-                        }
-                        .onChange(of: searchProviderKind) { _, newValue in
-                            CompanionConfigService.setSearchProviderKind(newValue)
-                        }
-
-                        searchProviderFields
-                    } header: {
-                        Text("Web Search")
-                    } footer: {
-                        Text("Gives the model a web_search tool. Scraped engines need no key and fall back to each other when one blocks the request; API-key providers store their key in the Keychain. Applies to the OpenAI-compatible backend; ACP agents bring their own tools.")
-                    }
-                }
-
-                // MARK: Command tools
-                Section {
-                    Toggle("Command tools", isOn: $commandToolsEnabled)
-                        .onChange(of: commandToolsEnabled) { _, enabled in
-                            CompanionConfigService.setCommandToolsEnabled(enabled)
-                            if enabled {
-                                // AppDelegate owns the notification delegate
-                                // and already asked for authorization at launch.
-                                CommandToolController.registerNotificationCategory()
-                            }
-                        }
-                } header: {
-                    Text("Command execution")
-                } footer: {
-                    Text("Gives the model run_command, read_file, and list_files tools scoped to a folder you pick in the chat panel. Read-only commands run without asking; everything else shows a confirmation card first. Applies to the OpenAI-compatible backend only.")
+                    ToolsSection()
                 }
 
                 // MARK: Templates
@@ -466,37 +416,6 @@ struct CompanionTab: View {
         }
     }
 
-    @ViewBuilder
-    private var searchProviderFields: some View {
-        switch searchProviderKind {
-        case "brave":
-            SecureField("Brave API key (X-Subscription-Token)", text: $braveKeyText)
-                .onChange(of: braveKeyText) { _, newValue in
-                    try? CompanionConfigService.setBraveKey(newValue)
-                }
-        case "tavily":
-            SecureField("Tavily API key", text: $tavilyKeyText)
-                .onChange(of: tavilyKeyText) { _, newValue in
-                    try? CompanionConfigService.setTavilyKey(newValue)
-                }
-        case "custom":
-            TextField("Endpoint URL", text: $customSearchEndpointText)
-                .onChange(of: customSearchEndpointText) { _, newValue in
-                    CompanionConfigService.setCustomSearchEndpoint(URL(string: newValue.trimmingCharacters(in: .whitespaces)))
-                }
-            TextField("API key header name (optional)", text: $customSearchHeaderNameText)
-                .onChange(of: customSearchHeaderNameText) { _, newValue in
-                    CompanionConfigService.setCustomSearchHeaderName(newValue)
-                }
-            SecureField("API key (stored in Keychain)", text: $customSearchKeyText)
-                .onChange(of: customSearchKeyText) { _, newValue in
-                    try? CompanionConfigService.setCustomSearchKey(newValue)
-                }
-        default:
-            EmptyView()
-        }
-    }
-
     /// Opens System Settings to the Accessibility privacy pane, the same
     /// destination the Badges tab uses.
     private func openAccessibilitySettings() {
@@ -575,8 +494,8 @@ struct ProviderEditorSheet: View {
     }
 }
 
-/// Identifiable header pair for the provider editor rows.
-private struct EditableHeaderPair: Identifiable {
+/// Identifiable header pair for editor rows (providers, custom search).
+struct EditableHeaderPair: Identifiable {
     var id = UUID()
     var name: String
     var value: String
@@ -619,6 +538,15 @@ struct ModelEditorSheet: View {
                 set: { model.systemPrompt = $0.isEmpty ? nil : $0 }
             ), axis: .vertical)
                 .lineLimit(2...4)
+
+            Toggle("Text", isOn: Binding(
+                get: { model.acceptsText ?? true },
+                set: { model.acceptsText = $0 }
+            ))
+            Toggle("Images", isOn: Binding(
+                get: { model.acceptsImages ?? false },
+                set: { model.acceptsImages = $0 }
+            ))
 
             Toggle("Reasoning", isOn: Binding(
                 get: { model.reasoningEnabled ?? false },

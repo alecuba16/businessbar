@@ -29,7 +29,8 @@ struct LocalModelsSheet: View {
 // MARK: - LocalModelsSection
 
 /// Preferences section for the on-device MLX server: requirement check,
-/// start/stop with live status, model catalog with explicit downloads.
+/// start/stop with live status, model catalog with explicit downloads,
+/// and custom model provisioning from a Hugging Face repo id.
 struct LocalModelsSection: View {
     @ObservedObject private var server = MLXServerManager.shared
     @ObservedObject private var store = MLXModelStore.shared
@@ -41,6 +42,11 @@ struct LocalModelsSection: View {
     @State private var statusDetail = ""
     @State private var downloadedCache: [String] = []
     @State private var localProfileCreated = false
+    @State private var customRepoText = ""
+    @State private var customCheck: MLXRepoInspector.Report?
+    @State private var customError: String?
+    @State private var customChecking = false
+    @State private var customEntries: [MLXModelCatalog.Entry] = []
 
     private let installedRAM = Int64(ProcessInfo.processInfo.physicalMemory)
 
@@ -53,6 +59,7 @@ struct LocalModelsSection: View {
         // instead of assuming the button has not been pressed yet.
         _localProfileCreated = State(initialValue:
             CompanionConfigService.chatProviders().contains { $0.isLocalMLX == true })
+        _customEntries = State(initialValue: MLXModelCatalog.customEntries)
     }
 
     private var uvPath: String? { MLXEnvironment.locateUV() }
@@ -62,6 +69,7 @@ struct LocalModelsSection: View {
             if let uv = uvPath {
                 serverControls
                 modelCatalog
+                customModelProvisioning
                 serverSettings
             } else {
                 Text("Install uv first: brew install uv. The local server runs MLX models through it.")
@@ -88,7 +96,7 @@ struct LocalModelsSection: View {
         if uvPath == nil {
             return "On-device models run through a local server. Nothing downloads until you press a Download button."
         }
-        var text = "Runs a local mlx-lm server on 127.0.0.1 for on-device chat. Models download only when you press Download, never automatically. Weights live in ~/.cache/huggingface."
+        var text = "Runs a local mlx-lm server on 127.0.0.1 for on-device chat. Models download only when you press Download, never automatically. Weights live in ~/.cache/huggingface. Paste any MLX-format repo id below the catalog and press Check to provision it: the check is the only network call and runs on your command."
         if keepLoaded {
             text += " Keep loaded is on: the model stays in memory until you stop the server."
         } else {
@@ -162,10 +170,13 @@ struct LocalModelsSection: View {
             ForEach(MLXModelCatalog.entries) { entry in
                 modelRow(entry)
             }
+            ForEach(customEntries) { entry in
+                modelRow(entry, isCustom: true)
+            }
         }
     }
 
-    private func modelRow(_ entry: MLXModelCatalog.Entry) -> some View {
+    private func modelRow(_ entry: MLXModelCatalog.Entry, isCustom: Bool = false) -> some View {
         let isDownloaded = downloadedCache.contains(entry.id)
         let fit = MLXModelCatalog.fit(ramBytes: entry.ramBytes, installedRAM: installedRAM)
         let isDownloading = store.download?.modelID == entry.id && store.download?.isFinished == false
@@ -177,6 +188,7 @@ struct LocalModelsSection: View {
                     Text(entry.displayName)
                         .fontWeight(.medium)
                     fitPill(fit)
+                    kindPill(entry.kind)
                 }
                 Text("\(ByteCountFormatter.string(fromByteCount: entry.sizeBytes, countStyle: .file)) on disk")
                     .font(.caption)
@@ -205,7 +217,7 @@ struct LocalModelsSection: View {
                     .foregroundColor(.accentColor)
                     .help("Active local model")
             }
-            modelRowControls(entry, isDownloaded: isDownloaded, isDownloading: isDownloading, fit: fit, isFinished: isFinished)
+            modelRowControls(entry, isDownloaded: isDownloaded, isDownloading: isDownloading, fit: fit, isFinished: isFinished, isCustom: isCustom)
         }
     }
 
@@ -215,7 +227,8 @@ struct LocalModelsSection: View {
         isDownloaded: Bool,
         isDownloading: Bool,
         fit: MLXModelCatalog.Fit,
-        isFinished: Bool
+        isFinished: Bool,
+        isCustom: Bool = false
     ) -> some View {
         if isDownloading {
             Button("Cancel") {
@@ -226,9 +239,13 @@ struct LocalModelsSection: View {
             if isDownloaded {
                 Button("Delete") {
                     try? store.delete(modelID: entry.id)
+                    if isCustom {
+                        removeCustomEntry(entry)
+                    }
                     refreshDownloads()
                 }
                 .controlSize(.small)
+                .help(isCustom ? "Delete the downloaded weights and remove the entry" : "Delete the downloaded weights")
             } else {
                 Button("Download") {
                     do {
@@ -248,6 +265,23 @@ struct LocalModelsSection: View {
         }
     }
 
+    private func kindPill(_ kind: MLXModelCatalog.Kind) -> some View {
+        Text(kind.label)
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(
+                Capsule().fill(
+                    kind == .textAndImages
+                        ? Color.accentColor.opacity(0.15)
+                        : Color.secondary.opacity(0.15)
+                )
+            )
+            .help(kind == .textAndImages
+                ? "Accepts text and image prompts, served through mlx-vlm"
+                : "Text prompts only, served through mlx-lm")
+    }
+
     private func fitPill(_ fit: MLXModelCatalog.Fit) -> some View {
         Text(fit.label)
             .font(.caption2)
@@ -261,6 +295,131 @@ struct LocalModelsSection: View {
                 )
             )
             .help("Against \(ByteCountFormatter.string(fromByteCount: installedRAM, countStyle: .memory)) of installed memory")
+    }
+
+    // MARK: Custom model provisioning
+
+    /// Paste a HF repo id, Check fetches its metadata (explicit network
+    /// action), the preview card shows capabilities and tech details, and
+    /// Add registers it as a catalog entry.
+    private var customModelProvisioning: some View {
+        Group {
+            HStack {
+                TextField("Hugging Face repo id, e.g. mlx-community/Model-4bit", text: $customRepoText)
+                    .onChange(of: customRepoText) { _ in
+                        // A new id invalidates the previous check result.
+                        customCheck = nil
+                        customError = nil
+                    }
+                Button(customChecking ? "Checking…" : "Check") {
+                    runRepoCheck()
+                }
+                .controlSize(.small)
+                .disabled(customChecking || customRepoText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if customChecking {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Fetching repo details from Hugging Face…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            if let error = customError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+            if let report = customCheck {
+                customPreviewCard(report)
+            }
+        }
+    }
+
+    private func customPreviewCard(_ report: MLXRepoInspector.Report) -> some View {
+        let fit = MLXModelCatalog.fit(ramBytes: report.ramBytes, installedRAM: installedRAM)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(report.displayName)
+                    .fontWeight(.medium)
+                fitPill(fit)
+                kindPill(report.kind)
+            }
+            Text(report.repoID)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            HStack(spacing: 12) {
+                Text("\(ByteCountFormatter.string(fromByteCount: report.sizeBytes, countStyle: .file)) on disk")
+                Text("~\(ByteCountFormatter.string(fromByteCount: report.ramBytes, countStyle: .memory)) RAM")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            HStack(spacing: 12) {
+                Text(report.architecture)
+                if let context = report.contextLength {
+                    Text("\(context) token context")
+                }
+                if let quant = report.quantization {
+                    Text(quant)
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            Button("Add to catalog") {
+                addCustomFromReport(report)
+            }
+            .controlSize(.small)
+            .disabled(fit == .wontFit)
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    private func runRepoCheck() {
+        customChecking = true
+        customError = nil
+        customCheck = nil
+        let repoID = customRepoText
+        Task {
+            do {
+                let report = try await MLXRepoInspector.check(repoID: repoID)
+                await MainActor.run {
+                    customCheck = report
+                    customChecking = false
+                }
+            } catch {
+                await MainActor.run {
+                    customError = error.localizedDescription
+                    customChecking = false
+                }
+            }
+        }
+    }
+
+    private func addCustomFromReport(_ report: MLXRepoInspector.Report) {
+        let entry = MLXModelCatalog.Entry(
+            id: report.repoID,
+            displayName: report.displayName,
+            sizeBytes: report.sizeBytes,
+            ramBytes: report.ramBytes,
+            kind: report.kind
+        )
+        MLXModelCatalog.addCustomEntry(entry)
+        customEntries = MLXModelCatalog.customEntries
+        customCheck = nil
+        customRepoText = ""
+        refreshDownloads()
+    }
+
+    private func removeCustomEntry(_ entry: MLXModelCatalog.Entry) {
+        MLXModelCatalog.removeCustomEntry(id: entry.id)
+        customEntries = MLXModelCatalog.customEntries
+        if activeModelID == entry.id {
+            activeModelID = MLXServerConfig.activeModelID()
+            updateLocalProfile()
+        }
     }
 
     // MARK: Settings
@@ -311,7 +470,8 @@ struct LocalModelsSection: View {
     }
 
     private func refreshDownloads() {
-        downloadedCache = MLXModelCatalog.entries
+        let all = MLXModelCatalog.entries + customEntries
+        downloadedCache = all
             .filter { MLXModelCatalog.isDownloaded(modelID: $0.id) }
             .map(\.id)
     }

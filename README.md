@@ -39,7 +39,12 @@ A unified macOS menu bar application combining three essential functionalities:
 - 🗂️ Conversation history: sessions are saved on disk and restored on restart, so you can pick up any past chat and continue it. Cleanup by age or all at once from the history drawer, plus auto-clean by age or session count in Preferences
 - 🔌 OpenAI-compatible API or any ACP agent (Gemini, Claude, Codex) over stdio
 - 🧠 Reasoning models: reasoning effort level and custom HTTP headers for gateway deployments
-- 🌐 Optional web search tool: DuckDuckGo, Bing, or Google News (scraped, no key, with engine fallback) or Brave, Tavily, or a custom endpoint (API key)
+- 🛠️ Tools section in Preferences: provided tools (web search, command runner, GitHub code search) are never removable, only toggled on or off, each with a Configure sheet for its settings
+- 🌐 Optional web search tool: DuckDuckGo, Bing, or Google News (scraped, no key, with engine fallback) or Brave, Tavily, or a custom endpoint (API key); the custom endpoint takes URL templates with {query} and {count} for GET mode plus any number of headers, or the legacy JSON POST mode
+- 🐙 GitHub code search tool: token-gated (fine-grained PAT, no permissions needed for public code search), capped at 5 results per query, and only advertised to the model when both the toggle and the token are set
+- 🖥️ Command tools: run_command, read_file, and list_files scoped to the working dir shown in the chat header (default set in the Command Runner Configure sheet, click the dir label to switch it per session); read-only commands run without asking, everything else shows a confirmation card, and Auto-run (YOLO) skips the prompts (rm and credentials files still ask)
+- 🖼️ Image inputs: models opt in with the Images tickbox (Text is on by default); once a model accepts images the chat input grows a paperclip, drag-and-drop, and paste. Two Qwen3-VL models in the local MLX catalog take images and fit 16GB RAM
+- ➕ Custom MLX models: paste any MLX-format Hugging Face repo id, Check fetches the tech details (architecture, token context, quantization, sizes, fit) before you add it, then it downloads and serves like any curated model
 - 🔑 API keys stored in the Keychain
 - 🔒 The chat panel and rewrite overlay never replace your text automatically; you choose Replace or Copy
 
@@ -222,7 +227,9 @@ BusinessBar requires the following permissions:
    Preferences > Companion and press Add Local Models in the providers
    section. Download one of the curated MLX
    models (nothing downloads until you press Download), press Start, and add
-   the Local (MLX) chat model to chat without any API key. The server stops
+   the Local (MLX) chat model to chat without any API key. Text models serve
+   through mlx-lm and the two Qwen3-VL vision models through mlx-vlm, picked
+   per model automatically. The server stops
    itself after 5 idle minutes and the next message starts it again. Add more
    models under the same provider or more providers in Preferences >
    Companion; existing model profiles migrate to the new providers layout on

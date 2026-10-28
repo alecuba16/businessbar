@@ -17,6 +17,12 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
     public var reasoningEnabled: Bool?
     /// Reasoning effort for this model; nil falls back to the global default.
     public var reasoningEffort: String?
+    /// Whether the model takes text prompts. Legacy rows decode with true;
+    /// a text-only model turns this off only as an explicit user choice.
+    public var acceptsText: Bool?
+    /// Whether the model takes image inputs. Legacy rows decode with false
+    /// so nothing regresses: images are opt-in per model.
+    public var acceptsImages: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -24,7 +30,9 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
         model: String,
         systemPrompt: String? = nil,
         reasoningEnabled: Bool? = nil,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        acceptsText: Bool? = nil,
+        acceptsImages: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -32,10 +40,12 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
         self.systemPrompt = systemPrompt
         self.reasoningEnabled = reasoningEnabled
         self.reasoningEffort = reasoningEffort
+        self.acceptsText = acceptsText
+        self.acceptsImages = acceptsImages
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, model, systemPrompt, reasoningEnabled, reasoningEffort
+        case id, name, model, systemPrompt, reasoningEnabled, reasoningEffort, acceptsText, acceptsImages
     }
 
     public init(from decoder: Decoder) throws {
@@ -46,6 +56,8 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
         systemPrompt = try container.decodeIfPresent(String.self, forKey: .systemPrompt)
         reasoningEnabled = try container.decodeIfPresent(Bool.self, forKey: .reasoningEnabled)
         reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        acceptsText = try container.decodeIfPresent(Bool.self, forKey: .acceptsText) ?? true
+        acceptsImages = try container.decodeIfPresent(Bool.self, forKey: .acceptsImages) ?? false
     }
 }
 
@@ -201,7 +213,9 @@ extension ChatProvider {
                 ChatModel(
                     name: profile.name,
                     model: profile.model,
-                    reasoningEffort: profile.reasoningEffort
+                    reasoningEffort: profile.reasoningEffort,
+                    acceptsText: true,
+                    acceptsImages: false
                 )
             ],
             isLocalMLX: profile.isLocalMLX

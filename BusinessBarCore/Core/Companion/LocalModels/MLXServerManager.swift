@@ -78,6 +78,9 @@ public final class MLXServerManager: ObservableObject {
     public func start(modelID: String) async throws {
         guard !state.isRunning, state != .starting else { return }
 
+        guard let entry = MLXModelCatalog.entry(id: modelID) else {
+            throw ServerError.modelNotDownloaded(modelID)
+        }
         guard MLXModelCatalog.isDownloaded(modelID: modelID) else {
             throw ServerError.modelNotDownloaded(modelID)
         }
@@ -91,13 +94,16 @@ public final class MLXServerManager: ObservableObject {
 
         do {
             let python = try await Task.detached(priority: .userInitiated) {
-                try MLXEnvironment.resolveServerPython()
+                try MLXEnvironment.resolveServerPython(for: entry.kind)
             }.value
 
+            let serverModule = entry.kind == .textAndImages
+                ? "mlx_vlm.server"
+                : "mlx_lm.server"
             let child = Process()
             child.executableURL = URL(fileURLWithPath: python)
             child.arguments = [
-                "-m", "mlx_lm.server",
+                "-m", serverModule,
                 "--model", modelID,
                 "--host", "127.0.0.1",
                 "--port", String(port),
