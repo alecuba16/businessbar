@@ -36,6 +36,7 @@ enum CompanionConfigService {
 
     static func setBackend(_ backend: Backend) {
         UserDefaults.standard.set(backend.rawValue, forKey: Constants.Defaults.companionBackend)
+        SettingsSavedBus.announce()
     }
 
     // MARK: - Storage
@@ -477,6 +478,7 @@ enum CompanionConfigService {
 
     static func setChatInputExpanded(_ expanded: Bool) {
         UserDefaults.standard.set(expanded, forKey: Constants.Defaults.companionInputExpanded)
+        SettingsSavedBus.announce()
     }
 
     // MARK: - Reasoning

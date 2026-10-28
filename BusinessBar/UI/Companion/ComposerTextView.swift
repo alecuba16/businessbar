@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -239,15 +240,7 @@ final class ComposerNSTextView: NSTextView {
     var onPaste: ((NSPasteboard) -> Void)?
     var onDidMoveToWindow: (() -> Void)?
     // Internal so validation harnesses can read the marker state.
-    var breakLayer: CATextLayer = {
-        let layer = CATextLayer()
-        layer.string = "¶"
-        layer.fontSize = 9
-        layer.foregroundColor = NSColor.systemGray.withAlphaComponent(0.55).cgColor
-        layer.alignmentMode = .left
-        layer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-        return layer
-    }()
+    var markerLayers: [CATextLayer] = []
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -264,60 +257,132 @@ final class ComposerNSTextView: NSTextView {
         positionBreakMarkers()
     }
 
-    // ¶ at the end of each line a Return created, so a typed break is
-    // visibly distinct from a wrap. A line whose text wrapped into the
-    // newline fragment (fragment starts above the line's first glyph)
-    // keeps the marker off: the fragment holds text, not the break. The
-    // layer travels with the document, so scrolled-away breaks stay
-    // marked.
+    // Wrap arrows at the end of each fragment the editor wrapped, the
+    // same rounding-back glyph other editors use, plus a paragraph mark
+    // after the last glyph of a line a Return created. Hard breaks stay
+    // visibly distinct from wraps: an arrow means "this line continues",
+    // the paragraph mark means "you pressed Return here". Layers travel
+    // with the document, so scrolled-away markers keep their positions.
     private func positionBreakMarkers() {
         guard let container = textContainer, let layoutManager = layoutManager else { return }
         layoutManager.ensureLayout(for: container)
         let string = (self.string as NSString)
-        var markers: [CGRect] = []
-        var charIndex = 0
-        while charIndex < string.length {
-            let lineRange = string.lineRange(for: NSRange(location: charIndex, length: 0))
-            let lineEnd = NSMaxRange(lineRange)
-            if string.character(at: lineEnd - 1) == 0x0A {
-                let glyphRange = layoutManager.glyphRange(
-                    forCharacterRange: NSRange(location: lineEnd - 1, length: 1),
-                    actualCharacterRange: nil
+        var keptLayers: [CATextLayer] = []
+
+        // Enumerate layout fragments: each is one visual row. A row whose
+        // text does not end in a newline continues on the next row, which
+        // is exactly a wrap.
+        var glyph = 0
+        let totalGlyphs = layoutManager.numberOfGlyphs
+        while glyph < totalGlyphs {
+            let rangePointer = UnsafeMutablePointer<NSRange>.allocate(capacity: 1)
+            let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: rangePointer)
+            let glyphRange = rangePointer.pointee
+            rangePointer.deallocate()
+            let fragmentEnd = glyphRange.location + glyphRange.length
+
+            // Map the fragment's glyph span back to characters to see how
+            // the row ends.
+            let firstChar = mappedCharIndex(ofGlyph: glyphRange.location, in: string, layoutManager: layoutManager)
+            let endChar = fragmentEnd >= totalGlyphs
+                ? string.length
+                : mappedCharIndex(ofGlyph: fragmentEnd, in: string, layoutManager: layoutManager)
+            let rowEndsInNewline = endChar > firstChar && string.character(at: endChar - 1) == 0x0A
+            // A row that neither ends in a newline nor is the last row
+            // continues on the next row: that is a wrap, and its arrow
+            // belongs here, at the end of the wrapped row. A row ending in
+            // a newline never wraps onward, no matter where its line
+            // started, so the arrow check keys on the row's own ending.
+            if !rowEndsInNewline, fragmentEnd < totalGlyphs {
+                keptLayers.append(
+                    markerLayer("\u{21A9}", endOfRow: fragment, container: container)
                 )
-                if glyphRange.length > 0 {
-                    let newlineFragment = layoutManager.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
-                    let lineStartGlyph = layoutManager.glyphRange(
-                        forCharacterRange: NSRange(location: lineRange.location, length: 1),
-                        actualCharacterRange: nil
-                    )
-                    let lineStartFragment = lineStartGlyph.length > 0
-                        ? layoutManager.lineFragmentRect(forGlyphAt: lineStartGlyph.location, effectiveRange: nil)
-                        : newlineFragment
-                    let lineStartedInThisFragment = abs(newlineFragment.minY - lineStartFragment.minY) < 0.5
-                    if lineStartedInThisFragment {
-                        markers.append(newlineFragment)
-                    }
+            } else if rowEndsInNewline {
+                // The paragraph mark sits after the row's last drawn glyph,
+                // not at the row edge: a full-width line and a half-empty
+                // one both read correctly. The newline glyph itself spans
+                // the whole remaining row, so the anchor is the glyph
+                // before it; a row holding only the newline anchors at the
+                // row start.
+                let lastTextGlyph = fragmentEnd - 2
+                let anchorX: CGFloat
+                if lastTextGlyph >= glyphRange.location {
+                    anchorX = layoutManager.boundingRect(
+                        forGlyphRange: NSRange(location: lastTextGlyph, length: 1),
+                        in: container
+                    ).maxX
+                } else {
+                    anchorX = 0
                 }
+                keptLayers.append(
+                    paragraphMarker("\u{00B6}", afterLastGlyphAt: anchorX, in: fragment)
+                )
             }
-            charIndex = lineEnd
+            glyph = fragmentEnd
         }
-        if markers.isEmpty {
-            if breakLayer.superlayer != nil { breakLayer.removeFromSuperlayer() }
-            return
+
+        markerLayers.forEach {
+            if $0.superlayer != nil { $0.removeFromSuperlayer() }
         }
-        if breakLayer.superlayer == nil { layer?.addSublayer(breakLayer) }
+        markerLayers = keptLayers
+        keptLayers.forEach {
+            if $0.superlayer == nil { layer?.addSublayer($0) }
+        }
+    }
+
+    /// Glyph index back to character index, linear from a cached start:
+    /// glyph ranges are monotonically increasing, so the walk never
+    /// restarts per fragment.
+    private func mappedCharIndex(ofGlyph target: Int, in string: NSString, layoutManager: NSLayoutManager) -> Int {
+        var char = 0
+        while char < string.length {
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: NSRange(location: char, length: 1),
+                actualCharacterRange: nil
+            )
+            if glyphRange.length > 0 && glyphRange.location >= target { return char }
+            char += 1
+        }
+        return string.length
+    }
+
+    private func markerLayer(_ symbol: String, endOfRow fragment: CGRect, container: NSTextContainer) -> CATextLayer {
+        let layer = markerLayerBase()
+        layer.string = symbol
         let origin = textContainerOrigin
-        let lineHeight = markers[0].height
-        breakLayer.frame = CGRect(
-            x: origin.x,
-            y: origin.y,
-            width: bounds.width,
-            height: markers.last!.maxY - markers[0].minY
+        layer.frame = CGRect(
+            x: origin.x + fragment.maxX + container.lineFragmentPadding - markerWidth,
+            y: origin.y + fragment.minY,
+            width: markerWidth,
+            height: fragment.height
         )
-        breakLayer.string = markers.enumerated().map { index, _ in
-            index == markers.count - 1 ? "¶" : "¶\n"
-        }.joined()
-        breakLayer.fontSize = lineHeight * 0.55
+        layer.alignmentMode = .right
+        return layer
+    }
+
+    private func paragraphMarker(_ symbol: String, afterLastGlyphAt lastGlyphMaxX: CGFloat, in fragment: CGRect) -> CATextLayer {
+        let layer = markerLayerBase()
+        layer.string = symbol
+        let origin = textContainerOrigin
+        layer.frame = CGRect(
+            x: origin.x + lastGlyphMaxX + 2,
+            y: origin.y + fragment.minY,
+            width: markerWidth,
+            height: fragment.height
+        )
+        layer.alignmentMode = .left
+        return layer
+    }
+
+    private let markerWidth: CGFloat = 12
+
+    private func markerLayerBase() -> CATextLayer {
+        let layer = CATextLayer()
+        layer.font = CTFontCreateWithName("Menlo" as CFString, 9, nil)
+        layer.fontSize = 9
+        layer.foregroundColor = NSColor.systemGray.withAlphaComponent(0.55).cgColor
+        layer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        return layer
     }
 
     override func becomeFirstResponder() -> Bool {
