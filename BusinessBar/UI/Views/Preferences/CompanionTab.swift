@@ -467,6 +467,15 @@ struct ProviderEditorSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// Adds one fetched row with zero effort interaction: the published
+    /// vocabulary decides. Its default (medium, else middle value) lands
+    /// as the model's effort; no published vocabulary means no effort.
+    private func addFetchedModel(_ info: RemoteModelInfo) {
+        let effort = info.effortOptions.flatMap(EffortVocabulary.defaultEffort(in:))
+        provider.models.append(info.chatModel(effort: effort))
+        addedModelIDs.insert(info.id)
+    }
+
     init(provider: ChatProvider?, onSave: @escaping (ChatProvider, String, [(name: String, value: String)]) -> Void) {
         let initial = provider ?? ChatProvider(name: "", baseURL: "", models: [])
         _provider = State(initialValue: initial)
@@ -537,17 +546,12 @@ struct ProviderEditorSheet: View {
                 .help("Fetch the model list from the provider's /models endpoint")
                 if let fetchedModels, !fetchedModels.isEmpty {
                     Button("Add All") {
-                        let existing = Set(provider.models.map(\.model))
-                        for info in fetchedModels where !existing.contains(info.id) {
-                            // No per-row interaction in bulk add: the
-                            // vocabulary's default lands as the effort.
-                            let effort = info.effortOptions.flatMap(EffortVocabulary.defaultEffort(in:))
-                            provider.models.append(info.chatModel(effort: effort))
-                            addedModelIDs.insert(info.id)
+                        for info in fetchedModels where !provider.models.contains(where: { $0.model == info.id }) {
+                            addFetchedModel(info)
                         }
                     }
                     .disabled(fetchedModels.allSatisfy { addedModelIDs.contains($0.id) })
-                    .help("Add every fetched model that is not in the list yet, using each vocabulary's default effort")
+                    .help("Add every fetched model that is not in the list yet")
                 }
                 if let fetchError {
                     Text("Fetch failed: \(fetchError)")
@@ -574,28 +578,9 @@ struct ProviderEditorSheet: View {
                                     Image(systemName: "checkmark")
                                         .font(.system(size: 10))
                                         .foregroundColor(.green)
-                                } else if let options = info.effortOptions, !options.isEmpty {
-                                    // Rows that publish a vocabulary ask for
-                                    // the effort right here, so the added
-                                    // model is usable without a later edit.
-                                    Menu {
-                                        ForEach(options, id: \.self) { level in
-                                            Button(level) {
-                                                provider.models.append(info.chatModel(effort: level))
-                                                addedModelIDs.insert(info.id)
-                                            }
-                                        }
-                                    } label: {
-                                        Text("Add")
-                                    }
-                                    .controlSize(.small)
-                                    .menuStyle(.borderlessButton)
-                                    .fixedSize()
-                                    .help("Pick the reasoning effort for this model")
                                 } else {
                                     Button("Add") {
-                                        provider.models.append(info.chatModel())
-                                        addedModelIDs.insert(info.id)
+                                        addFetchedModel(info)
                                     }
                                     .controlSize(.small)
                                 }
