@@ -80,7 +80,12 @@ final class TemplateStoreTests: XCTestCase {
         let store = TemplateStore(defaults: suite)
         let custom = [PromptTemplate(name: "Custom", prompt: "custom [placeholder]")]
         store.save(custom)
-        XCTAssertEqual(store.load(), custom)
+        // load() merges missing built-in defaults into any stored list,
+        // so the stored custom template survives and comes back first.
+        let loaded = store.load()
+        XCTAssertEqual(loaded.first, custom.first)
+        XCTAssertEqual(loaded.count, 1 + PromptTemplate.defaults.count)
+        XCTAssertTrue(loaded.dropFirst().contains { $0.name == "Improve writing" })
     }
 
     func testLoadFallsBackToDefaultsAfterEmptySave() {
