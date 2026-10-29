@@ -13,7 +13,8 @@ final class PreferencesWindowController: NSWindowController {
         updaterViewModel: UpdaterViewModel,
         badgeManager: BadgeManager,
         meetingManager: MeetingManager,
-        googleAuth: GoogleAuth
+        googleAuth: GoogleAuth,
+        initialTab: PreferencesView.PreferenceTab? = nil
     ) {
         AppLogger.info("PreferencesWindowController init — building window", category: "Preferences")
 
@@ -31,7 +32,8 @@ final class PreferencesWindowController: NSWindowController {
         let rootView = PreferencesView(
             badgeManager: badgeManager,
             meetingManager: meetingManager,
-            googleAuth: googleAuth
+            googleAuth: googleAuth,
+            initialTab: initialTab
         )
         .environmentObject(updaterViewModel)
 
@@ -59,7 +61,18 @@ struct PreferencesView: View {
     @ObservedObject var badgeManager: BadgeManager
     @ObservedObject var meetingManager: MeetingManager
     @ObservedObject var googleAuth: GoogleAuth
-    @State private var selectedTab = PreferenceTab.general
+    /// Tab selected at window creation; cross-window callers (the chat
+    /// panel's setup hint) pass the section that explains what to do.
+    var initialTab: PreferenceTab? = nil
+    @State private var selectedTab: PreferenceTab
+
+    init(badgeManager: BadgeManager, meetingManager: MeetingManager, googleAuth: GoogleAuth, initialTab: PreferenceTab? = nil) {
+        self.badgeManager = badgeManager
+        self.meetingManager = meetingManager
+        self.googleAuth = googleAuth
+        self.initialTab = initialTab
+        _selectedTab = State(initialValue: initialTab ?? .general)
+    }
 
     enum PreferenceTab: String, CaseIterable {
         case general    = "General"

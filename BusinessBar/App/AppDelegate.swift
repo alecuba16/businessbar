@@ -306,7 +306,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingWindowController?.show()
     }
 
-    func showPreferences() {
+    /// Opens the Preferences window. `initialTab` selects the section at
+    /// creation time; nil keeps General. A controller created without a tab
+    /// keeps whatever section it was left on.
+    func showPreferences(initialTab: PreferencesView.PreferenceTab? = nil) {
         if preferencesWindowController == nil {
             let bm = badgeManager ?? BadgeManager()
             let mm = meetingManager ?? MeetingManager(eventStore: EKEventStoreAdapter())
@@ -315,7 +318,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 updaterViewModel: updaterViewModel,
                 badgeManager: bm,
                 meetingManager: mm,
-                googleAuth: googleAuth
+                googleAuth: googleAuth,
+                initialTab: initialTab
             )
         }
 
