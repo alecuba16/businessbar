@@ -476,12 +476,16 @@ struct ChatView: View {
             // The picker is read from the gate directly: hiding it on a
             // stale gate would leave Allow on with no way to see it.
             if commandToolsEnabledNow {
+                // The 130pt cap squeezes a rendered label to a wrapped
+                // "Com/mands" column; the tooltip below carries the meaning
+                // and VoiceOver still reads the hidden label.
                 Picker("Commands", selection: $commandTools.sessionPermissionMode) {
                     Text("Ask").tag(CommandPermissionMode.ask)
                     Text("Allow").tag(CommandPermissionMode.allow)
                     Text("Deny").tag(CommandPermissionMode.deny)
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
                 .controlSize(.mini)
                 .frame(maxWidth: 130)
                 .help(
