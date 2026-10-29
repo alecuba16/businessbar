@@ -5,7 +5,7 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.2] - 2026-10-29
 ### Added
 - ACP agents as providers: the Providers section in Preferences > Companion adds three kinds, OpenAI-compatible endpoints, the local MLX server, and ACP agents over stdio, each with its own name and command line (for example `gemini --acp`). Multiple agents can coexist and switch from the same model pickers as models. The old Model Backend picker and its global command fields are gone; an existing global ACP config migrates into a provider entry once, keeping the stored command and arguments selected, so the panel never changes behavior on update
 - Per-template companion model: every rewrite template can pin its own model in the template editor (grouped by provider, a Default chat model row applies when none is picked). Template shortcuts and rewrite streams use the pinned model's provider, API key and reasoning settings, templates pinned to a local MLX model start that server before streaming even when the selected chat model is remote, and a stale pinned id falls back to the selected model. The template list shows the pinned model under the template name
