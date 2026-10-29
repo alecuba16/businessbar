@@ -629,7 +629,8 @@ final class StatusBarController: NSObject {
 
         // Unregister shortcuts whose template no longer exists. Library keys
         // are scanned directly because the library has no list-all API.
-        let liveTemplateIDs = Set(TemplateStore().load().map(\.id))
+        let templates = TemplateStore().load()
+        let liveTemplateIDs = Set(templates.map(\.id))
         for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix(libraryPrefix + prefix) {
             let raw = String(key.dropFirst(libraryPrefix.count))
             let templateID = String(raw.dropFirst(prefix.count))
@@ -638,7 +639,7 @@ final class StatusBarController: NSObject {
             }
         }
 
-        for template in TemplateStore().load() {
+        for template in templates {
             let shortcutName = name.rewriteTemplate(template.id)
             guard KeyboardShortcuts.getShortcut(for: shortcutName) != nil else { continue }
             // onKeyUp appends, so a stale handler from the previous sync would
