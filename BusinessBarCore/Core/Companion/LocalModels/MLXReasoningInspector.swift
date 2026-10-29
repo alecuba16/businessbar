@@ -13,7 +13,7 @@ import Foundation
 ///
 /// mlx-lm's server passes `chat_template_kwargs` from the request body into
 /// the template, so both shapes map onto request fields we control.
-public struct MLXReasoningCapability: Sendable, Equatable, Codable {
+public struct MLXReasoningCapability: Sendable, Equatable, Hashable, Codable {
     public enum Shape: String, Sendable, Equatable, Codable {
         /// Template takes `enable_thinking` (Qwen3 style): on/off toggle.
         case thinkingToggle

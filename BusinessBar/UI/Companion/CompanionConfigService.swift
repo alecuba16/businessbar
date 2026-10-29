@@ -794,10 +794,10 @@ enum CompanionConfigService {
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
-            throw CocoaError(.userActivityConnectionFailed)
+            throw URLError(.badServerResponse)
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw CocoaError(.userActivityConnectionFailed)
+            throw URLError(.badServerResponse)
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = json["data"] as? [[String: Any]] else {
