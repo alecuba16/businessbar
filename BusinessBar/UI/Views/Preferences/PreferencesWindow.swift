@@ -63,14 +63,12 @@ struct PreferencesView: View {
     @ObservedObject var googleAuth: GoogleAuth
     /// Tab selected at window creation; cross-window callers (the chat
     /// panel's setup hint) pass the section that explains what to do.
-    var initialTab: PreferenceTab? = nil
     @State private var selectedTab: PreferenceTab
 
     init(badgeManager: BadgeManager, meetingManager: MeetingManager, googleAuth: GoogleAuth, initialTab: PreferenceTab? = nil) {
         self.badgeManager = badgeManager
         self.meetingManager = meetingManager
         self.googleAuth = googleAuth
-        self.initialTab = initialTab
         _selectedTab = State(initialValue: initialTab ?? .general)
     }
 

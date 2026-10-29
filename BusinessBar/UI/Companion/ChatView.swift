@@ -105,6 +105,11 @@ struct ChatView: View {
             // assignment is a no-op there.
             inputExpanded = CompanionConfigService.chatInputExpanded()
         }
+        .onReceive(NotificationCenter.default.publisher(for: ChatProviderStore.didChangeNotification)) { _ in
+            // Provider edits in Preferences post this, not settingsSaved;
+            // the revision re-reads the empty-state gate and model picker.
+            settingsRevision += 1
+        }
         .onAppear { composerFocusRequest += 1 }
         .dropDestination(for: URL.self) { urls, _ in
             guard selectedModelAcceptsImages else { return false }
@@ -438,7 +443,7 @@ struct ChatView: View {
                 .foregroundStyle(.secondary)
             Text("Ask anything")
                 .font(.headline)
-            if CompanionConfigService.chatProviders().isEmpty {
+            if hasConfiguredProvider == false {
                 // Zero providers means every send would fail; the hint
                 // lands the user one click away from a working setup.
                 Text("No model configured yet.")
@@ -829,6 +834,14 @@ struct ChatView: View {
             : commandTools.sessionPermissionMode == .deny
                 ? "run_command is refused; read_file and list_files keep working."
                 : "Ask before running anything beyond read-only commands"
+    }
+
+    /// Whether any model is configured at all; the revision counter ties
+    /// the empty-state gate to provider store writes, not just settings
+    /// saves.
+    private var hasConfiguredProvider: Bool {
+        _ = settingsRevision
+        return !CompanionConfigService.chatProviders().isEmpty
     }
 
     /// Gate refreshed on settings saves while the panel is open, so the
