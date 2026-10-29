@@ -432,9 +432,9 @@ struct ChatView: View {
 
     // MARK: - Chat header
 
-    /// Header row: new chat and history buttons plus the YOLO toggle
-    /// when command tools are active. Session controls live here, next to
-    /// the context they act on, not in the input bar.
+    /// Header row: new chat and history buttons plus the command
+    /// permission picker when command tools are active. Session controls
+    /// live here, next to the context they act on, not in the input bar.
     private var chatHeader: some View {
         HStack(spacing: 8) {
             Button {
@@ -464,20 +464,23 @@ struct ChatView: View {
 
             Spacer(minLength: 0)
 
-            // The toggle is read from the gate directly: hiding it on a
-            // stale gate would leave YOLO on with no way to turn it off.
+            // The picker is read from the gate directly: hiding it on a
+            // stale gate would leave Allow on with no way to see it.
             if commandToolsEnabledNow {
-                Toggle(isOn: $commandTools.yoloEnabled) {
-                    Text("Auto-run (YOLO)")
-                        .font(.caption)
+                Picker("Commands", selection: $commandTools.sessionPermissionMode) {
+                    Text("Ask").tag(CommandPermissionMode.ask)
+                    Text("Allow").tag(CommandPermissionMode.allow)
+                    Text("Deny").tag(CommandPermissionMode.deny)
                 }
-                .toggleStyle(.switch)
+                .pickerStyle(.segmented)
                 .controlSize(.mini)
-                .tint(commandTools.yoloEnabled ? .red : .accentColor)
+                .frame(maxWidth: 130)
                 .help(
-                    commandTools.yoloEnabled
+                    commandTools.sessionPermissionMode == .allow
                         ? "Commands run without asking. rm and credentials files still prompt."
-                        : "Ask before running anything beyond read-only commands"
+                        : commandTools.sessionPermissionMode == .deny
+                            ? "run_command is refused; read_file and list_files keep working."
+                            : "Ask before running anything beyond read-only commands"
                 )
             }
         }
@@ -763,8 +766,8 @@ struct ChatView: View {
     }
 
     /// Gate refreshed on settings saves while the panel is open, so the
-    /// YOLO toggle never lingers after the Command Runner is turned off
-    /// in Preferences. The revision counter is read here so SwiftUI
+    /// permission picker never lingers after the Command Runner is turned
+    /// off in Preferences. The revision counter is read here so SwiftUI
     /// treats the bus ping as a dependency of the rendered header.
     private var commandToolsEnabledNow: Bool {
         _ = settingsRevision

@@ -53,6 +53,30 @@ public enum CommandPermission: Sendable, Equatable {
     }
 }
 
+// MARK: - CommandPermissionMode
+
+/// Activation level for run_command, decided by the user up front and
+/// per invocation in the chat: allow runs commands without asking, ask
+/// confirms anything beyond read-only, deny refuses every call.
+public enum CommandPermissionMode: String, Codable, Sendable, CaseIterable {
+    /// Commands run without asking; only the deny-wins set (rm,
+    /// credentials files) still confirms.
+    case allow
+    /// Read-only commands run; everything else asks per invocation.
+    case ask
+    /// run_command is refused outright. read_file and list_files keep
+    /// working: they never execute anything.
+    case deny
+
+    public var label: String {
+        switch self {
+        case .allow: return "Allow"
+        case .ask: return "Ask"
+        case .deny: return "Deny"
+        }
+    }
+}
+
 // MARK: - CommandPermissionParser
 
 /// Classifies a model-supplied command string into a permission tier.
@@ -322,19 +346,41 @@ public struct CommandPermissionParser: Sendable {
         _ command: String,
         sessionPrefixes: [String] = []
     ) -> CommandPermission {
+        resolve(command, sessionPrefixes: sessionPrefixes, mode: .ask).permission
+    }
+
+    /// Mode-aware classification: one entry point for the UI layers so the
+    /// allow/ask/deny behavior stays identical everywhere it is consulted.
+    /// The result carries `refused` for deny mode so callers can return a
+    /// plain message to the model without touching the approval UI.
+    public static func resolve(
+        _ command: String,
+        sessionPrefixes: [String],
+        mode: CommandPermissionMode
+    ) -> (permission: CommandPermission, refused: Bool) {
+        if mode == .deny {
+            return (.needsConfirmation(reason: .unknownCommand), true)
+        }
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmed.isEmpty else {
-            return .needsConfirmation(reason: .unparseable)
+            return (.needsConfirmation(reason: .unparseable), false)
         }
         guard trimmed.count <= maxAutoApproveLength else {
-            return .needsConfirmation(reason: .tooLong)
+            return (.needsConfirmation(reason: .tooLong), false)
         }
 
         // Substitutions anywhere: confirm, before any tokenization.
         if trimmed.contains("$(") || trimmed.contains("`")
             || trimmed.contains("<(") || trimmed.contains(">(") {
-            return .needsConfirmation(reason: .substitution)
+            return (.needsConfirmation(reason: .substitution), false)
+        }
+
+        // Allow mode skips the card for anything but the deny-wins set;
+        // rm and credentials files always confirm, even when the read-only
+        // allowlist would otherwise auto-approve them.
+        if mode == .allow, isDangerousCommand(trimmed) {
+            return (.needsConfirmation(reason: riskReason(trimmed)), false)
         }
 
         // Tier 0: shell-free single command on the allowlist.
@@ -344,10 +390,10 @@ public struct CommandPermissionParser: Sendable {
            let binaryName = tokens.first,
            let path = resolveBinary(binaryName) {
             if hasWriteFlag(tokens) {
-                return .needsConfirmation(reason: .modifiesFiles)
+                return (.needsConfirmation(reason: .modifiesFiles), false)
             }
             if isAllowlisted(binaryName: binaryName, resolvedPath: path, argv: tokens) {
-                return .autoApproved(argv: tokens)
+                return (.autoApproved(argv: tokens), false)
             }
         }
 
@@ -355,11 +401,15 @@ public struct CommandPermissionParser: Sendable {
         if !sessionPrefixes.isEmpty,
            let segments = splitCompounds(trimmed),
            segments.allSatisfy({ segmentMatchesPrefix($0, prefixes: sessionPrefixes) }) {
-            return .sessionApproved(command: trimmed)
+            return (.sessionApproved(command: trimmed), false)
+        }
+
+        if mode == .allow {
+            return (.sessionApproved(command: trimmed), false)
         }
 
         // Tier 2: confirm, with the best-matching risk label.
-        return .needsConfirmation(reason: riskReason(trimmed))
+        return (.needsConfirmation(reason: riskReason(trimmed)), false)
     }
 
     /// After wrappers are stripped: is this an allowlisted read-only
@@ -456,8 +506,8 @@ public struct CommandPermissionParser: Sendable {
         return false
     }
 
-    /// Deny-wins rule for YOLO mode: these still prompt even when the user
-    /// has bypass switched on. `rm` always modifies files, and credentials
+    /// Deny-wins rule for allow mode: these still prompt even when the
+    /// session is set to Allow. `rm` always modifies files, and credentials
     /// files must never be exfiltrated through the chat channel. Checking
     /// the raw string catches them even inside shell syntax that would
     /// otherwise classify as a single command.

@@ -37,13 +37,17 @@ public struct PromptTemplate: Identifiable, Codable, Equatable, Hashable, Sendab
     /// Optional reasoning effort sent as `reasoning_effort` for this
     /// template's request. Nil means the global default applies.
     public var reasoningEffort: String?
+    /// Companion model for this template: a ChatModel id from the providers
+    /// list. Nil means the default chat model applies.
+    public var modelID: UUID?
 
     public init(
         id: UUID = UUID(),
         name: String,
         prompt: String,
         action: TemplateAction = .overlay,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        modelID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -51,10 +55,11 @@ public struct PromptTemplate: Identifiable, Codable, Equatable, Hashable, Sendab
         self.action = action
         self.autoReplace = action == .replace
         self.reasoningEffort = reasoningEffort
+        self.modelID = modelID
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, prompt, action, autoReplace, reasoningEffort
+        case id, name, prompt, action, autoReplace, reasoningEffort, modelID
     }
 
     public init(from decoder: Decoder) throws {
@@ -68,6 +73,7 @@ public struct PromptTemplate: Identifiable, Codable, Equatable, Hashable, Sendab
         action = storedAction ?? (storedFlag ? .replace : .overlay)
         autoReplace = action == .replace
         reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        modelID = try container.decodeIfPresent(UUID.self, forKey: .modelID)
     }
 
     /// Encoded without nil so old readers skip the field cleanly.
@@ -79,6 +85,7 @@ public struct PromptTemplate: Identifiable, Codable, Equatable, Hashable, Sendab
         try container.encode(action, forKey: .action)
         try container.encode(autoReplace, forKey: .autoReplace)
         try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
+        try container.encodeIfPresent(modelID, forKey: .modelID)
     }
 
     /// The token replaced by the selected text.

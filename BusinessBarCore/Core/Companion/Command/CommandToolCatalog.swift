@@ -22,7 +22,7 @@ public enum CommandToolCatalog {
             "type": "function",
             "function": [
                 "name": "run_command",
-                "description": "Run a shell command in the session's workspace folder. Read-only commands like ls, cat, grep run without asking. Commands that modify files or have unknown effects require the user's confirmation first. Use background: true for long-running commands like dev servers; you will get a handle and can read its output later.",
+                "description": "Run a shell command in the session's workspace folder. Read-only commands like ls, cat, grep run without asking. Commands that modify files or have unknown effects require the user's confirmation first. The user may also have the runner set to Allow (no confirmation) or Deny (every call is refused); when a call is denied, ask the user to change the mode in the chat header instead of retrying. Use background: true for long-running commands like dev servers; you will get a handle and can read its output later.",
                 "parameters": [
                     "type": "object",
                     "properties": [

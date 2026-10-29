@@ -46,6 +46,22 @@ final class PromptTemplateTests: XCTestCase {
         let decoded = try JSONDecoder().decode([PromptTemplate].self, from: data)
         XCTAssertEqual(original, decoded)
     }
+
+    func testModelIDRoundTrip() throws {
+        let id = UUID()
+        let template = PromptTemplate(name: "T", prompt: "p", modelID: id)
+        let data = try JSONEncoder().encode([template])
+        let decoded = try JSONDecoder().decode([PromptTemplate].self, from: data)
+        XCTAssertEqual(decoded[0].modelID, id)
+    }
+
+    func testLegacyJSONWithoutModelIDDecodesNil() throws {
+        let json = """
+        [{"id":"B69E128A-1E52-4D34-8E29-CD712AA3D782","name":"T","prompt":"p","action":"overlay","autoReplace":false}]
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode([PromptTemplate].self, from: json)
+        XCTAssertNil(decoded[0].modelID)
+    }
 }
 
 final class TemplateStoreTests: XCTestCase {
@@ -338,5 +354,96 @@ final class TemplateAutoReplaceTests: XCTestCase {
         XCTAssertFalse(RewriteOutputCapture.containsOutputTags("<output>unclosed"))
         XCTAssertFalse(RewriteOutputCapture.containsOutputTags("plain reply"))
         XCTAssertFalse(RewriteOutputCapture.containsOutputTags("</output> before <output>"))
+    }
+}
+
+final class CommandPermissionModeTests: XCTestCase {
+    func testAskModeConfirmsNonReadOnlyCommand() {
+        let resolved = CommandPermissionParser.resolve(
+            "npm install left-pad",
+            sessionPrefixes: [],
+            mode: .ask
+        )
+        XCTAssertFalse(resolved.refused)
+        guard case .needsConfirmation = resolved.permission else {
+            XCTFail("expected needsConfirmation under ask, got \(resolved.permission)")
+            return
+        }
+    }
+
+    func testAskModeAutoApprovesReadOnlyCommand() {
+        let resolved = CommandPermissionParser.resolve(
+            "ls -la",
+            sessionPrefixes: [],
+            mode: .ask
+        )
+        XCTAssertFalse(resolved.refused)
+        guard case .autoApproved = resolved.permission else {
+            XCTFail("expected autoApproved under ask, got \(resolved.permission)")
+            return
+        }
+    }
+
+    func testAllowModeSkipsConfirmationForNonReadOnlyCommand() {
+        let resolved = CommandPermissionParser.resolve(
+            "npm install left-pad",
+            sessionPrefixes: [],
+            mode: .allow
+        )
+        XCTAssertFalse(resolved.refused)
+        guard case .sessionApproved = resolved.permission else {
+            XCTFail("expected sessionApproved under allow, got \(resolved.permission)")
+            return
+        }
+    }
+
+    func testAllowModeStillConfirmsDangerousCommand() {
+        let resolved = CommandPermissionParser.resolve(
+            "rm -rf build",
+            sessionPrefixes: [],
+            mode: .allow
+        )
+        XCTAssertFalse(resolved.refused)
+        guard case .needsConfirmation = resolved.permission else {
+            XCTFail("expected needsConfirmation for rm under allow, got \(resolved.permission)")
+            return
+        }
+    }
+
+    func testAllowModeStillConfirmsCredentialsRead() {
+        let resolved = CommandPermissionParser.resolve(
+            "cat .env",
+            sessionPrefixes: [],
+            mode: .allow
+        )
+        XCTAssertFalse(resolved.refused)
+        guard case .needsConfirmation = resolved.permission else {
+            XCTFail("expected needsConfirmation for .env under allow, got \(resolved.permission)")
+            return
+        }
+    }
+
+    func testDenyModeRefusesEveryCommand() {
+        for command in ["ls -la", "npm install left-pad", "rm -rf build"] {
+            let resolved = CommandPermissionParser.resolve(
+                command,
+                sessionPrefixes: [],
+                mode: .deny
+            )
+            XCTAssertTrue(resolved.refused, "expected refusal under deny for \(command)")
+        }
+    }
+
+    func testSessionPrefixStillApprovesUnderAsk() {
+        let resolved = CommandPermissionParser.resolve(
+            "swift build && swift test",
+            sessionPrefixes: ["swift build *", "swift test"],
+            mode: .ask
+        )
+        XCTAssertFalse(resolved.refused)
+        guard case .sessionApproved = resolved.permission else {
+            XCTFail("expected sessionApproved from prefixes, got \(resolved.permission)")
+            return
+        }
     }
 }

@@ -232,6 +232,11 @@ struct CompanionTab: View {
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                                     .lineLimit(1)
+                                if let modelName = pinnedModelName(template.modelID) {
+                                    Text(modelName)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
                             }
                             Spacer()
                             KeyboardShortcuts.Recorder(for: .rewriteTemplate(template.id))
@@ -393,6 +398,15 @@ struct CompanionTab: View {
         }) {
             LocalModelsSheet()
         }
+    }
+
+    /// Display name for a template's pinned model, nil when the template
+    /// follows the default chat model or the pinned id no longer resolves.
+    private func pinnedModelName(_ modelID: UUID?) -> String? {
+        guard let modelID,
+              let provider = providers.first(where: { $0.model(id: modelID) != nil }),
+              let model = provider.model(id: modelID) else { return nil }
+        return "Model: \(model.name)" + (provider.isLocalMLX == true ? " (local)" : "")
     }
 
     private var acpFields: some View {
@@ -630,6 +644,20 @@ struct TemplateEditorSheet: View {
             TextField("Prompt, use [placeholder] for the selection", text: $template.prompt, axis: .vertical)
                 .lineLimit(4...10)
 
+            Picker("Model", selection: Binding(
+                get: { template.modelID },
+                set: { template.modelID = $0 }
+            )) {
+                Text("Default chat model").tag(Optional<UUID>.none)
+                ForEach(CompanionConfigService.chatProviders()) { provider in
+                    Section(provider.name) {
+                        ForEach(provider.models) { model in
+                            Text(model.name).tag(Optional(model.id))
+                        }
+                    }
+                }
+            }
+
             Picker("Action", selection: Binding(
                 get: { template.action },
                 set: { template.action = $0 }
@@ -666,6 +694,10 @@ struct TemplateEditorSheet: View {
                     }
             }
 
+            Text("The model picker pins this template to one provider model; the default chat model applies when none is picked. Only OpenAI-compatible providers list models here, the ACP backend keeps using its own agent.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -680,7 +712,7 @@ struct TemplateEditorSheet: View {
                 .disabled(template.name.isEmpty || template.prompt.isEmpty)
             }
         }
-        .frame(width: 420, height: 320)
+        .frame(width: 420, height: 400)
         .padding()
     }
 }

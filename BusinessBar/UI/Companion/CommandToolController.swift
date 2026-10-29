@@ -47,7 +47,10 @@ final class CommandToolController: ObservableObject {
     @Published var approvalRequest: CommandApprovalRequest?
     @Published var backgroundProcesses: [BackgroundProcessSnapshot] = []
     @Published var workspaceRoot: String?
-    @Published var yoloEnabled = false
+    /// run_command activation for this session, seeded from the Preferences
+    /// default and reset when the session ends. Allow skips the card for
+    /// anything but the deny-wins set, deny refuses every call.
+    @Published var sessionPermissionMode: CommandPermissionMode
 
     /// Workspace commands actually run in: the picked folder, the default
     /// from Preferences, or the user home, in that order, so command tools
@@ -65,6 +68,7 @@ final class CommandToolController: ObservableObject {
     private var registry: BackgroundCommandRegistry!
 
     init() {
+        sessionPermissionMode = CompanionConfigService.commandPermissionMode()
         registry = BackgroundCommandRegistry(
             onExit: { [weak self] result in
                 Task { @MainActor [weak self] in
@@ -88,16 +92,18 @@ final class CommandToolController: ObservableObject {
         // leak into this one.
         denyPendingApproval()
         sessionID = id
+        // Loading an old conversation is a session switch too: the mode
+        // from the chat the user just left must not carry over.
+        sessionPermissionMode = CompanionConfigService.commandPermissionMode()
     }
 
     func endSession() {
         denyPendingApproval()
         sessionID = nil
         sessionPrefixes = []
-        yoloEnabled = false
-        // The workspace folder is session-scoped by design: each new
-        // conversation picks its own, starting from the Preferences
-        // default.
+        // The activation mode is session-scoped like the workspace folder:
+        // each new conversation starts from the Preferences default.
+        sessionPermissionMode = CompanionConfigService.commandPermissionMode()
         workspaceRoot = nil
         Task { await refreshBackgroundProcesses() }
     }
@@ -233,17 +239,20 @@ final class CommandToolController: ObservableObject {
         }
         let root = effectiveWorkspaceRoot
 
-        var permission = CommandPermissionParser.classify(command, sessionPrefixes: sessionPrefixes)
-        if case .needsConfirmation = permission, yoloEnabled,
-           !CommandPermissionParser.isDangerousCommand(command) {
-            // YOLO skips the card for anything but deny-wins commands.
-            permission = .sessionApproved(command: command)
+        let resolved = CommandPermissionParser.resolve(
+            command,
+            sessionPrefixes: sessionPrefixes,
+            mode: sessionPermissionMode
+        )
+        if resolved.refused {
+            return "denied: command runner is set to Deny for this session. Ask the user to switch it in the chat header."
         }
+        var permission = resolved.permission
 
         let argv: [String]
         switch permission {
-        case .autoApproved(let resolved):
-            argv = resolved
+        case .autoApproved(let resolvedArgv):
+            argv = resolvedArgv
         case .sessionApproved:
             argv = ShellExecutor.argv(for: permission, command: command)
         case .needsConfirmation(let reason):

@@ -452,8 +452,24 @@ enum CompanionConfigService {
     /// means no local server is involved and the request can go straight
     /// out.
     static func ensureLocalServerIfNeeded() async throws {
-        guard backend() == .openai,
-              let (provider, model) = selectedModel(),
+        try await ensureLocalServer(forModelID: nil)
+    }
+
+    /// Same warm-up for a specific model id: rewrite templates that pin a
+    /// local MLX companion model need the server up before their stream,
+    /// even when the chat panel's selected model is remote.
+    static func ensureLocalServer(forModelID modelID: UUID?) async throws {
+        guard backend() == .openai else { return }
+        var pair: (provider: ChatProvider, model: ChatModel)?
+        if let modelID {
+            for provider in chatProviders() {
+                if let model = provider.model(id: modelID) {
+                    pair = (provider, model)
+                    break
+                }
+            }
+        }
+        guard let (provider, model) = pair ?? selectedModel(),
               provider.isLocalMLX == true else { return }
         try await MLXServerManager.shared.ensureRunning(modelID: model.model)
     }
@@ -501,9 +517,9 @@ enum CompanionConfigService {
     }
 
     /// Effort values offered in the picker. The set is the union of what
-    /// OpenAI models accept (low/medium/high) and gateway variants seen in
-    /// the wild (none, xhigh).
-    static let effortLevels = ["none", "low", "medium", "high", "xhigh"]
+    /// OpenAI models accept (low/medium/high/max) and gateway variants seen
+    /// in the wild (none, xhigh).
+    static let effortLevels = ["none", "low", "medium", "high", "xhigh", "max"]
 
     // MARK: - History retention
 
@@ -657,6 +673,51 @@ enum CompanionConfigService {
         )
     }
 
+    /// Client for one specific model, used by rewrite templates that pin a
+    /// companion model. The model id comes from the template's `modelID`;
+    /// nil or a stale id falls back to the selected chat model. The rewrite
+    /// path never advertises tools, mirroring the chat client's schema merge
+    /// rules minus the command handler.
+    static func makeClient(forModelID modelID: UUID?) -> LLMClient? {
+        guard backend() == .openai else { return makeClient() }
+        let providers = chatProviders()
+        var pair: (provider: ChatProvider, model: ChatModel)?
+        if let modelID {
+            for provider in providers {
+                if let model = provider.model(id: modelID) {
+                    pair = (provider, model)
+                    break
+                }
+            }
+        }
+        guard let (provider, model) = pair ?? selectedModel() else { return nil }
+        let key = providerAPIKey(id: provider.id)
+        guard !model.model.isEmpty, provider.isLocalMLX == true || !key.isEmpty else { return nil }
+        var normalized = provider.baseURL
+        while normalized.count > 1 && normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        guard let url = URL(string: normalized) else { return nil }
+        return OpenAICompatClient(
+            configuration: CompanionConfiguration(
+                baseURL: url,
+                model: model.model,
+                apiKey: key,
+                systemPrompt: model.systemPrompt ?? "",
+                reasoning: model.reasoningEnabled == true,
+                reasoningEffort: model.reasoningEnabled == true
+                    ? (model.reasoningEffort ?? "medium")
+                    : nil,
+                extraHeaders: Dictionary(
+                    uniqueKeysWithValues: providerHeaders(id: provider.id).map { ($0.name, $0.value) }
+                )
+            ),
+            tools: [],
+            toolHandler: nil,
+            maxToolRounds: 3
+        )
+    }
+
     /// Schemas offered on the chat panel: search plus command tools when
     /// the user enabled them. The rewrite flow never gets command tools:
     /// it passes no per-call handler, so an advertised run_command would
@@ -679,6 +740,19 @@ enum CompanionConfigService {
 
     static func setCommandToolsEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: "companion.commandToolsEnabled")
+        SettingsSavedBus.announce()
+    }
+
+    /// Default run_command activation for new chat sessions. The header
+    /// picker in the chat can override it per session.
+    static func commandPermissionMode() -> CommandPermissionMode {
+        CommandPermissionMode(
+            rawValue: UserDefaults.standard.string(forKey: "companion.commandPermissionMode") ?? ""
+        ) ?? .ask
+    }
+
+    static func setCommandPermissionMode(_ mode: CommandPermissionMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: "companion.commandPermissionMode")
         SettingsSavedBus.announce()
     }
 

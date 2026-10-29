@@ -19,14 +19,15 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private let chatStore = ChatStore()
     /// Command tool state: approvals, background processes, workspace,
-    /// YOLO. One instance lives with the chat store.
+    /// permission mode. One instance lives with the chat store.
     let commandTools = CommandToolController()
     private var restoredOnLaunch = false
 
     override init() {
         super.init()
-        // Session-scoped command state (YOLO, approved prefixes, workspace
-        // folder) follows the conversation: switching chats drops them.
+        // Session-scoped command state (permission mode, approved prefixes,
+        // workspace folder) follows the conversation: switching chats drops
+        // them.
         chatStore.onSessionChanged = { [weak self] sessionID in
             guard let self else { return }
             if let sessionID {
@@ -206,7 +207,7 @@ final class ChatStore: ObservableObject {
     private let sessionStore: ChatSessionStore
     /// Called after any conversation reset (new session, clear) with the
     /// id the next request will belong to. The command tool uses it to
-    /// drop session-scoped approvals, YOLO, prefixes, and workspace.
+    /// drop session-scoped approvals, permission mode, prefixes, and workspace.
     var onSessionChanged: ((UUID?) -> Void)?
 
     init(sessionStore: ChatSessionStore = .shared) {
