@@ -412,7 +412,7 @@ final class ACPAgentClientTests: XCTestCase {
         let client = makeClient(transport: transport)
 
         var events: [CompanionEvent] = []
-        let stream = client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
+        let stream = await client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
 
         let collector = Task {
             for try await event in stream {
@@ -440,9 +440,12 @@ final class ACPAgentClientTests: XCTestCase {
         transport.deliver(#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":[{"type":"text","text":"lo"}]}}}"#)
         transport.deliver(#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#)
 
-        await collector.value
+        try? await collector.value
 
-        XCTAssertEqual(events.first, .delta("Hel"))
+        guard case .delta("Hel")? = events.first else {
+            XCTFail("Expected first event delta Hel, got \(events)")
+            return
+        }
         XCTAssertEqual(events.count, 3)
         guard case .finished(let fullText) = events.last else {
             XCTFail("Expected finished terminal, got \(events)")
@@ -455,7 +458,7 @@ final class ACPAgentClientTests: XCTestCase {
         let transport = FakeACPTransport()
         let client = makeClient(transport: transport)
 
-        let stream = client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
+        let stream = await client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
         let collector = Task {
             for try await _ in stream {}
         }
@@ -479,14 +482,14 @@ final class ACPAgentClientTests: XCTestCase {
         XCTAssertEqual(responses, [.string("perm-1")])
 
         transport.deliver(#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#)
-        await collector.value
+        try? await collector.value
     }
 
     func testProcessExitMidTurnFails() async {
         let transport = FakeACPTransport()
         let client = makeClient(transport: transport)
 
-        let stream = client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
+        let stream = await client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
         let collector = Task {
             var events: [CompanionEvent] = []
             for try await event in stream {
@@ -501,7 +504,7 @@ final class ACPAgentClientTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
         transport.deliverClose()
 
-        let events = await collector.value
+        let events = try? await collector.value ?? []
         guard case .failed = events.last else {
             XCTFail("Expected failed terminal on process exit, got \(events)")
             return

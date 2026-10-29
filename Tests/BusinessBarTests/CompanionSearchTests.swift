@@ -255,7 +255,8 @@ extension CompanionSearchTests {
     func testScrapedParsesBingRSS() async {
         StubURLProtocol.handler = { request in
             XCTAssertEqual(request.url?.host, "www.bing.com")
-            XCTAssertEqual(request.url?.queryItems?.first { $0.name == "format" }?.value, "rss")
+            let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems }
+            XCTAssertEqual(query?.first { $0.name == "format" }?.value, "rss")
             let xml = """
             <rss version="2.0"><channel><item>
             <title>Swift.org</title>

@@ -133,7 +133,7 @@ final class OpenAICompatClientTests: XCTestCase {
         // Port 1 refuses connections: no server, no network needed.
         var terminal: CompanionEvent?
         do {
-            for try await event in client.stream(messages: [
+            for try await event in await client.stream(messages: [
                 ChatMessage(role: .user, content: "hi")
             ], onToolCall: nil) {
                 switch event {
@@ -210,7 +210,7 @@ extension OpenAICompatClientTests {
 
         var finished = false
         do {
-            let stream = client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
+            let stream = await client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
             for try await event in stream {
                 if case .finished = event { finished = true }
             }
@@ -244,7 +244,7 @@ extension OpenAICompatClientTests {
         )
 
         do {
-            let stream = client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
+            let stream = await client.stream(messages: [ChatMessage(role: .user, content: "hi")], onToolCall: nil)
             for try await _ in stream {}
         } catch {
             XCTFail("stream threw: \(error)")
