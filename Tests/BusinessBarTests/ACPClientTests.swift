@@ -393,6 +393,17 @@ final class ACPAgentClientTests: XCTestCase {
         )
     }
 
+    /// Waits until the fake transport has sent `method`, then returns true.
+    /// The client registers each waiter when it sends, so responses must
+    /// never be delivered before their request hits the wire.
+    private func waitUntilSent(_ method: String, on transport: FakeACPTransport) async -> Bool {
+        for _ in 0..<100 {
+            if transport.sentMethods.contains(method) { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return transport.sentMethods.contains(method)
+    }
+
     func testNameIsCommandBasename() {
         let client = ACPAgentClient(
             configuration: ACPAgentConfiguration(command: "/opt/homebrew/bin/gemini")
@@ -420,20 +431,15 @@ final class ACPAgentClientTests: XCTestCase {
             }
         }
 
-        // Give the client time to run initialize + session/new + session/prompt.
-        try? await Task.sleep(nanoseconds: 200_000_000)
-
+        let initializeSent = await waitUntilSent("initialize", on: transport)
+        XCTAssertTrue(initializeSent, "initialize was never sent")
         transport.deliver(#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"1"}}"#)
+        let sessionNewSent = await waitUntilSent("session/new", on: transport)
+        XCTAssertTrue(sessionNewSent, "session/new was never sent")
         transport.deliver(#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#)
 
         // Wait for session/prompt to be sent before scripting its updates.
-        var promptSent = false
-        for _ in 0..<50 where !promptSent {
-            promptSent = transport.sentMethods.contains("session/prompt")
-            if !promptSent {
-                try? await Task.sleep(nanoseconds: 20_000_000)
-            }
-        }
+        let promptSent = await waitUntilSent("session/prompt", on: transport)
         XCTAssertTrue(promptSent, "session/prompt was never sent")
 
         transport.deliver(#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":[{"type":"text","text":"Hel"}]}}}"#)
@@ -462,13 +468,29 @@ final class ACPAgentClientTests: XCTestCase {
         let collector = Task {
             for try await _ in stream {}
         }
-        try? await Task.sleep(nanoseconds: 100_000_000)
-
+        let initializeSent = await waitUntilSent("initialize", on: transport)
+        XCTAssertTrue(initializeSent, "initialize was never sent")
         transport.deliver(#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"1"}}"#)
+        let sessionNewSent = await waitUntilSent("session/new", on: transport)
+        XCTAssertTrue(sessionNewSent, "session/new was never sent")
         transport.deliver(#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#)
+        let promptSent = await waitUntilSent("session/prompt", on: transport)
+        XCTAssertTrue(promptSent, "session/prompt was never sent")
         transport.deliver(#"{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"opt-reject","kind":"reject_once"}],"toolCall":{"toolCallId":"t1","title":"run","kind":"execute","status":"pending","content":[]}}}"#)
 
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        // The rejection is sent by a fire-and-forget task, so poll for it.
+        var rejectionSent = false
+        for _ in 0..<100 where !rejectionSent {
+            rejectionSent = transport.sentLines.contains { line in
+                guard case .response(.string("perm-1"), let result)? = ACPJSONRPC.decodeLine(line) else { return false }
+                let outcome = result?["outcome"] as? [String: Any]
+                return outcome?["outcome"] as? String == "selected"
+            }
+            if !rejectionSent {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        XCTAssertTrue(rejectionSent, "rejection response was never sent")
 
         let responses = transport.sentLines.compactMap { ACPJSONRPC.decodeLine($0) }.compactMap { message -> ACPRequestID? in
             if case .response(let id, let result) = message {
@@ -497,11 +519,14 @@ final class ACPAgentClientTests: XCTestCase {
             }
             return events
         }
-        try? await Task.sleep(nanoseconds: 100_000_000)
-
+        let initializeSent = await waitUntilSent("initialize", on: transport)
+        XCTAssertTrue(initializeSent, "initialize was never sent")
         transport.deliver(#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"1"}}"#)
+        let sessionNewSent = await waitUntilSent("session/new", on: transport)
+        XCTAssertTrue(sessionNewSent, "session/new was never sent")
         transport.deliver(#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#)
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        let promptSent = await waitUntilSent("session/prompt", on: transport)
+        XCTAssertTrue(promptSent, "session/prompt was never sent")
         transport.deliverClose()
 
         let events = (try? await collector.value) ?? []
