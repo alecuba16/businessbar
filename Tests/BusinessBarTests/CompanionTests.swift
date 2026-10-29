@@ -1114,3 +1114,49 @@ final class RemoteModelInfoChatModelTests: XCTestCase {
         XCTAssertEqual(model.model, "plain-model")
     }
 }
+
+// MARK: - EffortDefaultTests
+
+final class EffortDefaultTests: XCTestCase {
+    func testDefaultEffortPrefersMedium() {
+        XCTAssertEqual(EffortVocabulary.defaultEffort(in: ["low", "medium", "high"]), "medium")
+        XCTAssertEqual(EffortVocabulary.defaultEffort(in: ["minimal", "low", "medium", "high"]), "medium")
+    }
+
+    func testDefaultEffortFallsBackToMiddleValue() {
+        XCTAssertEqual(EffortVocabulary.defaultEffort(in: ["low", "high"]), "high")
+        XCTAssertEqual(EffortVocabulary.defaultEffort(in: ["a"]), "a")
+    }
+
+    func testDefaultEffortNilOnEmpty() {
+        XCTAssertNil(EffortVocabulary.defaultEffort(in: []))
+    }
+}
+
+// MARK: - RemoteModelChatModelEffortTests
+
+final class RemoteModelChatModelEffortTests: XCTestCase {
+    func testChatModelCarriesChosenEffort() {
+        let info = RemoteModelInfo(
+            id: "openai/gpt-5",
+            effortOptions: ["low", "medium", "high"],
+            supportsReasoning: true
+        )
+        let model = info.chatModel(effort: "high")
+        XCTAssertEqual(model.name, "gpt-5")
+        XCTAssertEqual(model.reasoningEnabled, true)
+        XCTAssertEqual(model.reasoningEffort, "high")
+        XCTAssertEqual(model.effortOptions, ["low", "medium", "high"])
+    }
+
+    func testChatModelWithoutChosenEffortStaysNil() {
+        let info = RemoteModelInfo(
+            id: "openai/gpt-5",
+            effortOptions: ["low", "medium", "high"],
+            supportsReasoning: true
+        )
+        let model = info.chatModel()
+        XCTAssertNil(model.reasoningEffort)
+        XCTAssertEqual(model.effortOptions, ["low", "medium", "high"])
+    }
+}

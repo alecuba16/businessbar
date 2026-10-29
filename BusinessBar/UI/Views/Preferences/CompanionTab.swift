@@ -539,12 +539,15 @@ struct ProviderEditorSheet: View {
                     Button("Add All") {
                         let existing = Set(provider.models.map(\.model))
                         for info in fetchedModels where !existing.contains(info.id) {
-                            provider.models.append(info.chatModel())
+                            // No per-row interaction in bulk add: the
+                            // vocabulary's default lands as the effort.
+                            let effort = info.effortOptions.flatMap(EffortVocabulary.defaultEffort(in:))
+                            provider.models.append(info.chatModel(effort: effort))
                             addedModelIDs.insert(info.id)
                         }
                     }
                     .disabled(fetchedModels.allSatisfy { addedModelIDs.contains($0.id) })
-                    .help("Add every fetched model that is not in the list yet")
+                    .help("Add every fetched model that is not in the list yet, using each vocabulary's default effort")
                 }
                 if let fetchError {
                     Text("Fetch failed: \(fetchError)")
@@ -571,6 +574,24 @@ struct ProviderEditorSheet: View {
                                     Image(systemName: "checkmark")
                                         .font(.system(size: 10))
                                         .foregroundColor(.green)
+                                } else if let options = info.effortOptions, !options.isEmpty {
+                                    // Rows that publish a vocabulary ask for
+                                    // the effort right here, so the added
+                                    // model is usable without a later edit.
+                                    Menu {
+                                        ForEach(options, id: \.self) { level in
+                                            Button(level) {
+                                                provider.models.append(info.chatModel(effort: level))
+                                                addedModelIDs.insert(info.id)
+                                            }
+                                        }
+                                    } label: {
+                                        Text("Add")
+                                    }
+                                    .controlSize(.small)
+                                    .menuStyle(.borderlessButton)
+                                    .fixedSize()
+                                    .help("Pick the reasoning effort for this model")
                                 } else {
                                     Button("Add") {
                                         provider.models.append(info.chatModel())

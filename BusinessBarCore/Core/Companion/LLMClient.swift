@@ -216,4 +216,14 @@ public enum EffortVocabulary {
         }
         return values
     }
+
+    /// Default effort for a freshly added model: "medium" when the
+    /// vocabulary carries it, else its middle value, nil when empty.
+    /// Only called with a published vocabulary, so the request is
+    /// guaranteed to carry a value the endpoint accepts.
+    public static func defaultEffort(in levels: [String]) -> String? {
+        guard !levels.isEmpty else { return nil }
+        if levels.contains("medium") { return "medium" }
+        return levels[levels.count / 2]
+    }
 }
