@@ -5,7 +5,7 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.1] - 2026-10-29
 ### Fixed
 - Chat input rework: long lines now wrap to the box width instead of clipping sideways, a scrollbar stays visible whenever the text overflows the box (before: nothing indicated there was more text), and the box scrolls to follow the caret while typing new lines. The composer is a native NSTextView now instead of a SwiftUI TextField, so Return still sends, Shift+Return and Option+Return still insert newlines, image paste/drop and focus-on-open keep working, and the tall/compact toggle and window-following height cap are unchanged
 - Hard line breaks (Shift+Return) show a ¶ marker at the end of each typed line, and wrapped lines show a ↩ arrow at the left of each wrapped row, the CotEditor convention. A wrap never grows a paragraph mark, a typed break never grows an arrow, so the two always read differently. Marks sit next to the text (the arrow in a small left gutter, the pilcrow after the line's last glyph) instead of pinned to a fixed edge, and a row that both wraps onward and ends in Return carries both marks, one at each side
