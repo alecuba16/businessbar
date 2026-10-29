@@ -918,6 +918,7 @@ struct TemplateEditorSheet: View {
                 Text("Show overlay").tag(TemplateAction.overlay)
                 Text("Replace selection").tag(TemplateAction.replace)
                 Text("Insert after selection").tag(TemplateAction.append)
+                Text("Insert after selection (new line)").tag(TemplateAction.appendLineBreak)
             }
             .onChange(of: template.action) { _, _ in
                 template.autoReplace = template.action == .replace

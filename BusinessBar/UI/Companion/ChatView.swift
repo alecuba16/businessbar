@@ -105,6 +105,11 @@ struct ChatView: View {
             // assignment is a no-op there.
             inputExpanded = CompanionConfigService.chatInputExpanded()
         }
+        .onReceive(NotificationCenter.default.publisher(for: ChatProviderStore.didChangeNotification)) { _ in
+            // Provider edits in Preferences post this, not settingsSaved;
+            // the revision re-reads the empty-state gate and model picker.
+            settingsRevision += 1
+        }
         .onAppear { composerFocusRequest += 1 }
         .dropDestination(for: URL.self) { urls, _ in
             guard selectedModelAcceptsImages else { return false }
@@ -258,6 +263,14 @@ struct ChatView: View {
                 .help("Close history")
             }
             .padding(10)
+            .background(
+                // Escape closes the drawer; the hidden button pairs with
+                // the visible xmark so the shortcut has a labeled control.
+                Button("Close history") { showHistory = false }
+                    .keyboardShortcut(.escape)
+                    .opacity(0)
+                    .accessibilityHidden(true)
+            )
 
             if confirmingDeleteAll {
                 HStack {
@@ -430,10 +443,22 @@ struct ChatView: View {
                 .foregroundStyle(.secondary)
             Text("Ask anything")
                 .font(.headline)
-            Text("The companion answers using your configured model.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            if hasConfiguredProvider == false {
+                // Zero providers means every send would fail; the hint
+                // lands the user one click away from a working setup.
+                Text("No model configured yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Open Companion settings") {
+                    openCompanionSettings()
+                }
+                .controlSize(.small)
+            } else {
+                Text("The companion answers using your configured model.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.top, 60)
@@ -468,29 +493,28 @@ struct ChatView: View {
             .help("Close this chat and start a new one. The closed chat stays in history.")
             .disabled(!store.hasClosableSession)
 
-            Divider()
-                .frame(height: 14)
-
             Spacer(minLength: 0)
 
             // The picker is read from the gate directly: hiding it on a
             // stale gate would leave Allow on with no way to see it.
             if commandToolsEnabledNow {
+                // A small label in front of the segments names what they
+                // govern; without it the row reads as three bare words.
+                // Segments carry the hover info, so the label stays plain.
+                Text("Commands")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help(commandPermissionHelp)
                 Picker("Commands", selection: $commandTools.sessionPermissionMode) {
                     Text("Ask").tag(CommandPermissionMode.ask)
                     Text("Allow").tag(CommandPermissionMode.allow)
                     Text("Deny").tag(CommandPermissionMode.deny)
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
                 .controlSize(.mini)
-                .frame(maxWidth: 130)
-                .help(
-                    commandTools.sessionPermissionMode == .allow
-                        ? "Commands run without asking. rm and credentials files still prompt."
-                        : commandTools.sessionPermissionMode == .deny
-                            ? "run_command is refused; read_file and list_files keep working."
-                            : "Ask before running anything beyond read-only commands"
-                )
+                .frame(maxWidth: 110)
+                .help(commandPermissionHelp)
             }
         }
         .padding(.horizontal, 10)
@@ -569,6 +593,10 @@ struct ChatView: View {
                     commandTools.decide(.denied)
                 }
                 .controlSize(.small)
+                // Escape denies: the safe default when the decision is
+                // abandoned mid-keyboard-flow. Sits on the Deny button so
+                // VoiceOver users hear the same action.
+                .keyboardShortcut(.escape)
             }
         }
         .padding(10)
@@ -781,6 +809,13 @@ struct ChatView: View {
         }
     }
 
+    /// Opens Preferences on the Companion tab, used by the empty-state
+    /// setup hint. The tab only applies on first window creation; a window
+    /// left on another section keeps that section.
+    private func openCompanionSettings() {
+        (NSApp.delegate as? AppDelegate)?.showPreferences(initialTab: .companion)
+    }
+
     /// True when the chat's outgoing requests actually offer the command
     /// tools: user enabled them, no ACP agent is selected, and the
     /// selected model is not the local MLX server (mlx-lsp serves
@@ -788,6 +823,25 @@ struct ChatView: View {
     /// command would "succeed" with nonsense output).
     private var sendHandlerIsCommandAware: Bool {
         commandToolsEnabledNow
+    }
+
+    /// Hover text for the command permission row, shared by the label and
+    /// the segments. Names what the current mode actually does, so the
+    /// consequence of the active choice is one hover away.
+    private var commandPermissionHelp: String {
+        commandTools.sessionPermissionMode == .allow
+            ? "Commands run without asking. rm and credentials files still prompt."
+            : commandTools.sessionPermissionMode == .deny
+                ? "run_command is refused; read_file and list_files keep working."
+                : "Ask before running anything beyond read-only commands"
+    }
+
+    /// Whether any model is configured at all; the revision counter ties
+    /// the empty-state gate to provider store writes, not just settings
+    /// saves.
+    private var hasConfiguredProvider: Bool {
+        _ = settingsRevision
+        return !CompanionConfigService.chatProviders().isEmpty
     }
 
     /// Gate refreshed on settings saves while the panel is open, so the

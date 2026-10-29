@@ -12,12 +12,16 @@ public enum TemplateAction: String, Codable, Sendable {
     /// Insert the reply right after the selection, keeping both. Falls back
     /// to the overlay when in-place insertion is not possible.
     case append
+    /// Like `append`, but the reply starts on a new line below the
+    /// selection instead of gluing onto its last line.
+    case appendLineBreak
 
     public var label: String {
         switch self {
         case .overlay: return "Show overlay"
         case .replace: return "Replace selection"
         case .append: return "Insert after selection"
+        case .appendLineBreak: return "Insert after selection (new line)"
         }
     }
 }
