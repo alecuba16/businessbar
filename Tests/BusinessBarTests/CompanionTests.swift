@@ -55,7 +55,9 @@ final class TemplateStoreTests: XCTestCase {
     override func setUp() {
         super.setUp()
         suite = UserDefaults(suiteName: "companion-template-tests-\(UUID().uuidString)")
-        suite.removePersistentDomain(forName: suite.dictionaryRepresentation().keys.first)
+        if let name = suite.dictionaryRepresentation().keys.first {
+            suite.removePersistentDomain(forName: name)
+        }
     }
 
     override func tearDown() {
@@ -107,7 +109,9 @@ final class OpenAICompatClientTests: XCTestCase {
     }
 
     override func tearDown() {
-        suite.removePersistentDomain(forName: suite.suiteName)
+        if let name = suite.dictionaryRepresentation().keys.first {
+            suite.removePersistentDomain(forName: name)
+        }
         suite = nil
         super.tearDown()
     }
@@ -318,7 +322,7 @@ final class TemplateAutoReplaceTests: XCTestCase {
     }
 
     func testAutoReplaceFlagSurvivesRoundTrip() throws {
-        let template = PromptTemplate(name: "T", prompt: "p", autoReplace: true)
+        let template = PromptTemplate(name: "T", prompt: "p", action: .replace)
         let data = try JSONEncoder().encode([template])
         let decoded = try JSONDecoder().decode([PromptTemplate].self, from: data)
         XCTAssertTrue(decoded[0].autoReplace)
