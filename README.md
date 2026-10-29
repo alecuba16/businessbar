@@ -26,6 +26,29 @@ A unified macOS menu bar application combining three essential functionalities:
 - ⏱️ Duration options: 15min, 30min, 1h, 2h, 5h, or indefinite
 - 💡 Optional activity simulation to prevent "Away" status
 
+### LLM Companion
+- ⌨️ Per-template rewrite shortcuts: each prompt template gets its own global shortcut for the selected text, with a toast confirming the trigger and the result
+- ✅ Preferences show a Saved indicator after every change is stored (UserDefaults, Keychain and file-backed settings included), and the Companion tab has the same Accessibility permission check and management as the Badges tab
+- 💬 Floating chat panel that works over fullscreen apps, with markdown rendering (headings, code blocks, tables, links, images), a streaming response with a live status line, and retry on errors. The send button turns into a stop button the moment you submit: it shows Submitting while the local server warms up, and stops generation once the stream runs. The chat input is a native composer: text wraps to the box width, a scrollbar stays visible when the text overflows, and the box follows the caret while you type. An arrow button next to the paperclip toggles a tall input for longer prompts, the panel remembers the choice, and the tall input grows with the window; Shift+Return and Option+Return insert newlines while plain Return sends
+- 🔀 Providers: each provider is an endpoint (base URL, Keychain key, headers) holding multiple models (system prompt, reasoning toggle, effort with custom values) you can switch mid-conversation from the chat picker; existing setup migrates automatically and the old backend section is gone
+- ✍️ Rewrite actions: templates can replace the selection, insert the reply right after it, or show the overlay; Format for Slack template emits Slack mrkdwn
+- 🎚️ Per-request reasoning effort: pick it per rewrite template, per model, or per chat message, custom values included
+- ✏️ Edit last prompt: an Edit button on the latest prompt bubble pulls your previous question back into the editor, tweak it, and resend over the remaining history; Cmd+N starts a fresh session
+- 💭 Collapsible thinking block: reasoning from ACP agents and OpenAI-compatible reasoning models streams live above the answer, folds once the answer starts, and stays with the saved message
+- 🔗 Agent links render as clickable markdown, and chat links open only http, https, mailto and tel schemes
+- 🗂️ Conversation history: sessions are saved on disk and restored on restart, so you can pick up any past chat and continue it. Cleanup by age or all at once from the history drawer, plus auto-clean by age or session count in Preferences. A close-chat button in the header ends the current conversation and starts a new one, the closed chat stays in history; the history toggle sits next to it, left of the working dir
+- 🔌 OpenAI-compatible API or any ACP agent (Gemini, Claude, Codex) over stdio
+- 🧠 Reasoning models: reasoning effort level and custom HTTP headers for gateway deployments
+- 🛠️ Tools section in Preferences: provided tools (web search, command runner, GitHub code search) are never removable, only toggled on or off, each with a Configure sheet for its settings
+- 🌐 Optional web search tool: DuckDuckGo, Bing, or Google News (scraped, no key, with engine fallback) or Brave, Tavily, or a custom endpoint (API key); the custom endpoint takes URL templates with {query} and {count} for GET mode plus any number of headers, or the legacy JSON POST mode
+- 🐙 GitHub code search tool: token-gated (fine-grained PAT, no permissions needed for public code search), capped at 5 results per query, and only advertised to the model when both the toggle and the token are set
+- 🖥️ Command tools: run_command, read_file, and list_files scoped to the working dir shown in the chat header (default set in the Command Runner Configure sheet, click the dir label to switch it per session); read-only commands run without asking, everything else shows a confirmation card, and Auto-run (YOLO) skips the prompts (rm and credentials files still ask)
+- 🖼️ Image inputs: models opt in with the Images tickbox (Text is on by default); once a model accepts images the chat input grows a paperclip, drag-and-drop, and paste. Two Qwen3-VL models in the local MLX catalog take images and fit 16GB RAM
+- ➕ Custom MLX models: paste any MLX-format Hugging Face repo id, Check fetches the tech details (architecture, token context, quantization, sizes, fit) before you add it, then it downloads and serves like any curated model
+- 🌐 Live MLX browsing: Browse more models in the local models sheet lists the current mlx-community chat catalog from Hugging Face with Text / Text + Images filters, download counts and sizes, and a sort by size or downloads; Add registers a repo, its Download button stays the only thing that fetches weights
+- 🔑 API keys stored in the Keychain
+- 🔒 The chat panel and rewrite overlay never replace your text automatically; you choose Replace or Copy
+
 ## Requirements
 
 - macOS 14.0 (Sonoma) or later
@@ -178,7 +201,7 @@ When the values start with `YOUR_`, `GoogleAuthConfig.isConfigured` returns `fal
 BusinessBar requires the following permissions:
 - **Calendar Access** — To read your calendar events
 - **Notifications** — To send meeting reminders
-- **Accessibility** (optional) — To read dock badges and simulate activity
+- **Accessibility** (optional) — To read dock badges and simulate activity; the LLM Companion also uses it to read the selected text for rewrites
 
 ## Usage
 
@@ -187,6 +210,32 @@ BusinessBar requires the following permissions:
 3. Select which calendars to monitor in Preferences
 4. (Optional) Add apps to monitor for notification badges
 5. (Optional) Grant Accessibility permission for badge monitoring
+6. (Optional) Configure the LLM Companion: enable it in Preferences, set the
+   backend (OpenAI-compatible API or an ACP agent command such as
+   `gemini --acp`), record the chat panel shortcut (Cmd+B by default) and
+   assign a shortcut to each rewrite template you want. For the OpenAI
+   backend, add a provider (base URL, API key, headers) and models under it
+   (model string, system prompt, Reasoning toggle with effort), then pick
+   the default chat model. Default templates
+   ask the model to wrap the result in `<output></output>` tags; the overlay
+   shows only the tagged text, with no model commentary. A template can also
+   pick a direct action: Replace swaps the tagged reply into the selection in
+   place, and Insert after selection writes it right after the caret, falling
+   back to the overlay when the app does not support in-place writes. The
+   Format for Slack template asks for Slack mrkdwn and inserts after the
+   selection
+7. (Optional) On-device models: install uv (`brew install uv`), then open
+   Preferences > Companion and press Add Local Models in the providers
+   section. Download one of the curated MLX
+   models (nothing downloads until you press Download), press Use to
+   activate it (this also creates the Local (MLX) chat model), and chat
+   without any API key; the server starts on the first message. Text models serve
+   through mlx-lm and the two Qwen3-VL vision models through mlx-vlm, picked
+   per model automatically. The server stops
+   itself after 5 idle minutes and the next message starts it again. Add more
+   models under the same provider or more providers in Preferences >
+   Companion; existing model profiles migrate to the new providers layout on
+   first launch
 
 ## Architecture
 
@@ -199,6 +248,8 @@ BusinessBar is built with:
 - **IOKit** for power assertions
 - **Accessibility API** for dock badge reading
 - **AppAuth** for Google OAuth 2.0 authentication
+- **ACP** (Agent Client Protocol) over JSON-RPC stdio for the companion's agent backend
+- **URLSession byte streams** for OpenAI-compatible SSE streaming
 - **CredentialLoader** — JSON-based credential system (`.local.json` override → `.json` default → placeholder fallback)
 - **AppLogger** — structured logging via OSLog + rotating file logs (`~/Library/Logs/BusinessBar/`)
 - **Sparkle** for in-app auto-updates

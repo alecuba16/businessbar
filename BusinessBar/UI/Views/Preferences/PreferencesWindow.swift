@@ -67,6 +67,7 @@ struct PreferencesView: View {
         case badges     = "Badges"
         case noSleep    = "NoSleep"
         case appearance = "Appearance"
+        case companion  = "Companion"
 
         var icon: String {
             switch self {
@@ -75,27 +76,31 @@ struct PreferencesView: View {
             case .badges:     return "app.badge"
             case .noSleep:    return "cup.and.heat.waves"
             case .appearance: return "paintbrush"
+            case .companion:  return "bubble.left.and.text.bubble.right"
             }
         }
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(PreferenceTab.allCases, id: \.self, selection: $selectedTab) { tab in
-                Label(tab.rawValue, systemImage: tab.icon)
-                    .tag(tab)
+        SettingsSavedHost {
+            NavigationSplitView {
+                List(PreferenceTab.allCases, id: \.self, selection: $selectedTab) { tab in
+                    Label(tab.rawValue, systemImage: tab.icon)
+                        .tag(tab)
+                }
+                .listStyle(.sidebar)
+                .frame(minWidth: 180)
+            } detail: {
+                switch selectedTab {
+                case .general:     GeneralTab()
+                case .calendars:   CalendarsTab(meetingManager: meetingManager, googleAuth: googleAuth)
+                case .badges:      BadgesTab(badgeManager: badgeManager)
+                case .noSleep:     NoSleepTab()
+                case .appearance:  AppearanceTab()
+                case .companion:   CompanionTab()
+                }
             }
-            .listStyle(.sidebar)
-            .frame(minWidth: 180)
-        } detail: {
-            switch selectedTab {
-            case .general:     GeneralTab()
-            case .calendars:   CalendarsTab(meetingManager: meetingManager, googleAuth: googleAuth)
-            case .badges:      BadgesTab(badgeManager: badgeManager)
-            case .noSleep:     NoSleepTab()
-            case .appearance:  AppearanceTab()
-            }
+            .frame(minWidth: 800, minHeight: 600)
         }
-        .frame(minWidth: 800, minHeight: 600)
     }
 }

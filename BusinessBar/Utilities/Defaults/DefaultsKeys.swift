@@ -29,6 +29,20 @@ import Foundation
         static let featureNoSleep = Constants.Defaults.featureNoSleep
         static let featureNotifications = Constants.Defaults.featureNotifications
         static let featureBadges = Constants.Defaults.featureBadges
+        static let featureCompanion = Constants.Defaults.featureCompanion
+        static let companionBaseURL = Constants.Defaults.companionBaseURL
+        static let companionModel = Constants.Defaults.companionModel
+        static let companionSystemPrompt = Constants.Defaults.companionSystemPrompt
+        static let companionBackend = Constants.Defaults.companionBackend
+        static let companionSearchProvider = Constants.Defaults.companionSearchProvider
+        static let companionCustomSearchEndpoint = Constants.Defaults.companionCustomSearchEndpoint
+        static let companionCustomSearchHeaderName = Constants.Defaults.companionCustomSearchHeaderName
+        static let companionACPCommand = Constants.Defaults.companionACPCommand
+        static let companionACPArguments = Constants.Defaults.companionACPArguments
+        static let companionReasoning = Constants.Defaults.companionReasoning
+        static let companionReasoningEffort = Constants.Defaults.companionReasoningEffort
+        static let companionHistoryMaxAgeDays = Constants.Defaults.companionHistoryMaxAgeDays
+        static let companionHistoryMaxSessions = Constants.Defaults.companionHistoryMaxSessions
         // Logging configuration
         static let loggingEnabled = Constants.Defaults.loggingEnabled
         static let fileLoggingEnabled = Constants.Defaults.fileLoggingEnabled
@@ -63,6 +77,20 @@ extension UserDefaults {
             DefaultsKeys.featureNoSleep: true,
             DefaultsKeys.featureNotifications: true,
             DefaultsKeys.featureBadges: true,
+            DefaultsKeys.featureCompanion: true,
+            DefaultsKeys.companionBaseURL: Constants.DefaultValues.companionBaseURL,
+            DefaultsKeys.companionModel: Constants.DefaultValues.companionModel,
+            DefaultsKeys.companionSystemPrompt: "",
+            DefaultsKeys.companionBackend: Constants.DefaultValues.companionBackend,
+            DefaultsKeys.companionSearchProvider: Constants.DefaultValues.companionSearchProvider,
+            DefaultsKeys.companionCustomSearchEndpoint: "",
+            DefaultsKeys.companionCustomSearchHeaderName: "",
+            DefaultsKeys.companionACPCommand: "",
+            DefaultsKeys.companionACPArguments: [String](),
+            DefaultsKeys.companionReasoning: Constants.DefaultValues.companionReasoning,
+            DefaultsKeys.companionReasoningEffort: Constants.DefaultValues.companionReasoningEffort,
+            DefaultsKeys.companionHistoryMaxAgeDays: Constants.DefaultValues.companionHistoryMaxAgeDays,
+            DefaultsKeys.companionHistoryMaxSessions: Constants.DefaultValues.companionHistoryMaxSessions,
             // Logging configuration — warning level by default for power efficiency
             DefaultsKeys.loggingEnabled: true,
             DefaultsKeys.fileLoggingEnabled: true,

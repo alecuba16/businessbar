@@ -2,6 +2,7 @@ import AppKit
 import BusinessBarCore
 import Combine
 import Carbon
+import KeyboardShortcuts
 import os.log
 
 @MainActor
@@ -53,6 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         registerDefaults()
+        migrateChatShortcutDefault()
+        migrateDefaultTemplatesToOutputTags()
         initializeManagers()
         setupStatusBar()
         checkFirstLaunch()
@@ -61,6 +64,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CrashHandler.shared.showCrashAlertIfNeeded()
 
         AppLogger.info("Application launched successfully", category: "AppDelegate")
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Async tasks may never run before the process exits, so the kill must
+        // be synchronous. Skips the graceful session/cancel round trip.
+        ShellExecutor.killAllAtQuit()
+        MLXServerManager.killAtQuit()
+        MLXModelStore.killAtQuit()
+        CompanionConfigService.shutdownACPSync()
     }
 
     /// Receives URLs routed back to the app via CFBundleURLTypes URL schemes.
@@ -81,6 +93,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func registerDefaults() {
         UserDefaults.standard.registerDefaults()
+    }
+
+    /// Moves the chat panel shortcut to the new Cmd+B default once, but
+    /// only for users still on the old default (Cmd+Shift+L). Custom
+    /// shortcuts are left untouched.
+    private func migrateChatShortcutDefault() {
+        let key = "KeyboardShortcuts_" + KeyboardShortcuts.Name.toggleCompanionChat.rawValue
+        guard let raw = UserDefaults.standard.string(forKey: key),
+              let data = raw.data(using: .utf8),
+              let shortcut = try? JSONDecoder().decode(KeyboardShortcuts.Shortcut.self, from: data),
+              shortcut == KeyboardShortcuts.Shortcut(.l, modifiers: [.command, .shift]),
+              UserDefaults.standard.object(forKey: "companionChatShortcutMigratedToCmdB") == nil
+        else { return }
+        KeyboardShortcuts.setShortcut(
+            KeyboardShortcuts.Shortcut(.b, modifiers: [.command]),
+            for: .toggleCompanionChat
+        )
+        UserDefaults.standard.set(true, forKey: "companionChatShortcutMigratedToCmdB")
+    }
+
+    /// Replaces the shipped default templates with the versions that pin
+    /// the <output> tag format, once. Stored templates are left alone
+    /// unless they are byte-identical to some old default prompt, so user
+    /// edits survive the migration.
+    private func migrateDefaultTemplatesToOutputTags() {
+        guard UserDefaults.standard.object(forKey: "companionTemplatesMigratedToOutputTags") == nil
+        else { return }
+        UserDefaults.standard.set(true, forKey: "companionTemplatesMigratedToOutputTags")
+
+        let store = TemplateStore()
+        let stored = store.load()
+        let oldPrompts = Set([
+            "Improve the writing of the following text. Keep its language, meaning and approximate length. Reply with the improved text only, no commentary.\n\n[placeholder]",
+            "Correct grammar and spelling mistakes in the following text. Keep its language and meaning. Reply with the corrected text only, no commentary.\n\n[placeholder]",
+            "Rewrite the following text to be as concise as possible without losing information. Keep its language. Reply with the rewritten text only, no commentary.\n\n[placeholder]",
+            "Translate the following text to English. Reply with the translation only, no commentary.\n\n[placeholder]"
+        ])
+
+        var updated = stored
+        for (index, template) in stored.enumerated() where oldPrompts.contains(template.prompt) {
+            if let fresh = PromptTemplate.defaults.first(where: { $0.name == template.name }) {
+                updated[index] = PromptTemplate(id: template.id, name: template.name, prompt: fresh.prompt)
+            }
+        }
+        if updated != stored {
+            store.save(updated)
+        }
     }
 
     private func initializeManagers() {

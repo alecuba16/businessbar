@@ -47,6 +47,9 @@ final class StatusBarController: NSObject {
     private var isBadgeFeatureEnabled: Bool {
         isFeatureEnabled(Constants.Defaults.featureBadges)
     }
+    private var isCompanionFeatureEnabled: Bool {
+        isFeatureEnabled(Constants.Defaults.featureCompanion)
+    }
     private enum EventTimeMode: String {
         case relative
         case absolute
@@ -95,6 +98,8 @@ final class StatusBarController: NSObject {
         setupMainStatusItem()
         setupObservers()
         setupKeyboardShortcuts()
+        observeTemplateStore()
+        syncTemplateShortcuts()
         startMinuteRefreshTimer()
     }
 
@@ -606,6 +611,58 @@ final class StatusBarController: NSObject {
                   let event = self.meetingManager.nextEvent else { return }
             self.joinMeeting(event)
         }
+
+        KeyboardShortcuts.onKeyUp(for: .toggleCompanionChat) {
+            guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion) else { return }
+            CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeChatClient() })
+        }
+    }
+
+    /// (Re)registers one global shortcut per rewrite template that has one
+    /// assigned. Shortcuts for deleted templates are unregistered. The
+    /// handler always re-reads the template list, so edits and deletions
+    /// take effect without re-syncing.
+    private func syncTemplateShortcuts() {
+        let name = KeyboardShortcuts.Name.self
+        let prefix = name.templateShortcutPrefix
+        let libraryPrefix = "KeyboardShortcuts_"
+
+        // Unregister shortcuts whose template no longer exists. Library keys
+        // are scanned directly because the library has no list-all API.
+        let liveTemplateIDs = Set(TemplateStore().load().map(\.id))
+        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix(libraryPrefix + prefix) {
+            let raw = String(key.dropFirst(libraryPrefix.count))
+            let templateID = String(raw.dropFirst(prefix.count))
+            if let uuid = UUID(uuidString: templateID), !liveTemplateIDs.contains(uuid) {
+                KeyboardShortcuts.setShortcut(nil, for: name.rewriteTemplate(uuid))
+            }
+        }
+
+        for template in TemplateStore().load() {
+            let shortcutName = name.rewriteTemplate(template.id)
+            guard KeyboardShortcuts.getShortcut(for: shortcutName) != nil else { continue }
+            KeyboardShortcuts.onKeyUp(for: shortcutName) { [weak self] in
+                guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion),
+                      let client = CompanionConfigService.makeClient() else { return }
+                ToastCenter.shared.show("Rewriting with \(template.name)…", icon: "wand.and.stars", duration: 1.2)
+                self?.runTemplateRewrite(templateID: template.id, client: client)
+            }
+        }
+    }
+
+    private func runTemplateRewrite(templateID: UUID, client: LLMClient) {
+        guard let template = TemplateStore().load().first(where: { $0.id == templateID }) else { return }
+        RewriteCoordinator.shared.startRewrite(template: template, client: client)
+    }
+
+    private func observeTemplateStore() {
+        NotificationCenter.default.addObserver(
+            forName: TemplateStore.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.syncTemplateShortcuts()
+        }
     }
 }
 
@@ -629,8 +686,13 @@ extension StatusBarController: NSMenuDelegate {
             onDeactivateNoSleep: { [weak self] in self?.noSleepManager.deactivate() },
             onShowPreferences: { [weak self] in self?.showPreferences() },
             onQuit: { NSApp.terminate(nil) },
+            onToggleCompanionChat: {
+                guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion) else { return }
+                CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeChatClient() })
+            },
             showEvents: isCalendarFeatureEnabled,
-            showNoSleep: isNoSleepFeatureEnabled
+            showNoSleep: isNoSleepFeatureEnabled,
+            showCompanion: isCompanionFeatureEnabled
         )
 
         // Transfer items from the freshly-built menu into the persistent menu object.

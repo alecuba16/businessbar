@@ -15,8 +15,10 @@ enum MenuBuilder {
         onDeactivateNoSleep: @escaping () -> Void,
         onShowPreferences: @escaping () -> Void,
         onQuit: @escaping () -> Void,
+        onToggleCompanionChat: @escaping () -> Void,
         showEvents: Bool,
-        showNoSleep: Bool
+        showNoSleep: Bool,
+        showCompanion: Bool
     ) -> NSMenu {
         let menu = NSMenu()
         
@@ -57,6 +59,13 @@ enum MenuBuilder {
             menu.addItem(disabledItem)
         }
         
+        if showCompanion {
+            let chatItem = NSMenuItem(title: "Toggle Companion Chat", action: #selector(MenuActionHandler.toggleCompanionChat), keyEquivalent: "")
+            chatItem.representedObject = MenuAction.toggleCompanionChat(onToggleCompanionChat)
+            chatItem.target = MenuActionHandler.shared
+            menu.addItem(chatItem)
+        }
+
         menu.addItem(NSMenuItem.separator())
         
         let prefsItem = NSMenuItem(title: "Preferences...", action: #selector(MenuActionHandler.showPreferences), keyEquivalent: ",")
@@ -254,6 +263,7 @@ enum MenuAction {
     case deactivateNoSleep(() -> Void)
     case showPreferences(() -> Void)
     case quit(() -> Void)
+    case toggleCompanionChat(() -> Void)
 }
 
 @MainActor
@@ -299,6 +309,11 @@ final class MenuActionHandler: NSObject {
     
     @objc func showPreferences(_ sender: NSMenuItem) {
         guard case .showPreferences(let handler) = sender.representedObject as? MenuAction else { return }
+        handler()
+    }
+    
+    @objc func toggleCompanionChat(_ sender: NSMenuItem) {
+        guard case .toggleCompanionChat(let handler) = sender.representedObject as? MenuAction else { return }
         handler()
     }
     

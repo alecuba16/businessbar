@@ -18,7 +18,8 @@ let package = Package(
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
         .package(url: "https://github.com/sindresorhus/LaunchAtLogin-Modern", from: "1.0.0"),
         .package(url: "https://github.com/openid/AppAuth-iOS", from: "1.7.0"),
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.5.0")
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.5.0"),
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.1")
     ],
     targets: [
         // Core library — pure business-logic code importable by both the app
@@ -38,6 +39,7 @@ let package = Package(
                 "BusinessBarCore",
                 "Defaults",
                 "KeyboardShortcuts",
+                .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 .product(name: "LaunchAtLogin", package: "LaunchAtLogin-Modern"),
                 .product(name: "AppAuth", package: "AppAuth-iOS"),
                 "Sparkle"
