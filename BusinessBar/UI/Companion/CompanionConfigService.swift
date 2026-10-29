@@ -633,7 +633,7 @@ enum CompanionConfigService {
     /// Effort values offered in the picker. The set is the union of what
     /// OpenAI models accept (low/medium/high/max) and gateway variants seen
     /// in the wild (none, xhigh).
-    static let effortLevels = ["none", "low", "medium", "high", "xhigh", "max"]
+    static let effortLevels = EffortVocabulary.defaultLevels
 
     /// Effort vocabulary for one model row. Precedence: the model's own
     /// pinned list, then the local MLX discovery, then known model-name
@@ -641,21 +641,18 @@ enum CompanionConfigService {
     /// global list so template editors without a pinned model keep the
     /// full vocabulary.
     static func effortOptions(forModel model: ChatModel?, provider: ChatProvider? = nil) -> [String] {
-        if let options = model?.effortOptions, !options.isEmpty {
-            return options
+        let mlxCapability: MLXReasoningCapability?
+        if provider?.kind == .localMLX, let modelID = model?.model, !modelID.isEmpty {
+            mlxCapability = MLXModelCatalog.reasoningCapability(id: modelID)
+        } else {
+            mlxCapability = nil
         }
-        if provider?.kind == .localMLX, let modelID = model?.model,
-           !modelID.isEmpty {
-            let capability = MLXModelCatalog.reasoningCapability(id: modelID)
-            if capability.supported, !capability.effortOptions.isEmpty {
-                return capability.effortOptions
-            }
-        }
-        if let model {
-            let known = knownModelEffortOptions(model.model)
-            if !known.isEmpty { return known }
-        }
-        return effortLevels
+        return EffortVocabulary.resolve(
+            pinnedEffortOptions: model?.effortOptions,
+            mlxModelID: provider?.kind == .localMLX ? model?.model : nil,
+            mlxCapability: mlxCapability,
+            modelID: model?.model
+        )
     }
 
     /// Same lookup by model row id, resolving the owning provider so local
@@ -675,16 +672,7 @@ enum CompanionConfigService {
     /// families with published effort sets are recognized here and
     /// everything else keeps the global list.
     static func knownModelEffortOptions(_ model: String) -> [String] {
-        let lowered = model.lowercased()
-        // gpt-5 family: minimal replaces none.
-        if lowered.contains("gpt-5") {
-            return ["minimal", "low", "medium", "high"]
-        }
-        if lowered.hasPrefix("o1") || lowered.hasPrefix("o3")
-            || lowered.hasPrefix("o4") || lowered.contains("gpt-oss") {
-            return ["low", "medium", "high"]
-        }
-        return []
+        EffortVocabulary.knownModelEffortOptions(model)
     }
 
     // MARK: - History retention

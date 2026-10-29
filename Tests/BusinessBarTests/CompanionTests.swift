@@ -615,6 +615,76 @@ final class MLXReasoningInspectorTests: XCTestCase {
     }
 }
 
+// MARK: - EffortVocabularyTests
+
+final class EffortVocabularyTests: XCTestCase {
+    func testPinnedListWins() {
+        let resolved = EffortVocabulary.resolve(
+            pinnedEffortOptions: ["a", "b"],
+            mlxModelID: nil,
+            mlxCapability: MLXReasoningCapability(
+                supported: true, shape: .effortLevels, effortOptions: ["low", "high"]
+            ),
+            modelID: "gpt-5"
+        )
+        XCTAssertEqual(resolved, ["a", "b"])
+    }
+
+    func testMLXDiscoveryBeatsNamePatterns() {
+        let resolved = EffortVocabulary.resolve(
+            pinnedEffortOptions: nil,
+            mlxModelID: "mlx-community/gpt-oss-20b",
+            mlxCapability: MLXReasoningCapability(
+                supported: true, shape: .effortLevels, effortOptions: ["low", "medium", "high"]
+            ),
+            modelID: "gpt-oss-20b"
+        )
+        XCTAssertEqual(resolved, ["low", "medium", "high"])
+    }
+
+    func testUnsupportedMLXFallsThroughToPatterns() {
+        let resolved = EffortVocabulary.resolve(
+            pinnedEffortOptions: nil,
+            mlxModelID: "mlx-community/gpt-oss-20b",
+            mlxCapability: MLXReasoningCapability.none,
+            modelID: "gpt-oss-20b"
+        )
+        XCTAssertEqual(resolved, ["low", "medium", "high"])
+    }
+
+    func testKnownPatterns() {
+        XCTAssertEqual(
+            EffortVocabulary.knownModelEffortOptions("gpt-5-turbo"),
+            ["minimal", "low", "medium", "high"]
+        )
+        XCTAssertEqual(
+            EffortVocabulary.knownModelEffortOptions("o3-mini"),
+            ["low", "medium", "high"]
+        )
+        XCTAssertEqual(EffortVocabulary.knownModelEffortOptions("gpt-4o"), [])
+    }
+
+    func testUnknownModelGetsGlobalList() {
+        let resolved = EffortVocabulary.resolve(
+            pinnedEffortOptions: nil,
+            mlxModelID: nil,
+            mlxCapability: nil,
+            modelID: "llama-3"
+        )
+        XCTAssertEqual(resolved, EffortVocabulary.defaultLevels)
+    }
+
+    func testNilModelGetsGlobalList() {
+        let resolved = EffortVocabulary.resolve(
+            pinnedEffortOptions: nil,
+            mlxModelID: nil,
+            mlxCapability: nil,
+            modelID: nil
+        )
+        XCTAssertEqual(resolved, EffortVocabulary.defaultLevels)
+    }
+}
+
 // MARK: - CommandCategoryTests
 
 final class CommandCategoryTests: XCTestCase {
@@ -724,6 +794,39 @@ final class CommandCategoryTests: XCTestCase {
         )
         XCTAssertTrue(resolved.refused)
         XCTAssertEqual(resolved.category, .network)
+    }
+
+    func testWildcardRuleDoesNotMatchLongerBinary() {
+        // `git *` must approve `git status` but never `github-cli ...`:
+        // the wildcard matches a whole-word prefix, not raw characters.
+        let settings = CommandPermissionSettings(
+            categoryModes: [:],
+            allowedPrefixes: ["git *"],
+            deniedPrefixes: []
+        )
+        let gitStatus = CommandPermissionParser.resolve(
+            "git status",
+            sessionPrefixes: [],
+            mode: .ask,
+            settings: settings
+        )
+        XCTAssertFalse(gitStatus.refused)
+        // git status is allowlisted read-only, so it may auto-approve
+        // (tier 0) without the rule firing; either non-asking outcome
+        // proves the rule path. The real assertion is the second one.
+        if case .needsConfirmation = gitStatus.permission {
+            XCTFail("git status should not need confirmation")
+        }
+        let githubCli = CommandPermissionParser.resolve(
+            "github-cli repo list",
+            sessionPrefixes: [],
+            mode: .ask,
+            settings: settings
+        )
+        XCTAssertFalse(githubCli.refused)
+        if case .needsConfirmation = githubCli.permission {} else {
+            XCTFail("expected needsConfirmation for github-cli, got \(githubCli.permission)")
+        }
     }
 
     func testWildcardAllowMatchesPrefix() {

@@ -150,3 +150,55 @@ public struct CompanionConfiguration: Sendable, Equatable {
         apiKey: ""
     )
 }
+
+// MARK: - EffortVocabulary
+
+/// Effort vocabulary resolution, the picker-facing half of the reasoning
+/// effort story. Pure logic, no storage: the config layer injects the
+/// store-dependent inputs (pinned list, local MLX capability).
+public enum EffortVocabulary {
+    /// Global default vocabulary every picker starts from.
+    public static let defaultLevels = ["none", "low", "medium", "high", "xhigh", "max"]
+
+    /// Known reasoning vocabularies by model id. Model lists from
+    /// OpenAI-compatible endpoints carry no capability metadata, so
+    /// families with published effort sets are recognized here and
+    /// everything else keeps the global list.
+    public static func knownModelEffortOptions(_ model: String) -> [String] {
+        let lowered = model.lowercased()
+        // gpt-5 family: minimal replaces none.
+        if lowered.contains("gpt-5") {
+            return ["minimal", "low", "medium", "high"]
+        }
+        if lowered.hasPrefix("o1") || lowered.hasPrefix("o3")
+            || lowered.hasPrefix("o4") || lowered.contains("gpt-oss") {
+            return ["low", "medium", "high"]
+        }
+        return []
+    }
+
+    /// Precedence: the model's own pinned list, then the local MLX
+    /// discovery, then known model-name patterns, then the global list.
+    /// A nil model falls back to the global list so template editors
+    /// without a pinned model keep the full vocabulary.
+    public static func resolve(
+        pinnedEffortOptions: [String]?,
+        mlxModelID: String?,
+        mlxCapability: MLXReasoningCapability?,
+        modelID: String?
+    ) -> [String] {
+        if let pinned = pinnedEffortOptions, !pinned.isEmpty {
+            return pinned
+        }
+        if let capability = mlxCapability,
+           capability.supported, !capability.effortOptions.isEmpty {
+            _ = mlxModelID
+            return capability.effortOptions
+        }
+        if let modelID, !modelID.isEmpty {
+            let known = knownModelEffortOptions(modelID)
+            if !known.isEmpty { return known }
+        }
+        return defaultLevels
+    }
+}
