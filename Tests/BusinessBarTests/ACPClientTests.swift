@@ -504,7 +504,7 @@ final class ACPAgentClientTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
         transport.deliverClose()
 
-        let events = try? await collector.value ?? []
+        let events = (try? await collector.value) ?? []
         guard case .failed = events.last else {
             XCTFail("Expected failed terminal on process exit, got \(events)")
             return
