@@ -25,16 +25,15 @@ struct CompanionTab: View {
     @State private var historyMaxAgeDays: Int
     @State private var historyMaxSessions: Int
     @State private var templates: [PromptTemplate]
+    /// Item-based sheet presentation: each edit target re-inits the editor.
+    /// The old isPresented + separate editing state raced the dismiss
+    /// animation, so a quick reopen kept the previous template's values.
     @State private var editingTemplate: PromptTemplate?
-    @State private var showsTemplateEditor = false
     @State private var keychainError: String?
     @State private var providers: [ChatProvider]
     @State private var editingProvider: ChatProvider?
     @State private var editingACPProvider: ChatProvider?
-    @State private var showsACPProviderEditor = false
-    @State private var editingModel: (provider: ChatProvider, model: ChatModel)?
-    @State private var showsProviderEditor = false
-    @State private var showsModelEditor = false
+    @State private var editingModel: EditingModelTarget?
     @State private var showsLocalModels = false
 
     private let templateStore = TemplateStore()
@@ -131,10 +130,8 @@ struct CompanionTab: View {
                                 Button("Edit") {
                                     if provider.kind == .acpAgent {
                                         editingACPProvider = provider
-                                        showsACPProviderEditor = true
                                     } else {
                                         editingProvider = provider
-                                        showsProviderEditor = true
                                     }
                                 }
                                 .controlSize(.small)
@@ -161,8 +158,7 @@ struct CompanionTab: View {
                                                 .help("Selected for chat")
                                         }
                                         Button("Edit") {
-                                            editingModel = (provider, model)
-                                            showsModelEditor = true
+                                            editingModel = EditingModelTarget(provider: provider, model: model)
                                         }
                                         .controlSize(.small)
                                         Button {
@@ -179,8 +175,7 @@ struct CompanionTab: View {
                                 }
 
                                 Button("Add Model") {
-                                    editingModel = (provider, ChatModel(name: "", model: ""))
-                                    showsModelEditor = true
+                                    editingModel = EditingModelTarget(provider: provider, model: ChatModel(name: "", model: ""))
                                 }
                                 .controlSize(.small)
                                 .padding(.leading, 12)
@@ -191,8 +186,9 @@ struct CompanionTab: View {
 
                     HStack {
                         Button("Add OpenAI-compatible") {
-                            editingProvider = nil
-                            showsProviderEditor = true
+                            // Item-based sheets present only non-nil items,
+                            // so Add passes a fresh provider instead of nil.
+                            editingProvider = ChatProvider(name: "", baseURL: "", models: [])
                         }
                         Button("Add Local Models") {
                             showsLocalModels = true
@@ -204,7 +200,6 @@ struct CompanionTab: View {
                                 models: [],
                                 kind: .acpAgent
                             )
-                            showsACPProviderEditor = true
                         }
                     }
                 } header: {
@@ -247,7 +242,6 @@ struct CompanionTab: View {
                                 .fixedSize()
                             Button("Edit") {
                                 editingTemplate = template
-                                showsTemplateEditor = true
                             }
                             .controlSize(.small)
                             Button {
@@ -264,7 +258,6 @@ struct CompanionTab: View {
 
                     Button("Add Template") {
                         editingTemplate = PromptTemplate(name: "", prompt: "[placeholder]")
-                        showsTemplateEditor = true
                     }
                 } header: {
                     Text("Rewrite Templates")
@@ -347,19 +340,27 @@ struct CompanionTab: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             accessibilityPermission.refresh()
         }
-        .sheet(isPresented: $showsTemplateEditor) {
-            TemplateEditorSheet(template: editingTemplate) { saved in
+        // Store writes from outside this tab (shortcut sync, migrations)
+        // must not be clobbered by a save from the tab's stale copy.
+        .onReceive(NotificationCenter.default.publisher(for: TemplateStore.didChangeNotification)) { _ in
+            templates = templateStore.load()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ChatProviderStore.didChangeNotification)) { _ in
+            providers = CompanionConfigService.chatProviders()
+        }
+        .sheet(item: $editingTemplate) { template in
+            TemplateEditorSheet(template: template) { saved in
                 if let index = templates.firstIndex(where: { $0.id == saved.id }) {
                     templates[index] = saved
                 } else {
                     templates.append(saved)
                 }
                 templateStore.save(templates)
-                showsTemplateEditor = false
+                editingTemplate = nil
             }
         }
-        .sheet(isPresented: $showsProviderEditor) {
-            ProviderEditorSheet(provider: editingProvider) { saved, apiKey, headers in
+        .sheet(item: $editingProvider) { provider in
+            ProviderEditorSheet(provider: provider) { saved, apiKey, headers in
                 if let index = providers.firstIndex(where: { $0.id == saved.id }) {
                     providers[index] = saved
                 } else {
@@ -379,22 +380,20 @@ struct CompanionTab: View {
                 } catch {
                     keychainError = "Could not save the headers: \(error.localizedDescription)"
                 }
-                showsProviderEditor = false
+                editingProvider = nil
             }
         }
-        .sheet(isPresented: $showsModelEditor) {
-            if let editingModel {
-                ModelEditorSheet(model: editingModel.model) { saved in
-                    if let providerIndex = providers.firstIndex(where: { $0.id == editingModel.provider.id }) {
-                        if let modelIndex = providers[providerIndex].models.firstIndex(where: { $0.id == saved.id }) {
-                            providers[providerIndex].models[modelIndex] = saved
-                        } else {
-                            providers[providerIndex].models.append(saved)
-                        }
-                        CompanionConfigService.chatProviderStore.save(providers)
+        .sheet(item: $editingModel) { target in
+            ModelEditorSheet(model: target.model) { saved in
+                if let providerIndex = providers.firstIndex(where: { $0.id == target.provider.id }) {
+                    if let modelIndex = providers[providerIndex].models.firstIndex(where: { $0.id == saved.id }) {
+                        providers[providerIndex].models[modelIndex] = saved
+                    } else {
+                        providers[providerIndex].models.append(saved)
                     }
-                    showsModelEditor = false
+                    CompanionConfigService.chatProviderStore.save(providers)
                 }
+                editingModel = nil
             }
         }
         .sheet(isPresented: $showsLocalModels, onDismiss: {
@@ -402,17 +401,15 @@ struct CompanionTab: View {
         }) {
             LocalModelsSheet()
         }
-        .sheet(isPresented: $showsACPProviderEditor) {
-            if let editingACPProvider {
-                ACPAgentEditorSheet(agent: editingACPProvider) { saved in
-                    if let index = providers.firstIndex(where: { $0.id == saved.id }) {
-                        providers[index] = saved
-                    } else {
-                        providers.append(saved)
-                    }
-                    CompanionConfigService.chatProviderStore.save(providers)
-                    showsACPProviderEditor = false
+        .sheet(item: $editingACPProvider) { agent in
+            ACPAgentEditorSheet(agent: agent) { saved in
+                if let index = providers.firstIndex(where: { $0.id == saved.id }) {
+                    providers[index] = saved
+                } else {
+                    providers.append(saved)
                 }
+                CompanionConfigService.chatProviderStore.save(providers)
+                editingACPProvider = nil
             }
         }
     }
@@ -441,6 +438,16 @@ struct CompanionTab: View {
     }
 }
 
+// MARK: - EditingModelTarget
+
+/// Identifiable wrapper for the model editor's edit target. The sheet is
+/// item-based, so the tuple needed a stable identity for SwiftUI.
+struct EditingModelTarget: Identifiable {
+    let provider: ChatProvider
+    let model: ChatModel
+    var id: UUID { model.id }
+}
+
 // MARK: - ProviderEditorSheet
 
 /// Sheet for creating and editing a provider: name, endpoint, per-provider
@@ -450,6 +457,9 @@ struct ProviderEditorSheet: View {
     @State private var provider: ChatProvider
     @State private var apiKey: String
     @State private var headers: [EditableHeaderPair]
+    @State private var fetchedModels: [CompanionConfigService.RemoteModelInfo]?
+    @State private var fetchError: String?
+    @State private var isFetchingModels = false
     let onSave: (ChatProvider, String, [(name: String, value: String)]) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -493,6 +503,61 @@ struct ProviderEditorSheet: View {
             }
 
             HStack {
+                Button {
+                    isFetchingModels = true
+                    fetchError = nil
+                    let trimmedHeaders = headers
+                        .filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
+                        .map { (name: $0.name.trimmingCharacters(in: .whitespaces), value: $0.value) }
+                    Task {
+                        do {
+                            fetchedModels = try await CompanionConfigService.fetchRemoteModels(
+                                baseURL: provider.baseURL,
+                                apiKey: apiKey,
+                                headers: trimmedHeaders
+                            )
+                        } catch {
+                            fetchedModels = nil
+                            fetchError = error.localizedDescription
+                        }
+                        isFetchingModels = false
+                    }
+                } label: {
+                    if isFetchingModels {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Fetch Models")
+                    }
+                }
+                .disabled(provider.baseURL.isEmpty || isFetchingModels)
+                .help("Fetch the model list from the provider's /models endpoint")
+                if let fetchedModels, !fetchedModels.isEmpty {
+                    Text("\(fetchedModels.count) models")
+                        .foregroundColor(.secondary)
+                }
+                if let fetchError {
+                    Text("Fetch failed: \(fetchError)")
+                        .foregroundColor(.red)
+                        .lineLimit(1)
+                }
+            }
+            if let fetchedModels, !fetchedModels.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(fetchedModels) { info in
+                            Text(info.id)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(info.supportsReasoning ? .primary : .secondary)
+                        }
+                    }
+                }
+                .frame(maxHeight: 120)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .border(Color.secondary.opacity(0.3))
+            }
+
+            HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
@@ -506,7 +571,7 @@ struct ProviderEditorSheet: View {
                 .disabled(provider.name.isEmpty || provider.baseURL.isEmpty)
             }
         }
-        .frame(width: 420, height: 360)
+        .frame(width: 420, height: 480)
         .padding()
     }
 }
@@ -587,6 +652,12 @@ struct ModelEditorSheet: View {
     @State private var effortSelection: String
     @State private var customEffort: String
 
+    /// Effort values offered for this model: pinned options first, then
+    /// name-pattern fallback, then the global list.
+    private var modelEffortOptions: [String] {
+        CompanionConfigService.effortOptions(forModel: model)
+    }
+
     init(model: ChatModel, onSave: @escaping (ChatModel) -> Void) {
         _model = State(initialValue: model)
         let stored = model.reasoningEffort ?? ""
@@ -626,7 +697,7 @@ struct ModelEditorSheet: View {
 
             if model.reasoningEnabled == true {
                 Picker("Effort", selection: $effortSelection) {
-                    ForEach(CompanionConfigService.effortLevels, id: \.self) { level in
+                    ForEach(modelEffortOptions, id: \.self) { level in
                         Text(level.capitalized).tag(level)
                     }
                     Text("Custom").tag("__custom__")
@@ -634,6 +705,30 @@ struct ModelEditorSheet: View {
                 if effortSelection == "__custom__" {
                     TextField("Custom effort value", text: $customEffort)
                 }
+
+                HStack {
+                    Text("Effort options")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(modelEffortOptions.joined(separator: " \u{2022}"))
+                        .foregroundColor(.secondary)
+                        .help("Values this model accepts. Detected from the model name or provider model list; pin them below to override.")
+                }
+                TextField(
+                    "Comma-separated effort values, for example low,medium,high",
+                    text: Binding(
+                        get: {
+                            model.effortOptions?.joined(separator: ",") ?? ""
+                        },
+                        set: {
+                            let parts = $0
+                                .split(separator: ",")
+                                .map { $0.trimmingCharacters(in: .whitespaces) }
+                                .filter { !$0.isEmpty }
+                            model.effortOptions = parts.isEmpty ? nil : parts
+                        }
+                    )
+                )
             }
 
             HStack {
@@ -654,7 +749,7 @@ struct ModelEditorSheet: View {
                 .disabled(model.name.isEmpty || model.model.isEmpty)
             }
         }
-        .frame(width: 420, height: 360)
+        .frame(width: 420, height: 430)
         .padding()
     }
 }
@@ -673,6 +768,27 @@ struct TemplateEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private static let presetLevels = CompanionConfigService.effortLevels
+
+    /// Effort values for the model the template pins; the default chat
+    /// model applies when none is pinned. A stored preset that the resolved
+    /// list lacks still shows, so the picker keeps a matching tag.
+    private var templateEffortOptions: [String] {
+        var options: [String]
+        if let modelID = template.modelID {
+            options = CompanionConfigService.effortOptions(forModelID: modelID)
+        } else if let selected = CompanionConfigService.selectedModel() {
+            options = CompanionConfigService.effortOptions(forModel: selected.model, provider: selected.provider)
+        } else {
+            options = Self.presetLevels
+        }
+        if let stored = template.reasoningEffort,
+           !stored.isEmpty,
+           Self.presetLevels.contains(stored),
+           !options.contains(stored) {
+            options.append(stored)
+        }
+        return options
+    }
 
     init(template: PromptTemplate?, onSave: @escaping (PromptTemplate) -> Void) {
         let initial = template ?? PromptTemplate(name: "", prompt: "[placeholder]")
@@ -729,7 +845,7 @@ struct TemplateEditorSheet: View {
 
             Picker("Reasoning effort", selection: $effortSelection) {
                 Text("Default").tag("default")
-                ForEach(Self.presetLevels, id: \.self) { level in
+                ForEach(templateEffortOptions, id: \.self) { level in
                     Text(level.capitalized).tag(level)
                 }
                 Text("Custom").tag("custom")

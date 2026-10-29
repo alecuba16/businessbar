@@ -114,6 +114,13 @@ public struct CompanionConfiguration: Sendable, Equatable {
     /// over the built-in `Authorization` header, so gateways with their own
     /// auth schemes stay usable.
     public var extraHeaders: [String: String]
+    /// True when the endpoint is the managed local MLX server. Its chat
+    /// completions handler accepts `chat_template_kwargs`, which carries
+    /// the reasoning controls the model's template understands.
+    public var isLocalMLX: Bool
+    /// Reasoning capability detected for the local model; drives the chat
+    /// template kwargs on requests. Nil for remote providers.
+    public var mlxReasoning: MLXReasoningCapability?
 
     public init(
         baseURL: URL,
@@ -122,7 +129,9 @@ public struct CompanionConfiguration: Sendable, Equatable {
         systemPrompt: String = "",
         reasoning: Bool = false,
         reasoningEffort: String? = nil,
-        extraHeaders: [String: String] = [:]
+        extraHeaders: [String: String] = [:],
+        isLocalMLX: Bool = false,
+        mlxReasoning: MLXReasoningCapability? = nil
     ) {
         self.baseURL = baseURL
         self.model = model
@@ -131,6 +140,8 @@ public struct CompanionConfiguration: Sendable, Equatable {
         self.reasoning = reasoning
         self.reasoningEffort = reasoningEffort
         self.extraHeaders = extraHeaders
+        self.isLocalMLX = isLocalMLX
+        self.mlxReasoning = mlxReasoning
     }
 
     public static let `default` = CompanionConfiguration(

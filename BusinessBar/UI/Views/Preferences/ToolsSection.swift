@@ -236,16 +236,31 @@ struct WebSearchToolSheet: View {
 // MARK: - CommandRunnerToolSheet
 
 /// Command runner configuration: the tool list, the default working dir
-/// new sessions start from, and where the per-session controls live.
+/// new sessions start from, per-category permission dials, and persistent
+/// allow/deny prefix rules.
 struct CommandRunnerToolSheet: View {
     @State private var defaultWorkingDir: String
     @State private var defaultMode: CommandPermissionMode
+    @State private var categoryModes: [CommandCategory: CommandPermissionMode]
+    @State private var allowedPrefixes: [String]
+    @State private var deniedPrefixes: [String]
+    @State private var newAllowRule = ""
+    @State private var newDenyRule = ""
 
     @Environment(\.dismiss) private var dismiss
 
     init() {
         _defaultWorkingDir = State(initialValue: CompanionConfigService.commandDefaultWorkingDir())
         _defaultMode = State(initialValue: CompanionConfigService.commandPermissionMode())
+        var modes: [CommandCategory: CommandPermissionMode] = [:]
+        for category in CommandCategory.allCases {
+            if let mode = CompanionConfigService.commandCategoryMode(category) {
+                modes[category] = mode
+            }
+        }
+        _categoryModes = State(initialValue: modes)
+        _allowedPrefixes = State(initialValue: CompanionConfigService.commandAllowedPrefixes())
+        _deniedPrefixes = State(initialValue: CompanionConfigService.commandDeniedPrefixes())
     }
 
     var body: some View {
@@ -307,6 +322,36 @@ struct CommandRunnerToolSheet: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Per-category defaults")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                ForEach(CommandCategory.allCases, id: \.self) { category in
+                    categoryRow(category)
+                }
+                Text("A category dial overrides the session mode above for the commands it classifies into. Read-only follows the session mode unless you pin it.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            ruleEditor(
+                title: "Always allow",
+                rules: $allowedPrefixes,
+                newRule: $newAllowRule,
+                placeholder: "Prefix rule, e.g. git status or npm test *",
+                onSave: { CompanionConfigService.setCommandAllowedPrefixes($0) }
+            )
+            ruleEditor(
+                title: "Always deny",
+                rules: $deniedPrefixes,
+                newRule: $newDenyRule,
+                placeholder: "Prefix rule, e.g. curl *",
+                onSave: { CompanionConfigService.setCommandDeniedPrefixes($0) }
+            )
+            Text("Prefix rules match the exact command or any command starting with it; a trailing * marks a wildcard. Deny wins over allow. Rules persist across sessions; \"Always Allow\" on the approval card adds here.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
             Text("New chat sessions start from this dir; the header in the chat panel shows it and can switch it per session.")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -317,8 +362,110 @@ struct CommandRunnerToolSheet: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .frame(width: 460, height: 380)
+        .frame(width: 460, height: 640)
         .padding()
+    }
+
+    /// One category dial row: title, session-mode follow note, and a
+    /// three-way picker (Ask/Allow/Deny) with a default position.
+    private func categoryRow(_ category: CommandCategory) -> some View {
+        HStack {
+            Text(category.title)
+                .font(.caption)
+            Spacer()
+            if let mode = categoryModes[category] {
+                Picker("", selection: Binding(
+                    get: { mode },
+                    set: { newValue in
+                        categoryModes[category] = newValue
+                        CompanionConfigService.setCommandCategoryMode(newValue, for: category)
+                    }
+                )) {
+                    ForEach(CommandPermissionMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.mini)
+                .frame(width: 160)
+                Button {
+                    categoryModes[category] = nil
+                    CompanionConfigService.setCommandCategoryMode(nil, for: category)
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.mini)
+                .help("Follow the session mode")
+            } else {
+                Picker("", selection: Binding(
+                    get: { categoryModes[category] },
+                    set: { newValue in
+                        categoryModes[category] = newValue
+                        CompanionConfigService.setCommandCategoryMode(newValue, for: category)
+                    }
+                )) {
+                    Text("Session mode").tag(Optional<CommandPermissionMode>.none)
+                    ForEach(CommandPermissionMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(Optional(mode))
+                    }
+                }
+                .controlSize(.small)
+                .frame(width: 160)
+            }
+        }
+    }
+
+    /// Allow/deny rule list with add/remove and direct persistence.
+    private func ruleEditor(
+        title: String,
+        rules: Binding<[String]>,
+        newRule: Binding<String>,
+        placeholder: String,
+        onSave: @escaping ([String]) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            ForEach(rules.wrappedValue.indices, id: \.self) { index in
+                HStack {
+                    Text(rules.wrappedValue[index])
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        rules.wrappedValue.remove(at: index)
+                        onSave(rules.wrappedValue)
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.mini)
+                }
+            }
+            HStack {
+                TextField(placeholder, text: newRule)
+                    .onSubmit { addRule(to: rules, newRule: newRule, onSave: onSave) }
+                Button("Add") {
+                    addRule(to: rules, newRule: newRule, onSave: onSave)
+                }
+                .controlSize(.small)
+                .disabled(newRule.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+    }
+
+    private func addRule(
+        to rules: Binding<[String]>,
+        newRule: Binding<String>,
+        onSave: @escaping ([String]) -> Void
+    ) {
+        let trimmed = newRule.wrappedValue.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !rules.wrappedValue.contains(trimmed) else { return }
+        rules.wrappedValue.append(trimmed)
+        onSave(rules.wrappedValue)
+        newRule.wrappedValue = ""
     }
 }
 

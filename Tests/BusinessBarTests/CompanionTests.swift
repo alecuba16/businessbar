@@ -505,3 +505,280 @@ final class ChatProviderKindTests: XCTestCase {
         XCTAssertEqual(ChatProvider(profile: remoteProfile).kind, .openAICompat)
     }
 }
+
+// MARK: - MLXReasoningInspectorTests
+
+final class MLXReasoningInspectorTests: XCTestCase {
+    func testQwenTemplateDetectsThinkingToggle() {
+        let capability = MLXReasoningInspector.capability(
+            chatTemplate: "{% if enable_thinking %}...{% endif %}",
+            configJSON: nil,
+            architecture: "Qwen3ForCausalLM"
+        )
+        XCTAssertTrue(capability.supported)
+        XCTAssertEqual(capability.shape, .thinkingToggle)
+        XCTAssertEqual(capability.effortOptions, [])
+    }
+
+    func testGptOssTemplateDetectsEffortLevels() {
+        let capability = MLXReasoningInspector.capability(
+            chatTemplate: "{{ reasoning_effort }}",
+            configJSON: nil,
+            architecture: "unknown"
+        )
+        XCTAssertTrue(capability.supported)
+        XCTAssertEqual(capability.shape, .effortLevels)
+        XCTAssertEqual(capability.effortOptions, MLXReasoningInspector.gptOssEffortLevels)
+    }
+
+    func testGptOssArchitectureDetectsEffortWithoutTemplate() {
+        let capability = MLXReasoningInspector.capability(
+            chatTemplate: nil,
+            configJSON: nil,
+            architecture: "GptOssForCausalLM"
+        )
+        XCTAssertTrue(capability.supported)
+        XCTAssertEqual(capability.shape, .effortLevels)
+    }
+
+    func testPlainTemplateReportsNone() {
+        let capability = MLXReasoningInspector.capability(
+            chatTemplate: "{{ messages }}",
+            configJSON: nil,
+            architecture: "LlamaForCausalLM"
+        )
+        XCTAssertFalse(capability.supported)
+    }
+
+    func testRequestKwargsToggleOff() {
+        let capability = MLXReasoningCapability(
+            supported: true,
+            shape: .thinkingToggle,
+            effortOptions: []
+        )
+        XCTAssertEqual(
+            capability.requestKwargs(reasoningEnabled: false, effort: nil) as? [String: Bool],
+            ["enable_thinking": false]
+        )
+    }
+
+    func testRequestKwargsToggleOnSendsNothing() {
+        let capability = MLXReasoningCapability(
+            supported: true,
+            shape: .thinkingToggle,
+            effortOptions: []
+        )
+        XCTAssertNil(capability.requestKwargs(reasoningEnabled: true, effort: nil))
+    }
+
+    func testRequestKwargsEffortClampsUnknownToMedium() {
+        let capability = MLXReasoningCapability(
+            supported: true,
+            shape: .effortLevels,
+            effortOptions: ["low", "medium", "high"]
+        )
+        XCTAssertEqual(
+            capability.requestKwargs(reasoningEnabled: true, effort: "banana") as? [String: String],
+            ["reasoning_effort": "medium"]
+        )
+        XCTAssertEqual(
+            capability.requestKwargs(reasoningEnabled: true, effort: "high") as? [String: String],
+            ["reasoning_effort": "high"]
+        )
+    }
+
+    func testRequestKwargsEffortDisabledClampsLow() {
+        let capability = MLXReasoningCapability(
+            supported: true,
+            shape: .effortLevels,
+            effortOptions: ["low", "medium", "high"]
+        )
+        XCTAssertEqual(
+            capability.requestKwargs(reasoningEnabled: false, effort: "high") as? [String: String],
+            ["reasoning_effort": "low"]
+        )
+    }
+
+    func testUnsupportedSendsNoKwargs() {
+        XCTAssertEqual(MLXReasoningCapability.none.requestKwargs(reasoningEnabled: true, effort: "high"), nil)
+    }
+
+    func testCapabilityCodableRoundTrip() throws {
+        let capability = MLXReasoningCapability(
+            supported: true,
+            shape: .effortLevels,
+            effortOptions: ["low", "medium", "high"]
+        )
+        let data = try JSONEncoder().encode(capability)
+        let decoded = try JSONDecoder().decode(MLXReasoningCapability.self, from: data)
+        XCTAssertEqual(decoded, capability)
+    }
+}
+
+// MARK: - CommandCategoryTests
+
+final class CommandCategoryTests: XCTestCase {
+    func testDeletionCommandsCategorize() {
+        XCTAssertEqual(CommandPermissionParser.categorize("rm -rf build").category, .fileDelete)
+        XCTAssertEqual(CommandPermissionParser.categorize("rmdir scripts").category, .fileDelete)
+    }
+
+    func testGitMutationsCategorize() {
+        XCTAssertEqual(CommandPermissionParser.categorize("git push").category, .gitMutation)
+        XCTAssertEqual(CommandPermissionParser.categorize("git commit -m x").category, .gitMutation)
+        XCTAssertEqual(CommandPermissionParser.categorize("git status").category, .readOnly)
+    }
+
+    func testPackageManagersCategorize() {
+        XCTAssertEqual(CommandPermissionParser.categorize("npm install").category, .packageManager)
+        XCTAssertEqual(CommandPermissionParser.categorize("pip3 install requests").category, .packageManager)
+    }
+
+    func testNetworkCategorize() {
+        XCTAssertEqual(CommandPermissionParser.categorize("curl https://example.com").category, .network)
+    }
+
+    func testFileWriteCategorize() {
+        XCTAssertEqual(CommandPermissionParser.categorize("mkdir build").category, .fileWrite)
+        XCTAssertEqual(CommandPermissionParser.categorize("touch x.txt").category, .fileWrite)
+    }
+
+    func testReadOnlyCategorize() {
+        XCTAssertEqual(CommandPermissionParser.categorize("ls -la").category, .readOnly)
+        XCTAssertEqual(CommandPermissionParser.categorize("cat file.txt").category, .readOnly)
+    }
+
+    func testCompoundTakesWorstCategory() {
+        XCTAssertEqual(CommandPermissionParser.compoundCategory("cat notes.txt && rm -rf build"), .fileDelete)
+        XCTAssertEqual(CommandPermissionParser.compoundCategory("cat notes.txt && grep x"), .readOnly)
+    }
+
+    func testTargetsCollectNonFlagTokens() {
+        let classification = CommandPermissionParser.categorize("rm -rf build tmp")
+        XCTAssertEqual(classification.targets, ["build", "tmp"])
+    }
+
+    func testCategoryDialDenyOverridesAllow() {
+        let settings = CommandPermissionSettings(
+            categoryModes: [.fileDelete: .deny],
+            allowedPrefixes: [],
+            deniedPrefixes: []
+        )
+        let resolved = CommandPermissionParser.resolve(
+            "mkdir build",
+            sessionPrefixes: [],
+            mode: .allow,
+            settings: settings
+        )
+        XCTAssertTrue(resolved.refused)
+        XCTAssertEqual(resolved.category, .fileWrite)
+    }
+
+    func testCategoryDialAllowUnblocksAsk() {
+        let settings = CommandPermissionSettings(
+            categoryModes: [.gitMutation: .allow],
+            allowedPrefixes: [],
+            deniedPrefixes: []
+        )
+        let resolved = CommandPermissionParser.resolve(
+            "git commit -m x",
+            sessionPrefixes: [],
+            mode: .ask,
+            settings: settings
+        )
+        XCTAssertFalse(resolved.refused)
+        if case .sessionApproved = resolved.permission {} else {
+            XCTFail("expected sessionApproved, got \(resolved.permission)")
+        }
+    }
+
+    func testPersistentAllowRuleSkipsConfirmation() {
+        let settings = CommandPermissionSettings(
+            categoryModes: [:],
+            allowedPrefixes: ["npm test"],
+            deniedPrefixes: []
+        )
+        let resolved = CommandPermissionParser.resolve(
+            "npm test",
+            sessionPrefixes: [],
+            mode: .ask,
+            settings: settings
+        )
+        XCTAssertFalse(resolved.refused)
+        if case .sessionApproved = resolved.permission {} else {
+            XCTFail("expected sessionApproved, got \(resolved.permission)")
+        }
+    }
+
+    func testPersistentDenyRuleWinsOverAllow() {
+        let settings = CommandPermissionSettings(
+            categoryModes: [:],
+            allowedPrefixes: ["curl *"],
+            deniedPrefixes: ["curl admin*"]
+        )
+        let resolved = CommandPermissionParser.resolve(
+            "curl https://admin.example.com",
+            sessionPrefixes: [],
+            mode: .allow,
+            settings: settings
+        )
+        XCTAssertTrue(resolved.refused)
+        XCTAssertEqual(resolved.category, .network)
+    }
+
+    func testWildcardAllowMatchesPrefix() {
+        let settings = CommandPermissionSettings(
+            categoryModes: [:],
+            allowedPrefixes: ["git push *"],
+            deniedPrefixes: []
+        )
+        let resolved = CommandPermissionParser.resolve(
+            "git push origin main",
+            sessionPrefixes: [],
+            mode: .ask,
+            settings: settings
+        )
+        XCTAssertFalse(resolved.refused)
+        if case .sessionApproved = resolved.permission {} else {
+            XCTFail("expected sessionApproved, got \(resolved.permission)")
+        }
+    }
+
+    func testDangerousCommandStillConfirmsInAllowDial() {
+        // rm carries the deny-wins rule; a fileDelete Allow dial must not
+        // turn it into an auto-approve.
+        let settings = CommandPermissionSettings(
+            categoryModes: [.fileDelete: .allow],
+            allowedPrefixes: [],
+            deniedPrefixes: []
+        )
+        let resolved = CommandPermissionParser.resolve(
+            "rm -rf build",
+            sessionPrefixes: [],
+            mode: .ask,
+            settings: settings
+        )
+        XCTAssertFalse(resolved.refused)
+        if case .needsConfirmation = resolved.permission {} else {
+            XCTFail("expected needsConfirmation, got \(resolved.permission)")
+        }
+    }
+}
+
+// MARK: - ChatModelEffortOptionsTests
+
+final class ChatModelEffortOptionsTests: XCTestCase {
+    func testModelCarriesPinnedEffortOptions() throws {
+        let json = """
+        {"name": "m", "model": "gpt-5", "effortOptions": ["minimal", "low", "high"]}
+        """
+        let model = try JSONDecoder().decode(ChatModel.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(model.effortOptions, ["minimal", "low", "high"])
+    }
+
+    func testModelDecodesWithoutEffortOptions() throws {
+        let json = "{\"name\": \"m\", \"model\": \"gpt-4o\"}"
+        let model = try JSONDecoder().decode(ChatModel.self, from: json.data(using: .utf8)!)
+        XCTAssertNil(model.effortOptions)
+    }
+}

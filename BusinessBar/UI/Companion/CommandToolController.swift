@@ -12,12 +12,18 @@ struct CommandApprovalRequest: Identifiable {
     enum Decision: Sendable {
         case allowOnce
         case alwaysThisSession
+        /// Persists an allow prefix rule; offered on the card so repeat
+        /// commands stop asking across sessions too.
+        case alwaysAllowPersistent
         case denied
     }
 
     let id = UUID()
     let command: String
     let reason: CommandRisk
+    /// Risk class and non-flag targets, for the card's detail line.
+    let category: CommandCategory
+    let targets: [String]
     let workspaceRoot: String
     let completion: @MainActor (Decision) -> Void
 }
@@ -113,10 +119,19 @@ final class CommandToolController: ObservableObject {
     func decide(_ decision: CommandApprovalRequest.Decision) {
         guard let request = approvalRequest else { return }
         approvalRequest = nil
-        if decision == .alwaysThisSession {
+        switch decision {
+        case .alwaysThisSession:
             // The full command becomes a Tier 1 prefix rule: the exact
             // command and anything extending it as new arguments.
             sessionPrefixes.append(request.command)
+        case .alwaysAllowPersistent:
+            var prefixes = CompanionConfigService.commandAllowedPrefixes()
+            if !prefixes.contains(request.command) {
+                prefixes.append(request.command)
+                CompanionConfigService.setCommandAllowedPrefixes(prefixes)
+            }
+        case .allowOnce, .denied:
+            break
         }
         request.completion(decision)
     }
@@ -129,13 +144,17 @@ final class CommandToolController: ObservableObject {
     /// 5-minute timeout denies.
     private func requestApproval(
         command: String,
-        reason: CommandRisk
+        reason: CommandRisk,
+        category: CommandCategory,
+        targets: [String]
     ) async -> CommandApprovalRequest.Decision {
         let decision = await withCheckedContinuation { (continuation: CheckedContinuation<CommandApprovalRequest.Decision, Never>) in
             let root = effectiveWorkspaceRoot
             let request = CommandApprovalRequest(
                 command: command,
                 reason: reason,
+                category: category,
+                targets: targets,
                 workspaceRoot: root,
                 completion: { decision in
                     continuation.resume(returning: decision)
@@ -242,10 +261,18 @@ final class CommandToolController: ObservableObject {
         let resolved = CommandPermissionParser.resolve(
             command,
             sessionPrefixes: sessionPrefixes,
-            mode: sessionPermissionMode
+            mode: sessionPermissionMode,
+            settings: CompanionConfigService.commandPermissionSettings()
         )
         if resolved.refused {
-            return "denied: command runner is set to Deny for this session. Ask the user to switch it in the chat header."
+            let hint: String
+            if resolved.category == .fileDelete,
+               CompanionConfigService.commandCategoryMode(.fileDelete) == .deny {
+                hint = " File deletion is set to Deny in Preferences."
+            } else {
+                hint = ""
+            }
+            return "denied: command runner refused this command for this session.\(hint)"
         }
         var permission = resolved.permission
 
@@ -256,7 +283,12 @@ final class CommandToolController: ObservableObject {
         case .sessionApproved:
             argv = ShellExecutor.argv(for: permission, command: command)
         case .needsConfirmation(let reason):
-            let decision = await requestApproval(command: command, reason: reason)
+            let decision = await requestApproval(
+                command: command,
+                reason: reason,
+                category: resolved.category,
+                targets: CommandPermissionParser.categorize(command).targets
+            )
             guard decision != .denied else {
                 return "denied by user"
             }
