@@ -253,9 +253,9 @@ enum CompanionConfigService {
     /// migrated models exactly once so removing the old backend section
     /// loses nothing.
     static func chatProviders() -> [ChatProvider] {
-        let stored = chatProviderStore.load()
+        var stored = chatProviderStore.load()
         if !stored.isEmpty {
-            attachLegacyFieldsIfNeeded(to: stored)
+            attachLegacyFieldsIfNeeded(to: &stored)
             return seedLegacyACPProviderIfNeeded(into: stored)
         }
         // No providers at all yet: a legacy ACP setup still deserves its
@@ -331,7 +331,11 @@ enum CompanionConfigService {
     /// toggle and effort, headers) into migrated providers and their models.
     /// Runs once across launches: after it fires, per-model edits stick and
     /// the old defaults are never re-read.
-    private static func attachLegacyFieldsIfNeeded(to providers: [ChatProvider]) {
+    ///
+    /// Mutates the array in place: the ACP seed below appends to the same
+    /// array and saves it, so a lost mutation here would wipe the attach
+    /// from the store while the flag marks it done.
+    private static func attachLegacyFieldsIfNeeded(to providers: inout [ChatProvider]) {
         guard !legacyFieldsAttached() else { return }
         // Nothing to copy when the old backend was never configured.
         guard !model().isEmpty else {
@@ -342,24 +346,23 @@ enum CompanionConfigService {
         let prompt = systemPrompt()
         let reasoningOn = reasoningEnabled()
         let effort = reasoningEffort()
-        var updated = providers
-        for index in updated.indices {
+        for index in providers.indices {
             if !headers.isEmpty {
-                try? setProviderHeaders(id: updated[index].id, headers)
+                try? setProviderHeaders(id: providers[index].id, headers)
             }
-            for modelIndex in updated[index].models.indices where updated[index].models[modelIndex].systemPrompt == nil
-                && updated[index].models[modelIndex].reasoningEnabled == nil {
+            for modelIndex in providers[index].models.indices where providers[index].models[modelIndex].systemPrompt == nil
+                && providers[index].models[modelIndex].reasoningEnabled == nil {
                 if !prompt.isEmpty {
-                    updated[index].models[modelIndex].systemPrompt = prompt
+                    providers[index].models[modelIndex].systemPrompt = prompt
                 }
-                updated[index].models[modelIndex].reasoningEnabled = reasoningOn
-                if reasoningOn, updated[index].models[modelIndex].reasoningEffort == nil,
+                providers[index].models[modelIndex].reasoningEnabled = reasoningOn
+                if reasoningOn, providers[index].models[modelIndex].reasoningEffort == nil,
                    !effort.isEmpty {
-                    updated[index].models[modelIndex].reasoningEffort = effort
+                    providers[index].models[modelIndex].reasoningEffort = effort
                 }
             }
         }
-        chatProviderStore.save(updated)
+        chatProviderStore.save(providers)
         markLegacyFieldsAttached()
     }
 
