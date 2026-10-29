@@ -641,6 +641,9 @@ final class StatusBarController: NSObject {
         for template in TemplateStore().load() {
             let shortcutName = name.rewriteTemplate(template.id)
             guard KeyboardShortcuts.getShortcut(for: shortcutName) != nil else { continue }
+            // onKeyUp appends, so a stale handler from the previous sync would
+            // fire alongside the new one and start duplicate rewrites.
+            KeyboardShortcuts.removeHandler(for: shortcutName)
             KeyboardShortcuts.onKeyUp(for: shortcutName) { [weak self] in
                 guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion),
                       let client = CompanionConfigService.makeClient(forModelID: template.modelID) else { return }
