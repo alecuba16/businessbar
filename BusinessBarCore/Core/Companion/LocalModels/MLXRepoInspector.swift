@@ -201,14 +201,26 @@ public enum MLXRepoInspector {
             }
         }
 
-        // The chat template in tokenizer_config.json decides the reasoning
-        // shape; the config and architecture act as fallbacks.
-        let tokenizerConfig = await fetchConfigJSON(
-            repoID: trimmed,
-            file: "tokenizer_config.json"
-        )
-        let chatTemplate = (tokenizerConfig?["chat_template"] as? String)
-            ?? (tokenizerConfig?["chat_template_jinja"] as? String)
+        // The chat template decides the reasoning shape. Newer Qwen3
+        // repos ship it as a standalone chat_template.jinja instead of
+        // inside tokenizer_config.json, so the standalone file is fetched
+        // first; the JSON layouts follow. Config and architecture act as
+        // fallbacks.
+        var chatTemplate: String?
+        if let raw = await fetchRawText(repoID: trimmed, file: "chat_template.jinja"),
+           !raw.isEmpty {
+            chatTemplate = raw
+        } else {
+            for file in ["chat_template.json", "tokenizer_config.json"] {
+                if let json = await fetchConfigJSON(repoID: trimmed, file: file),
+                   let template = (json["chat_template"] as? String)
+                    ?? (json["chat_template_jinja"] as? String),
+                   !template.isEmpty {
+                    chatTemplate = template
+                    break
+                }
+            }
+        }
         let reasoning = MLXReasoningInspector.capability(
             chatTemplate: chatTemplate,
             configJSON: configJSON,
@@ -241,5 +253,20 @@ public enum MLXRepoInspector {
               (200..<300).contains(http.statusCode)
         else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    /// Fetches a raw text file from the repo root, for standalone jinja
+    /// chat templates that are not JSON.
+    static func fetchRawText(repoID: String, file: String) async -> String? {
+        guard let url = URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(file)") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode)
+        else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }

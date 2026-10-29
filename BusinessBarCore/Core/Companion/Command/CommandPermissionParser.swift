@@ -472,7 +472,7 @@ public struct CommandPermissionParser: Sendable {
             }
             return CommandClassification(category: .readOnly, targets: targets)
         }
-        if deletionBinaries.contains(lowered) {
+        if deletionBinaries.contains(lowered) || hasDeletionFlag(arguments) {
             return CommandClassification(category: .fileDelete, targets: targets)
         }
         if packageBinaries.contains(lowered) {
@@ -484,7 +484,7 @@ public struct CommandPermissionParser: Sendable {
         if fileWriteBinaries.contains(lowered) {
             return CommandClassification(category: .fileWrite, targets: targets)
         }
-        if allowlist.contains(lowered) {
+        if allowlist.contains(lowered), !hasWriteFlag(arguments) {
             return CommandClassification(category: .readOnly, targets: targets)
         }
         return CommandClassification(category: .unknown, targets: targets)
@@ -502,6 +502,18 @@ public struct CommandPermissionParser: Sendable {
         }
         guard index < arguments.count else { return nil }
         return arguments[index].lowercased()
+    }
+
+    /// Deletion disguised inside a nominally read-only command:
+    /// `find -delete` / `-ok` / `-okdir`, or `xargs rm`. Without this
+    /// check an Allow dial on read-only would auto-approve deletion.
+    static func hasDeletionFlag(_ argv: [String]) -> Bool {
+        let deletionFlags: Set<String> = ["-delete", "-ok", "-okdir"]
+        for token in argv.dropFirst() {
+            if deletionFlags.contains(token) { return true }
+            if token.lowercased() == "rm" { return true }
+        }
+        return false
     }
 
     /// Highest-risk category among the compound segments; nil when the

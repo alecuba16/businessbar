@@ -613,6 +613,94 @@ final class MLXReasoningInspectorTests: XCTestCase {
         let decoded = try JSONDecoder().decode(MLXReasoningCapability.self, from: data)
         XCTAssertEqual(decoded, capability)
     }
+
+    func testSnapshotReadsStandaloneJinjaTemplate() throws {
+        // Real-world layout: newer Qwen3 repos (e.g. Qwen3-VL on
+        // mlx-community) ship the chat template as a standalone
+        // chat_template.jinja; tokenizer_config.json carries no template.
+        let dir = try makeSnapshotDir(modelID: "mlx-community/test-jinja") { dir in
+            try "{% if enable_thinking %}".write(
+                to: dir.appendingPathComponent("chat_template.jinja"),
+                atomically: true, encoding: .utf8
+            )
+            try "{\"vocab\": 1}".write(
+                to: dir.appendingPathComponent("tokenizer_config.json"),
+                atomically: true, encoding: .utf8
+            )
+            try "{\"architectures\": [\"Qwen3VLForConditionalGeneration\"]}".write(
+                to: dir.appendingPathComponent("config.json"),
+                atomically: true, encoding: .utf8
+            )
+        }
+        let capability = MLXReasoningInspector.capabilityFromSnapshot(
+            modelID: "mlx-community/test-jinja",
+            home: dir.path
+        )
+        XCTAssertTrue(capability.supported)
+        XCTAssertEqual(capability.shape, .thinkingToggle)
+    }
+
+    func testSnapshotReadsTemplateFromChatTemplateJSON() throws {
+        // Second layout: chat_template.json holding the template text.
+        let dir = try makeSnapshotDir(modelID: "mlx-community/test-json-template") { dir in
+            let json = ["chat_template": "{{ reasoning_effort }}"]
+            let data = try JSONSerialization.data(withJSONObject: json)
+            try data.write(to: dir.appendingPathComponent("chat_template.json"))
+            try "{\"vocab\": 1}".write(
+                to: dir.appendingPathComponent("tokenizer_config.json"),
+                atomically: true, encoding: .utf8
+            )
+            try "{\"architectures\": [\"GptOssForCausalLM\"]}".write(
+                to: dir.appendingPathComponent("config.json"),
+                atomically: true, encoding: .utf8
+            )
+        }
+        let capability = MLXReasoningInspector.capabilityFromSnapshot(
+            modelID: "mlx-community/test-json-template",
+            home: dir.path
+        )
+        XCTAssertTrue(capability.supported)
+        XCTAssertEqual(capability.shape, .effortLevels)
+        XCTAssertEqual(capability.effortOptions, ["low", "medium", "high"])
+    }
+
+    func testSnapshotWithoutAnyTemplateReportsNone() throws {
+        let dir = try makeSnapshotDir(modelID: "mlx-community/test-plain") { dir in
+            try "{\"vocab\": 1}".write(
+                to: dir.appendingPathComponent("tokenizer_config.json"),
+                atomically: true, encoding: .utf8
+            )
+            try "{\"architectures\": [\"LlamaForCausalLM\"]}".write(
+                to: dir.appendingPathComponent("config.json"),
+                atomically: true, encoding: .utf8
+            )
+        }
+        let capability = MLXReasoningInspector.capabilityFromSnapshot(
+            modelID: "mlx-community/test-plain",
+            home: dir.path
+        )
+        XCTAssertFalse(capability.supported)
+    }
+
+    /// Builds a fake HF cache layout for one model id:
+    /// <home>/.cache/huggingface/hub/models--<id>/snapshots/<sha>/...
+    private func makeSnapshotDir(
+        modelID: String,
+        _ fill: (URL) throws -> Void
+    ) throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bb-tests-\(UUID().uuidString)")
+        let repoDir = "models--" + modelID.replacingOccurrences(of: "/", with: "--")
+        let snapshot = root
+            .appendingPathComponent(".cache/huggingface/hub")
+            .appendingPathComponent(repoDir)
+            .appendingPathComponent("snapshots/deadbeef")
+        try FileManager.default.createDirectory(
+            at: snapshot, withIntermediateDirectories: true
+        )
+        try fill(snapshot)
+        return root
+    }
 }
 
 // MARK: - EffortVocabularyTests
@@ -865,6 +953,97 @@ final class CommandCategoryTests: XCTestCase {
         if case .needsConfirmation = resolved.permission {} else {
             XCTFail("expected needsConfirmation, got \(resolved.permission)")
         }
+    }
+
+    func testAdversarialSudoWrapperStillAsks() {
+        // Wrappers hide the real binary from the allowlist; even a
+        // readOnly Allow dial must not auto-approve them.
+        let settings = CommandPermissionSettings(
+            categoryModes: [.readOnly: .allow],
+            allowedPrefixes: [],
+            deniedPrefixes: []
+        )
+        for command in ["sudo cat /etc/hosts", "sh -c 'ls /tmp'", "bash -c 'pwd'"] {
+            let resolved = CommandPermissionParser.resolve(
+                command,
+                sessionPrefixes: [],
+                mode: .ask,
+                settings: settings
+            )
+            XCTAssertFalse(resolved.refused)
+            if case .needsConfirmation = resolved.permission {} else {
+                XCTFail("expected needsConfirmation for \(command), got \(resolved.permission)")
+            }
+        }
+    }
+
+    func testAdversarialFindDeleteCategorizes() {
+        // find with -delete is deletion dressed as a read-only binary.
+        let classification = CommandPermissionParser.categorize("find . -name '*.log' -delete")
+        XCTAssertEqual(classification.category, .fileDelete)
+        // Under the mode-aware resolve it must never auto-approve.
+        let resolved = CommandPermissionParser.resolve(
+            "find . -name '*.log' -delete",
+            sessionPrefixes: [],
+            mode: .allow,
+            settings: CommandPermissionSettings()
+        )
+        if case .needsConfirmation = resolved.permission {} else {
+            XCTFail("expected needsConfirmation, got \(resolved.permission)")
+        }
+    }
+
+    func testAdversarialSubstitutionStillAsks() {
+        // Command substitution bypasses classification entirely; it must
+        // confirm regardless of dials.
+        let settings = CommandPermissionSettings(
+            categoryModes: [.readOnly: .allow, .fileWrite: .allow],
+            allowedPrefixes: [],
+            deniedPrefixes: []
+        )
+        for command in [
+            "echo $(cat /etc/hosts)",
+            "ls `pwd`",
+            "ls <(git status)",
+        ] {
+            let resolved = CommandPermissionParser.resolve(
+                command,
+                sessionPrefixes: [],
+                mode: .allow,
+                settings: settings
+            )
+            XCTAssertFalse(resolved.refused)
+            if case .needsConfirmation = resolved.permission {} else {
+                XCTFail("expected needsConfirmation for \(command), got \(resolved.permission)")
+            }
+        }
+    }
+
+    func testAdversarialCredentialsReadDenyRuleWantsAskNotRefuse() {
+        // A deny rule refuses (no card); the deny-wins credential check
+        // under Allow asks (card shown). Both paths must exist.
+        let allowed = CommandPermissionParser.resolve(
+            "cat .env",
+            sessionPrefixes: [],
+            mode: .allow,
+            settings: CommandPermissionSettings()
+        )
+        XCTAssertFalse(allowed.refused)
+        if case .needsConfirmation = allowed.permission {} else {
+            XCTFail("expected needsConfirmation, got \(allowed.permission)")
+        }
+
+        let denied = CommandPermissionParser.resolve(
+            "cat .env",
+            sessionPrefixes: [],
+            mode: .allow,
+            settings: CommandPermissionSettings(
+                categoryModes: [:],
+                allowedPrefixes: [],
+                deniedPrefixes: ["cat .env"]
+            )
+        )
+        XCTAssertTrue(denied.refused)
     }
 }
 

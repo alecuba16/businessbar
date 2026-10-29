@@ -145,10 +145,13 @@ public enum MLXReasoningInspector {
         return .none
     }
 
-    /// Reads the capability from a downloaded model's snapshot directory:
-    /// `tokenizer_config.json` (chat template) plus `config.json`
-    /// (architecture). Returns .none when files are missing, the same value
-    /// the Check flow would report for a repo without reasoning markers.
+    /// Reads the capability from a downloaded model's snapshot directory.
+    /// Chat templates ship in more than one place: newer Qwen3 repos keep
+    /// the template in a standalone `chat_template.jinja` (or
+    /// `chat_template.json`) instead of inside `tokenizer_config.json`, so
+    /// all three are consulted. Returns .none when files are missing, the
+    /// same value the Check flow would report for a repo without
+    /// reasoning markers.
     public static func capabilityFromSnapshot(
         modelID: String,
         home: String = NSHomeDirectory()
@@ -161,18 +164,35 @@ public enum MLXReasoningInspector {
             return .none
         }
 
-        let tokenizerConfig = decodeJSON(
-            snapshot.appendingPathComponent("tokenizer_config.json")
-        )
+        let template = snapshotChatTemplate(snapshot)
         let config = decodeJSON(snapshot.appendingPathComponent("config.json"))
-        let template = (tokenizerConfig?["chat_template"] as? String)
-            ?? (tokenizerConfig?["chat_template_jinja"] as? String)
         let architectures = (config?["architectures"] as? [String]) ?? []
         return capability(
             chatTemplate: template,
             configJSON: config,
             architecture: architectures.first ?? "unknown"
         )
+    }
+
+    /// Chat template text from the snapshot, checking the three layouts
+    /// Hugging Face repos use. Returns nil when none carries a template.
+    static func snapshotChatTemplate(_ snapshot: URL) -> String? {
+        // Standalone jinja file wins: it is the template verbatim.
+        if let jinja = try? String(
+            contentsOf: snapshot.appendingPathComponent("chat_template.jinja"),
+            encoding: .utf8
+        ), !jinja.isEmpty {
+            return jinja
+        }
+        for name in ["chat_template.json", "tokenizer_config.json"] {
+            if let json = decodeJSON(snapshot.appendingPathComponent(name)),
+               let template = (json["chat_template"] as? String)
+                ?? (json["chat_template_jinja"] as? String),
+               !template.isEmpty {
+                return template
+            }
+        }
+        return nil
     }
 
     private static func decodeJSON(_ url: URL) -> [String: Any]? {
