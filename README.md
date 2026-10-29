@@ -30,7 +30,7 @@ A unified macOS menu bar application combining three essential functionalities:
 - ⌨️ Per-template rewrite shortcuts: each prompt template gets its own global shortcut for the selected text, with a toast confirming the trigger and the result
 - ✅ Preferences show a Saved indicator after every change is stored (UserDefaults, Keychain and file-backed settings included), and the Companion tab has the same Accessibility permission check and management as the Badges tab
 - 💬 Floating chat panel that works over fullscreen apps, with markdown rendering (headings, code blocks, tables, links, images), a streaming response with a live status line, and retry on errors. The send button turns into a stop button the moment you submit: it shows Submitting while the local server warms up, and stops generation once the stream runs. The chat input is a native composer: text wraps to the box width, a scrollbar stays visible when the text overflows, and the box follows the caret while you type. An arrow button next to the paperclip toggles a tall input for longer prompts, the panel remembers the choice, and the tall input grows with the window; Shift+Return and Option+Return insert newlines while plain Return sends
-- 🔀 Providers: each provider is an endpoint (base URL, Keychain key, headers) holding multiple models (system prompt, reasoning toggle, effort with custom values) you can switch mid-conversation from the chat picker; existing setup migrates automatically and the old backend section is gone
+- 🔀 Providers: three kinds side by side, OpenAI-compatible endpoints (base URL, Keychain key, headers) holding multiple models (system prompt, reasoning toggle, effort with custom values), the local MLX server, and ACP agents over stdio with their own command line; switch mid-conversation from the chat picker; existing setup migrates automatically and the old backend section is gone
 - ✍️ Rewrite actions: templates can replace the selection, insert the reply right after it, or show the overlay; Format for Slack template emits Slack mrkdwn
 - 🎚️ Per-request reasoning effort: pick it per rewrite template, per model, or per chat message, custom values included
 - ✏️ Edit last prompt: an Edit button on the latest prompt bubble pulls your previous question back into the editor, tweak it, and resend over the remaining history; Cmd+N starts a fresh session
@@ -210,13 +210,14 @@ BusinessBar requires the following permissions:
 3. Select which calendars to monitor in Preferences
 4. (Optional) Add apps to monitor for notification badges
 5. (Optional) Grant Accessibility permission for badge monitoring
-6. (Optional) Configure the LLM Companion: enable it in Preferences, set the
-   backend (OpenAI-compatible API or an ACP agent command such as
-   `gemini --acp`), record the chat panel shortcut (Cmd+B by default) and
-   assign a shortcut to each rewrite template you want. For the OpenAI
-   backend, add a provider (base URL, API key, headers) and models under it
-   (model string, system prompt, Reasoning toggle with effort), then pick
-   the default chat model. Default templates
+6. (Optional) Configure the LLM Companion: enable it in Preferences, then add
+   providers. Three kinds exist: OpenAI-compatible (base URL, API key,
+   headers) with models under it (model string, system prompt, Reasoning
+   toggle with effort), the local MLX server (Add Local Models opens its
+   setup), and ACP agents over stdio with their own command line (for
+   example `gemini --acp`). Pick the default chat model or agent, record
+   the chat panel shortcut (Cmd+B by default) and
+   assign a shortcut to each rewrite template you want. Default templates
    ask the model to wrap the result in `<output></output>` tags; the overlay
    shows only the tagged text, with no model commentary. A template can also
    pick a direct action: Replace swaps the tagged reply into the selection in

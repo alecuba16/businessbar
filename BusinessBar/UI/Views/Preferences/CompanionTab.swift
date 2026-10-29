@@ -550,6 +550,10 @@ struct ACPAgentEditorSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
+                    // A trailing space would break the subprocess spawn, so
+                    // the command line is trimmed before it is stored.
+                    agent.name = agent.name.trimmingCharacters(in: .whitespaces)
+                    agent.acpCommand = agent.acpCommand.trimmingCharacters(in: .whitespaces)
                     agent.acpArguments = argumentsText
                         .split(whereSeparator: { $0.isWhitespace })
                         .map(String.init)

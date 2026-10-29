@@ -101,12 +101,12 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
     /// Empty command means the agent is not configured yet.
     public var acpCommand: String
     public var acpArguments: [String]
+    /// Legacy flag kept so a stored provider decodes after downgrade; new
+    /// writes leave it out.
+    public var isLocalMLX: Bool?
     /// Header pairs sent with every request to this provider. Values can be
     /// secrets, so they are stored in the Keychain as JSON next to the key,
     /// never inside this blob.
-    public var isLocalMLX: Bool?
-    /// Legacy flag kept so a stored provider decodes after downgrade; new
-    /// writes leave it out.
     public var headers: [HeaderPair]?
 
     public struct HeaderPair: Codable, Equatable, Hashable, Sendable {
