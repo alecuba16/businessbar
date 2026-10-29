@@ -17,14 +17,11 @@ private final class AccessibilityPermissionModel: ObservableObject {
 // MARK: - CompanionTab
 
 /// Preferences tab for the LLM Companion: enable/disable, shortcuts,
-/// backend configuration and prompt templates.
+/// provider configuration and prompt templates.
 struct CompanionTab: View {
     @AppStorage(Constants.Defaults.featureCompanion) private var companionEnabled = true
     @StateObject private var accessibilityPermission = AccessibilityPermissionModel()
 
-    @State private var backend: CompanionConfigService.Backend
-    @State private var acpCommandText: String
-    @State private var acpArgumentsText: String
     @State private var historyMaxAgeDays: Int
     @State private var historyMaxSessions: Int
     @State private var templates: [PromptTemplate]
@@ -33,6 +30,8 @@ struct CompanionTab: View {
     @State private var keychainError: String?
     @State private var providers: [ChatProvider]
     @State private var editingProvider: ChatProvider?
+    @State private var editingACPProvider: ChatProvider?
+    @State private var showsACPProviderEditor = false
     @State private var editingModel: (provider: ChatProvider, model: ChatModel)?
     @State private var showsProviderEditor = false
     @State private var showsModelEditor = false
@@ -41,10 +40,6 @@ struct CompanionTab: View {
     private let templateStore = TemplateStore()
 
     init() {
-        let defaults = UserDefaults.standard
-        _backend = State(initialValue: CompanionConfigService.backend())
-        _acpCommandText = State(initialValue: CompanionConfigService.acpCommand())
-        _acpArgumentsText = State(initialValue: CompanionConfigService.acpArguments().joined(separator: " "))
         _historyMaxAgeDays = State(initialValue: CompanionConfigService.historyMaxAgeDays())
         _historyMaxSessions = State(initialValue: CompanionConfigService.historyMaxSessions())
         _templates = State(initialValue: TemplateStore().load())
@@ -70,33 +65,22 @@ struct CompanionTab: View {
                     Text("The chat panel shortcut is predefined. Rewrite templates get their own shortcut below.")
                 }
 
-                // MARK: Backend
-                Section {
-                    Picker("Backend", selection: $backend) {
-                        Text("OpenAI-compatible API").tag(CompanionConfigService.Backend.openai)
-                        Text("ACP agent (stdio)").tag(CompanionConfigService.Backend.acp)
-                    }
-                    .onChange(of: backend) { _, newValue in
-                        CompanionConfigService.setBackend(newValue)
-                    }
-
-                    if backend == .acp {
-                        acpFields
-                    }
-                } header: {
-                    Text("Model Backend")
-                } footer: {
-                    Text(backend == .openai
-                        ? "OpenAI-compatible endpoints are configured as providers below."
-                        : "Runs a local ACP agent over stdio, for example 'gemini --acp' or 'claude --acp'. The process starts with the chat panel and stops when it closes.")
-                }
-
-                if backend == .openai, !providers.isEmpty {
-                    // MARK: Default chat model
+                // MARK: Default chat model
+                // Agents count too: an agents-only setup still needs the
+                // picker to select one.
+                if providers.contains(where: { !$0.models.isEmpty || $0.kind == .acpAgent }) {
                     Section {
                         Picker("Default chat model", selection: Binding(
-                            get: { CompanionConfigService.selectedModel()?.model.id },
-                            set: { newValue in
+                            get: { () -> UUID? in
+                                // The stored selection may point at an agent;
+                                // the picker then shows the agent entry so the
+                                // current state stays visible.
+                                if let agent = CompanionConfigService.selectedACPProvider() {
+                                    return agent.id
+                                }
+                                return CompanionConfigService.selectedModel()?.model.id
+                            },
+                            set: { (newValue: UUID?) in
                                 if let newValue {
                                     CompanionConfigService.setSelectedModelProfileID(newValue)
                                     providers = CompanionConfigService.chatProviders()
@@ -104,9 +88,13 @@ struct CompanionTab: View {
                             }
                         )) {
                             ForEach(providers) { provider in
-                                Section(provider.name) {
-                                    ForEach(provider.models) { model in
-                                        Text(model.name).tag(Optional(model.id))
+                                if provider.kind == .acpAgent {
+                                    Text(provider.name + " (agent)").tag(Optional(provider.id))
+                                } else {
+                                    Section(provider.name) {
+                                        ForEach(provider.models) { model in
+                                            Text(model.name).tag(Optional(model.id))
+                                        }
                                     }
                                 }
                             }
@@ -114,49 +102,54 @@ struct CompanionTab: View {
                     } header: {
                         Text("Chat")
                     } footer: {
-                        Text("Used by the chat panel and rewrite shortcuts when no per-message model is picked.")
+                        Text("Used by the chat panel and rewrite shortcuts when no per-message model is picked. Picking an ACP agent switches chat to that agent.")
                     }
                 }
 
                 // MARK: Providers
-                if backend == .openai {
-                    Section {
-                        ForEach(providers) { provider in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(provider.name)
-                                            .fontWeight(.medium)
-                                        Text(provider.baseURL)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    if provider.isLocalMLX == true {
-                                        Text("Local")
-                                            .font(.caption2)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.accentColor.opacity(0.15))
-                                            .clipShape(Capsule())
-                                    }
-                                    Button("Edit") {
+                Section {
+                    ForEach(providers) { provider in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(provider.name)
+                                        .fontWeight(.medium)
+                                    Text(provider.kind == .acpAgent
+                                         ? agentCommandLine(provider)
+                                         : provider.baseURL)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Text(provider.kind.label)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.accentColor.opacity(0.15))
+                                    .clipShape(Capsule())
+                                Button("Edit") {
+                                    if provider.kind == .acpAgent {
+                                        editingACPProvider = provider
+                                        showsACPProviderEditor = true
+                                    } else {
                                         editingProvider = provider
                                         showsProviderEditor = true
                                     }
-                                    .controlSize(.small)
-                                    Button {
-                                        CompanionConfigService.deleteProvider(id: provider.id)
-                                        providers = CompanionConfigService.chatProviders()
-                                    } label: {
-                                        Image(systemName: "trash")
-                                            .foregroundColor(.red)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Delete this provider and its models")
                                 }
+                                .controlSize(.small)
+                                Button {
+                                    CompanionConfigService.deleteProvider(id: provider.id)
+                                    providers = CompanionConfigService.chatProviders()
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundColor(.red)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Delete this provider and its models")
+                            }
 
+                            if provider.kind != .acpAgent {
                                 ForEach(provider.models) { model in
                                     HStack {
                                         Text(model.name)
@@ -192,27 +185,38 @@ struct CompanionTab: View {
                                 .controlSize(.small)
                                 .padding(.leading, 12)
                             }
-                            .padding(.vertical, 2)
                         }
-
-                        HStack {
-                            Button("Add Provider") {
-                                editingProvider = nil
-                                showsProviderEditor = true
-                            }
-                            Button("Add Local Models") {
-                                showsLocalModels = true
-                            }
-                        }
-                    } header: {
-                        Text("Providers")
-                    } footer: {
-                        Text("Each provider is an endpoint with its own key and one or more models. The model with the checkmark is the chat default; rewrite templates follow it. Add Local Models opens the on-device setup with its own downloads.")
+                        .padding(.vertical, 2)
                     }
+
+                    HStack {
+                        Button("Add OpenAI-compatible") {
+                            editingProvider = nil
+                            showsProviderEditor = true
+                        }
+                        Button("Add Local Models") {
+                            showsLocalModels = true
+                        }
+                        Button("Add ACP Agent") {
+                            editingACPProvider = ChatProvider(
+                                name: "",
+                                baseURL: "",
+                                models: [],
+                                kind: .acpAgent
+                            )
+                            showsACPProviderEditor = true
+                        }
+                    }
+                } header: {
+                    Text("Providers")
+                } footer: {
+                    Text("Three kinds: OpenAI-compatible endpoints with their own key and models, the on-device Local MLX server (Add Local Models opens its setup), and ACP agents over stdio. The checkmark marks the chat default; picking an ACP agent in the Chat picker switches the panel to it.")
                 }
 
                 // MARK: Search
-                if backend == .openai {
+                // Tools apply to OpenAI-compatible endpoints; ACP agents
+                // negotiate their own capabilities.
+                if CompanionConfigService.selectedACPProvider() == nil {
                     ToolsSection()
                 }
 
@@ -398,6 +402,19 @@ struct CompanionTab: View {
         }) {
             LocalModelsSheet()
         }
+        .sheet(isPresented: $showsACPProviderEditor) {
+            if let editingACPProvider {
+                ACPAgentEditorSheet(agent: editingACPProvider) { saved in
+                    if let index = providers.firstIndex(where: { $0.id == saved.id }) {
+                        providers[index] = saved
+                    } else {
+                        providers.append(saved)
+                    }
+                    CompanionConfigService.chatProviderStore.save(providers)
+                    showsACPProviderEditor = false
+                }
+            }
+        }
     }
 
     /// Display name for a template's pinned model, nil when the template
@@ -406,28 +423,14 @@ struct CompanionTab: View {
         guard let modelID,
               let provider = providers.first(where: { $0.model(id: modelID) != nil }),
               let model = provider.model(id: modelID) else { return nil }
-        return "Model: \(model.name)" + (provider.isLocalMLX == true ? " (local)" : "")
+        return "Model: \(model.name)" + (provider.kind == .localMLX ? " (local)" : "")
     }
 
-    private var acpFields: some View {
-        Group {
-            TextField("Agent command, for example gemini", text: $acpCommandText)
-                .onChange(of: acpCommandText) { _, newValue in
-                    CompanionConfigService.setACPCommand(newValue.trimmingCharacters(in: .whitespaces))
-                }
-
-            TextField("Arguments, space separated", text: $acpArgumentsText)
-                .onChange(of: acpArgumentsText) { _, newValue in
-                    let arguments = newValue.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-                    CompanionConfigService.setACPArguments(arguments)
-                }
-
-            if acpCommandText.trimmingCharacters(in: .whitespaces).isEmpty {
-                Text("Enter the agent command to use the companion.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
+    /// One-line command line for an agent row: command plus arguments, or a
+    /// placeholder while the agent is not configured yet.
+    private func agentCommandLine(_ provider: ChatProvider) -> String {
+        guard !provider.acpCommand.isEmpty else { return "No command set" }
+        return ([provider.acpCommand] + provider.acpArguments).joined(separator: " ")
     }
 
     /// Opens System Settings to the Accessibility privacy pane, the same
@@ -468,7 +471,7 @@ struct ProviderEditorSheet: View {
 
             TextField("Name", text: $provider.name)
             TextField("Base URL (ends in /v1)", text: $provider.baseURL)
-            if provider.isLocalMLX != true {
+            if provider.kind != .localMLX {
                 SecureField("API Key (stored in Keychain)", text: $apiKey)
             }
 
@@ -513,6 +516,56 @@ struct EditableHeaderPair: Identifiable {
     var id = UUID()
     var name: String
     var value: String
+}
+
+// MARK: - ACPAgentEditorSheet
+
+/// Sheet for one ACP agent provider: display name plus the stdio command
+/// line. The process starts with the chat panel and stops when it closes.
+struct ACPAgentEditorSheet: View {
+    @State private var agent: ChatProvider
+    @State private var argumentsText: String
+    let onSave: (ChatProvider) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    init(agent: ChatProvider, onSave: @escaping (ChatProvider) -> Void) {
+        var initial = agent
+        initial.kind = .acpAgent
+        _agent = State(initialValue: initial)
+        _argumentsText = State(initialValue: initial.acpArguments.joined(separator: " "))
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(agent.name.isEmpty ? "New ACP Agent" : "Edit ACP Agent")
+                .font(.headline)
+
+            TextField("Name", text: $agent.name)
+            TextField("Command, for example gemini", text: $agent.acpCommand)
+            TextField("Arguments, space separated, for example --acp", text: $argumentsText)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    agent.acpArguments = argumentsText
+                        .split(whereSeparator: { $0.isWhitespace })
+                        .map(String.init)
+                    onSave(agent)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(
+                    agent.name.trimmingCharacters(in: .whitespaces).isEmpty
+                        || agent.acpCommand.trimmingCharacters(in: .whitespaces).isEmpty
+                )
+            }
+        }
+        .frame(width: 420)
+        .padding()
+    }
 }
 
 // MARK: - ModelEditorSheet

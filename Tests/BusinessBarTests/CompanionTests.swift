@@ -447,3 +447,61 @@ final class CommandPermissionModeTests: XCTestCase {
         }
     }
 }
+
+final class ChatProviderKindTests: XCTestCase {
+    func testAgentProviderRoundTrip() throws {
+        let agent = ChatProvider(
+            name: "Gemini CLI",
+            baseURL: "",
+            models: [],
+            kind: .acpAgent,
+            acpCommand: "gemini",
+            acpArguments: ["--acp"]
+        )
+        let data = try JSONEncoder().encode([agent])
+        let decoded = try JSONDecoder().decode([ChatProvider].self, from: data)
+        XCTAssertEqual(decoded[0].kind, .acpAgent)
+        XCTAssertEqual(decoded[0].acpCommand, "gemini")
+        XCTAssertEqual(decoded[0].acpArguments, ["--acp"])
+    }
+
+    func testEncodedBlobCarriesKindNotLegacyFlag() throws {
+        let agent = ChatProvider(name: "A", baseURL: "", models: [], kind: .acpAgent)
+        let data = try JSONEncoder().encode(agent)
+        let raw = String(data: data, encoding: .utf8)!
+        XCTAssertTrue(raw.contains("\"kind\""))
+        XCTAssertFalse(raw.contains("\"isLocalMLX\""))
+    }
+
+    func testLegacyLocalFlagDecodesAsLocalKind() throws {
+        let blob = "[{\"id\":\"B69E128A-1E52-4D34-8E29-CD712AA3D782\",\"name\":\"Local\",\"baseURL\":\"http://127.0.0.1\",\"models\":[],\"isLocalMLX\":true}]"
+        let decoded = try JSONDecoder().decode([ChatProvider].self, from: blob.data(using: .utf8)!)
+        XCTAssertEqual(decoded[0].kind, .localMLX)
+        XCTAssertEqual(decoded[0].isLocalMLX, true)
+    }
+
+    func testLegacyBlobWithoutKindDecodesAsCompat() throws {
+        let blob = "[{\"id\":\"B69E128A-1E52-4D34-8E29-CD712AA3D782\",\"name\":\"Remote\",\"baseURL\":\"https://api.example.com/v1\",\"models\":[]}]"
+        let decoded = try JSONDecoder().decode([ChatProvider].self, from: blob.data(using: .utf8)!)
+        XCTAssertEqual(decoded[0].kind, .openAICompat)
+    }
+
+    func testLegacyProfileInitMapsKind() {
+        let localProfile = ModelProfile(
+            id: UUID(),
+            name: "L",
+            baseURL: "http://127.0.0.1",
+            model: "m",
+            isLocalMLX: true
+        )
+        XCTAssertEqual(ChatProvider(profile: localProfile).kind, .localMLX)
+
+        let remoteProfile = ModelProfile(
+            id: UUID(),
+            name: "R",
+            baseURL: "https://api.example.com/v1",
+            model: "m"
+        )
+        XCTAssertEqual(ChatProvider(profile: remoteProfile).kind, .openAICompat)
+    }
+}

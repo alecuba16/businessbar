@@ -58,7 +58,7 @@ struct ToolsSection: View {
         } header: {
             Text("Tools")
         } footer: {
-            Text("Tools the model can call on the OpenAI-compatible backend. Toggle a tool to offer or hide it; Configure edits its provider, keys, and defaults. ACP agents bring their own tools.")
+            Text("Tools the model can call. Toggle a tool to offer or hide it; Configure edits its provider, keys, and defaults. ACP agents bring their own tools.")
         }
         .sheet(isPresented: $showsWebSearchSheet) {
             WebSearchToolSheet()

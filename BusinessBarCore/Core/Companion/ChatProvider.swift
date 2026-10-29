@@ -61,10 +61,32 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
     }
 }
 
+// MARK: - ChatProviderKind
+
+/// How a provider talks to its model. OpenAI-compatible covers every remote
+/// endpoint speaking the Chat Completions schema; local MLX is the managed
+/// on-device server; ACP agents run over stdio with their own session
+/// protocol and never carry models inside the provider.
+public enum ChatProviderKind: String, Codable, Sendable, CaseIterable {
+    case openAICompat
+    case localMLX
+    case acpAgent
+
+    /// Short label for list rows and editor titles.
+    public var label: String {
+        switch self {
+        case .openAICompat: return "OpenAI-compatible"
+        case .localMLX: return "Local"
+        case .acpAgent: return "ACP agent"
+        }
+    }
+}
+
 // MARK: - ChatProvider
 
-/// A named OpenAI-compatible endpoint (base URL, per-provider API key in the
-/// Keychain, optional extra headers) hosting one or more models. Providers
+/// A named chat source: an OpenAI-compatible endpoint (base URL, per-provider
+/// API key in the Keychain, optional extra headers) hosting one or more
+/// models, an on-device MLX server, or an ACP agent over stdio. Providers
 /// and models evolve independently: swapping an endpoint keeps its models,
 /// adding a model needs no new key.
 public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable {
@@ -72,6 +94,13 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
     public var name: String
     public var baseURL: String
     public var models: [ChatModel]
+    /// How this provider talks to its model. Decodes from the legacy
+    /// `isLocalMLX` flag so stored blobs open unchanged.
+    public var kind: ChatProviderKind
+    /// Command and arguments for ACP agents, for example `gemini --acp`.
+    /// Empty command means the agent is not configured yet.
+    public var acpCommand: String
+    public var acpArguments: [String]
     /// Header pairs sent with every request to this provider. Values can be
     /// secrets, so they are stored in the Keychain as JSON next to the key,
     /// never inside this blob.
@@ -95,17 +124,29 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
         name: String,
         baseURL: String,
         models: [ChatModel],
+        kind: ChatProviderKind = .openAICompat,
+        acpCommand: String = "",
+        acpArguments: [String] = [],
         isLocalMLX: Bool? = nil
     ) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.models = models
+        self.kind = kind
+        self.acpCommand = acpCommand
+        self.acpArguments = acpArguments
         self.isLocalMLX = isLocalMLX
     }
 
+    /// Bridge for code written before kinds existed: true exactly when this
+    /// provider points at the managed MLX server.
+    public var isLocalMLXProvider: Bool {
+        kind == .localMLX
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case id, name, baseURL, models, isLocalMLX, headers
+        case id, name, baseURL, models, kind, acpCommand, acpArguments, isLocalMLX, headers
     }
 
     public init(from decoder: Decoder) throws {
@@ -114,6 +155,17 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
         name = try container.decode(String.self, forKey: .name)
         baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
         models = try container.decodeIfPresent([ChatModel].self, forKey: .models) ?? []
+        // Legacy blobs carry isLocalMLX instead of kind; the flag maps onto
+        // the kind so both fields keep decoding after a downgrade.
+        if let decodedKind = try container.decodeIfPresent(ChatProviderKind.self, forKey: .kind) {
+            kind = decodedKind
+        } else if try container.decodeIfPresent(Bool.self, forKey: .isLocalMLX) == true {
+            kind = .localMLX
+        } else {
+            kind = .openAICompat
+        }
+        acpCommand = try container.decodeIfPresent(String.self, forKey: .acpCommand) ?? ""
+        acpArguments = try container.decodeIfPresent([String].self, forKey: .acpArguments) ?? []
         isLocalMLX = try container.decodeIfPresent(Bool.self, forKey: .isLocalMLX)
         headers = try container.decodeIfPresent([HeaderPair].self, forKey: .headers)
     }
@@ -124,6 +176,9 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
         try container.encode(name, forKey: .name)
         try container.encode(baseURL, forKey: .baseURL)
         try container.encode(models, forKey: .models)
+        try container.encode(kind, forKey: .kind)
+        try container.encodeIfPresent(acpCommand.isEmpty ? nil : acpCommand, forKey: .acpCommand)
+        try container.encodeIfPresent(acpArguments.isEmpty ? nil : acpArguments, forKey: .acpArguments)
         try container.encodeIfPresent(isLocalMLX, forKey: .isLocalMLX)
     }
 
@@ -218,6 +273,7 @@ extension ChatProvider {
                     acceptsImages: false
                 )
             ],
+            kind: profile.isLocalMLX == true ? .localMLX : .openAICompat,
             isLocalMLX: profile.isLocalMLX
         )
     }

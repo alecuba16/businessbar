@@ -24,16 +24,38 @@ enum CompanionConfigService {
 
     // MARK: - Backend selection
 
-    /// Which LLM backend the companion uses.
+    /// Which LLM backend the companion uses. Kept for the migration read
+    /// below; the live value derives from the selected provider's kind now:
+    /// an ACP provider selected means ACP, anything else means OpenAI.
     enum Backend: String {
         case openai
         case acp
     }
 
+    /// The selected provider decides: an ACP agent provider routes chat
+    /// through the stdio client, every other kind speaks OpenAI-compatible.
+    /// Falls back to the stored legacy key once when no provider matches it,
+    /// so an existing ACP user keeps their backend until the seeded ACP
+    /// provider takes over (see `chatProviders()`).
     static func backend() -> Backend {
-        Backend(rawValue: UserDefaults.standard.string(forKey: Constants.Defaults.companionBackend) ?? "") ?? .openai
+        if selectedProvider()?.kind == .acpAgent {
+            return .acp
+        }
+        if legacyBackendIsACP(), selectedProvider() == nil {
+            return .acp
+        }
+        return .openai
     }
 
+    /// Stored legacy backend key, read once per call. After the ACP provider
+    /// migration seeds the entry, selection alone drives `backend()` and
+    /// this key stops mattering.
+    private static func legacyBackendIsACP() -> Bool {
+        UserDefaults.standard.string(forKey: Constants.Defaults.companionBackend) == Backend.acp.rawValue
+    }
+
+    /// Kept for a hypothetical downgrade and for tests: writes the legacy
+    /// key. New UI never calls it.
     static func setBackend(_ backend: Backend) {
         UserDefaults.standard.set(backend.rawValue, forKey: Constants.Defaults.companionBackend)
         SettingsSavedBus.announce()
@@ -234,7 +256,13 @@ enum CompanionConfigService {
         let stored = chatProviderStore.load()
         if !stored.isEmpty {
             attachLegacyFieldsIfNeeded(to: stored)
-            return stored
+            return seedLegacyACPProviderIfNeeded(into: stored)
+        }
+        // No providers at all yet: a legacy ACP setup still deserves its
+        // entry, so seed it before the OpenAI fallback below runs.
+        let seededACP = seedLegacyACPProviderIfNeeded(into: [])
+        if !seededACP.isEmpty {
+            return seededACP
         }
         // Seed from the legacy config once; empty model means the user never
         // configured the OpenAI backend, so nothing to seed.
@@ -258,6 +286,34 @@ enum CompanionConfigService {
         try? setProviderHeaders(id: seededProvider.id, customHeaders())
         markLegacyFieldsAttached()
         return [seededProvider]
+    }
+
+    /// One-time migration from the global ACP config (backend picker era)
+    /// to a provider entry. Runs when the legacy backend key says ACP and no
+    /// ACP provider exists yet; keeps the stored command and arguments and
+    /// selects the new provider so the effective backend never changes.
+    /// Returns the list including the seeded agent, unchanged when the
+    /// migration does not apply.
+    private static func seedLegacyACPProviderIfNeeded(into providers: [ChatProvider]) -> [ChatProvider] {
+        guard legacyBackendIsACP(),
+              !providers.contains(where: { $0.kind == .acpAgent }) else { return providers }
+        let command = acpCommand()
+        guard !command.isEmpty else { return providers }
+        let agent = ChatProvider(
+            name: ACPAgentConfiguration(command: command).agentName,
+            baseURL: "",
+            models: [],
+            kind: .acpAgent,
+            acpCommand: command,
+            acpArguments: acpArguments()
+        )
+        let updated = providers + [agent]
+        chatProviderStore.save(updated)
+        setSelectedModelProfileID(agent.id)
+        // Clear the legacy key so this seed never runs twice; selection owns
+        // the backend from here on.
+        UserDefaults.standard.removeObject(forKey: Constants.Defaults.companionBackend)
+        return updated
     }
 
     /// Legacy globals were copied into providers once; the flag makes the
@@ -307,9 +363,36 @@ enum CompanionConfigService {
         markLegacyFieldsAttached()
     }
 
-    /// The (provider, model) pair the chat panel uses; nil falls back to
-    /// the legacy single-model config.
+    /// The provider the stored selection points at: either a model's parent
+    /// or an ACP agent entry. Nil when nothing resolves.
+    static func selectedProvider() -> ChatProvider? {
+        let providers = chatProviders()
+        guard let storedID = UserDefaults.standard.string(forKey: Constants.Defaults.companionSelectedModelProfile),
+              let id = UUID(uuidString: storedID) else {
+            return nil
+        }
+        if let agent = providers.first(where: { $0.id == id && $0.kind == .acpAgent }) {
+            return agent
+        }
+        for provider in providers where provider.model(id: id) != nil {
+            return provider
+        }
+        return nil
+    }
+
+    /// The selected ACP agent, when the stored selection points at one.
+    /// Chat sends here instead of `selectedModel()`; nil means an
+    /// OpenAI-compatible model is selected (or nothing is).
+    static func selectedACPProvider() -> ChatProvider? {
+        guard let provider = selectedProvider(), provider.kind == .acpAgent else { return nil }
+        return provider
+    }
+
+    /// The (provider, model) pair the chat panel uses; nil when an ACP
+    /// agent is selected or nothing resolves. ACP agents have no models,
+    /// so callers switch on `selectedACPProvider()` first.
     static func selectedModel() -> (provider: ChatProvider, model: ChatModel)? {
+        if selectedACPProvider() != nil { return nil }
         let providers = chatProviders()
         guard !providers.isEmpty else { return nil }
         let storedID = UserDefaults.standard.string(forKey: Constants.Defaults.companionSelectedModelProfile)
@@ -322,14 +405,16 @@ enum CompanionConfigService {
             // A migrated selection still holds the legacy profile id, which
             // became the provider id; resolve it to that provider's first
             // model so the user keeps their chosen endpoint.
-            for provider in providers where provider.id == id {
+            for provider in providers
+            where provider.id == id && provider.kind != .acpAgent {
                 if let first = provider.models.first {
                     return (provider, first)
                 }
             }
         }
         // Fall back to the first provider's first model.
-        guard let provider = providers.first, let model = provider.models.first else { return nil }
+        guard let provider = providers.first(where: { $0.kind != .acpAgent }),
+              let model = provider.models.first else { return nil }
         return (provider, model)
     }
 
@@ -343,7 +428,7 @@ enum CompanionConfigService {
             baseURL: provider.baseURL,
             model: model.model,
             reasoningEffort: model.reasoningEffort,
-            isLocalMLX: provider.isLocalMLX
+            isLocalMLX: provider.kind == .localMLX
         )
     }
 
@@ -425,10 +510,11 @@ enum CompanionConfigService {
             name: "Local (MLX)",
             baseURL: MLXServerConfig.baseURLString(),
             models: [model],
+            kind: .localMLX,
             isLocalMLX: true
         )
         var providers = chatProviders()
-        if let index = providers.firstIndex(where: { $0.isLocalMLX == true }) {
+        if let index = providers.firstIndex(where: { $0.kind == .localMLX }) {
             var updated = provider
             updated.id = providers[index].id
             // Keep the existing model id when the catalog model has not
@@ -459,7 +545,16 @@ enum CompanionConfigService {
     /// local MLX companion model need the server up before their stream,
     /// even when the chat panel's selected model is remote.
     static func ensureLocalServer(forModelID modelID: UUID?) async throws {
-        guard backend() == .openai else { return }
+        // Only the local MLX preset ever needs the server up; ACP agents
+        // manage their own process and remote providers need nothing.
+        if let modelID {
+            if let provider = chatProviders().first(where: { $0.model(id: modelID) != nil }),
+               provider.kind != .localMLX {
+                return
+            }
+        } else if let selected = selectedProvider(), selected.kind != .localMLX {
+            return
+        }
         var pair: (provider: ChatProvider, model: ChatModel)?
         if let modelID {
             for provider in chatProviders() {
@@ -470,7 +565,7 @@ enum CompanionConfigService {
             }
         }
         guard let (provider, model) = pair ?? selectedModel(),
-              provider.isLocalMLX == true else { return }
+              provider.kind == .localMLX else { return }
         try await MLXServerManager.shared.ensureRunning(modelID: model.model)
     }
 
@@ -590,64 +685,56 @@ enum CompanionConfigService {
     static func isOpenAIConfigured() -> Bool {
         guard let (provider, model) = selectedModel() else { return false }
         let key = providerAPIKey(id: provider.id)
-        return !model.model.isEmpty && (provider.isLocalMLX == true || !key.isEmpty)
+        return !model.model.isEmpty && (provider.kind == .localMLX || !key.isEmpty)
     }
 
-    /// True when the ACP backend is usable: a command is set.
+    /// True when the selected ACP agent is usable: its command is set.
     static func isACPConfigured() -> Bool {
-        !acpCommand().isEmpty
+        guard let agent = selectedACPProvider() else { return false }
+        return !agent.acpCommand.isEmpty
     }
 
-    /// True when the selected backend is usable.
+    /// True when the selected provider is usable, whatever its kind.
     static func isConfigured() -> Bool {
-        switch backend() {
-        case .openai: return isOpenAIConfigured()
-        case .acp: return isACPConfigured()
+        if let agent = selectedACPProvider() {
+            return !agent.acpCommand.isEmpty
         }
+        return isOpenAIConfigured()
     }
 
-    /// Builds the client for the selected backend. Returns nil when not
+    /// Builds the client for the selected provider. Returns nil when not
     /// configured; callers surface a setup message.
     ///
-    /// ACP returns the same long-lived instance per call so the subprocess
-    /// and session survive across prompts; the panel controller owns its
-    /// lifecycle (shutdown on close).
+    /// ACP returns the same long-lived instance per configuration so the
+    /// subprocess and session survive across prompts; the panel controller
+    /// owns its lifecycle (shutdown on close).
     static func makeClient() -> LLMClient? {
-        switch backend() {
-        case .openai:
-            // Providers fully own the OpenAI endpoint now: the default
-            // model's provider carries base URL, key, headers and per-model
-            // reasoning, so the rewrite path and the chat panel resolve the
-            // same way.
-            return makeChatClient()
-        case .acp:
-            return acpConfiguredClient()
+        if let agent = selectedACPProvider() {
+            return acpClient(for: agent)
         }
+        return makeChatClient()
     }
 
-    /// ACP client when configured, else nil so callers surface setup.
-    private static func acpConfiguredClient() -> LLMClient? {
-        guard isACPConfigured() else { return nil }
-        return acpClient()
-    }
-
-    /// Chat panel client: uses the selected provider+model when one exists,
-    /// else the legacy single-model config. Fresh per call so model and
-    /// effort switches take effect on the next message.
+    /// Chat panel client: the selected provider+model, or the selected ACP
+    /// agent. Fresh per call so model, effort and agent switches take effect
+    /// on the next message.
     ///
     /// Command tools (when enabled) merge their schemas here and raise
     /// the tool-round budget: background polling is unusable at 3 rounds.
     /// The command handler itself is per-panel state, so it flows through
     /// `stream(onToolCall:)`, not the stored handler.
     static func makeChatClient() -> LLMClient? {
-        let commands = commandToolsEnabled() && backend() == .openai
-        guard backend() == .openai else { return acpConfiguredClient() }
+        if let agent = selectedACPProvider() {
+            guard !agent.acpCommand.isEmpty else { return nil }
+            return acpClient(for: agent)
+        }
+        let commands = commandToolsEnabled()
         // Providers own the endpoint now; no selected model means the
         // backend is not configured (the rewrite path shares this rule).
         guard let (provider, model) = selectedModel() else { return nil }
         let key = providerAPIKey(id: provider.id)
         // Local MLX providers serve without a key; everything else needs one.
-        guard !model.model.isEmpty, provider.isLocalMLX == true || !key.isEmpty else { return nil }
+        guard !model.model.isEmpty, provider.kind == .localMLX || !key.isEmpty else { return nil }
         var normalized = provider.baseURL
         while normalized.count > 1 && normalized.hasSuffix("/") {
             normalized.removeLast()
@@ -675,11 +762,12 @@ enum CompanionConfigService {
 
     /// Client for one specific model, used by rewrite templates that pin a
     /// companion model. The model id comes from the template's `modelID`;
-    /// nil or a stale id falls back to the selected chat model. The rewrite
-    /// path never advertises tools, mirroring the chat client's schema merge
-    /// rules minus the command handler.
+    /// nil or a stale id falls back to the selected chat model. Templates
+    /// pin models, never agents, so an ACP selection with no pinned id runs
+    /// through `makeClient()` and lands on the agent. The rewrite path never
+    /// advertises tools, mirroring the chat client's schema merge rules
+    /// minus the command handler.
     static func makeClient(forModelID modelID: UUID?) -> LLMClient? {
-        guard backend() == .openai else { return makeClient() }
         let providers = chatProviders()
         var pair: (provider: ChatProvider, model: ChatModel)?
         if let modelID {
@@ -690,9 +778,11 @@ enum CompanionConfigService {
                 }
             }
         }
-        guard let (provider, model) = pair ?? selectedModel() else { return nil }
+        guard let (provider, model) = pair ?? selectedModel() else {
+            return selectedACPProvider().map { acpClient(for: $0) }
+        }
         let key = providerAPIKey(id: provider.id)
-        guard !model.model.isEmpty, provider.isLocalMLX == true || !key.isEmpty else { return nil }
+        guard !model.model.isEmpty, provider.kind == .localMLX || !key.isEmpty else { return nil }
         var normalized = provider.baseURL
         while normalized.count > 1 && normalized.hasSuffix("/") {
             normalized.removeLast()
@@ -719,12 +809,15 @@ enum CompanionConfigService {
     }
 
     /// Schemas offered on the chat panel: search plus command tools when
-    /// the user enabled them. The rewrite flow never gets command tools:
-    /// it passes no per-call handler, so an advertised run_command would
-    /// have nothing behind it.
+    /// the user enabled them. ACP agents manage their own tools, so command
+    /// schemas never join an ACP client. The rewrite flow never gets command
+    /// tools: it passes no per-call handler, so an advertised run_command
+    /// would have nothing behind it.
     static func chatToolSchemas() -> [[String: Any]] {
         var schemas = searchTools()
-        if commandToolsEnabled() && backend() == .openai {
+        // Command schemas need the OpenAI path's per-call handler; agents
+        // negotiate their own tools.
+        if commandToolsEnabled(), selectedACPProvider() == nil {
             schemas.append(contentsOf: CommandToolCatalog.toolSchemas())
         }
         return schemas
@@ -780,16 +873,20 @@ enum CompanionConfigService {
     }
 
     /// Shared ACP client so chat and rewrite reuse the same process and
-    /// session. Cached per configuration so prefs edits swap clients; the
+    /// session. Cached per configuration so provider edits swap clients; the
     /// old process is shut down when the key changes.
     private static let acpLock = NSLock()
     private static var cachedACPClient: ACPAgentClient?
     private static var cachedACPKey: String?
 
-    static func acpClient() -> LLMClient {
+    /// ACP client for one agent provider. The cached key covers command,
+    /// arguments and system prompt, so editing any of them restarts the
+    /// subprocess on the next request while an unchanged config keeps its
+    /// session alive across prompts.
+    static func acpClient(for provider: ChatProvider) -> LLMClient {
         let configuration = ACPAgentConfiguration(
-            command: acpCommand(),
-            arguments: acpArguments(),
+            command: provider.acpCommand,
+            arguments: provider.acpArguments,
             systemPrompt: systemPrompt().isEmpty ? nil : systemPrompt()
         )
         let key = "\(configuration.command)\u{0}\(configuration.arguments)\u{0}\(configuration.systemPrompt ?? "")"

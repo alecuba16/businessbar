@@ -191,7 +191,7 @@ final class CommandToolController: ObservableObject {
     /// entry point must cover both.
     func makePanelToolHandler() -> ((String, String) async -> String)? {
         guard CompanionConfigService.commandToolsEnabled(),
-              CompanionConfigService.backend() == .openai
+              CompanionConfigService.selectedACPProvider() == nil
         else { return nil }
         let searchHandler = CompanionConfigService.searchToolHandler()
         let controller = self
