@@ -23,6 +23,10 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
     /// Whether the model takes image inputs. Legacy rows decode with false
     /// so nothing regresses: images are opt-in per model.
     public var acceptsImages: Bool?
+    /// Effort values this model accepts, overriding the built-in list in
+    /// pickers. Nil means the model never pinned its vocabulary: pickers
+    /// fall back to the detected or global set.
+    public var effortOptions: [String]?
 
     public init(
         id: UUID = UUID(),
@@ -32,7 +36,8 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
         reasoningEnabled: Bool? = nil,
         reasoningEffort: String? = nil,
         acceptsText: Bool? = nil,
-        acceptsImages: Bool? = nil
+        acceptsImages: Bool? = nil,
+        effortOptions: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -42,10 +47,11 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
         self.reasoningEffort = reasoningEffort
         self.acceptsText = acceptsText
         self.acceptsImages = acceptsImages
+        self.effortOptions = effortOptions
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, model, systemPrompt, reasoningEnabled, reasoningEffort, acceptsText, acceptsImages
+        case id, name, model, systemPrompt, reasoningEnabled, reasoningEffort, acceptsText, acceptsImages, effortOptions
     }
 
     public init(from decoder: Decoder) throws {
@@ -58,6 +64,7 @@ public struct ChatModel: Identifiable, Codable, Equatable, Hashable, Sendable {
         reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
         acceptsText = try container.decodeIfPresent(Bool.self, forKey: .acceptsText) ?? true
         acceptsImages = try container.decodeIfPresent(Bool.self, forKey: .acceptsImages) ?? false
+        effortOptions = try container.decodeIfPresent([String].self, forKey: .effortOptions)
     }
 }
 

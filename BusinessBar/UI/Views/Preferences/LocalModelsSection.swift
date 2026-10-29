@@ -193,6 +193,12 @@ struct LocalModelsSection: View {
                         .fontWeight(.medium)
                     fitPill(fit)
                     kindPill(entry.kind)
+                    let reasoning = MLXModelCatalog.reasoningCapability(id: entry.id)
+                    if reasoning.supported {
+                        Image(systemName: "brain")
+                            .foregroundColor(.secondary)
+                            .help(reasoningSummary(reasoning))
+                    }
                 }
                 Text("\(ByteCountFormatter.string(fromByteCount: entry.sizeBytes, countStyle: .file)) on disk")
                     .font(.caption)
@@ -521,6 +527,15 @@ struct LocalModelsSection: View {
             }
             .font(.caption)
             .foregroundColor(.secondary)
+            if report.reasoning.supported {
+                HStack(spacing: 6) {
+                    Image(systemName: "brain")
+                        .foregroundColor(.secondary)
+                    Text(reasoningSummary(report.reasoning))
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
             Button("Add to catalog") {
                 addCustomFromReport(report)
             }
@@ -530,6 +545,18 @@ struct LocalModelsSection: View {
         .padding(8)
         .background(Color.secondary.opacity(0.08))
         .cornerRadius(6)
+    }
+
+    /// One-line reasoning readout for the check card.
+    private func reasoningSummary(_ capability: MLXReasoningCapability) -> String {
+        guard capability.supported else { return "No reasoning detected" }
+        switch capability.shape {
+        case .effortLevels:
+            return "Reasoning supported, effort levels: "
+                + capability.effortOptions.joined(separator: ", ")
+        case .thinkingToggle:
+            return "Reasoning supported, on/off toggle (chat_template_kwargs)"
+        }
     }
 
     private func runRepoCheck() {
@@ -559,9 +586,11 @@ struct LocalModelsSection: View {
             displayName: report.displayName,
             sizeBytes: report.sizeBytes,
             ramBytes: report.ramBytes,
-            kind: report.kind
+            kind: report.kind,
+            reasoning: report.reasoning.supported ? report.reasoning : nil
         )
         MLXModelCatalog.addCustomEntry(entry)
+        MLXModelCatalog.setReasoningCapability(id: report.repoID, report.reasoning)
         customEntries = MLXModelCatalog.customEntries
         customCheck = nil
         customRepoText = ""

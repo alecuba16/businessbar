@@ -183,9 +183,10 @@ struct ChatView: View {
                     .flatMap(\.models)
                     .first(where: { $0.id == selectedProfileID }),
                     selected.reasoningEnabled == true {
+                    let modelOptions = CompanionConfigService.effortOptions(forModel: selected)
                     Picker("Effort", selection: $selectedEffort) {
                         Text("Default").tag(Self.defaultEffortTag)
-                        ForEach(CompanionConfigService.effortLevels, id: \.self) { level in
+                        ForEach(modelOptions, id: \.self) { level in
                             Text(level.capitalized).tag(level)
                         }
                     }
@@ -522,8 +523,8 @@ struct ChatView: View {
 
     // MARK: - Command tools
 
-    /// Inline confirmation card: full command, workspace, plain-words
-    /// risk, three decisions.
+    /// Inline confirmation card: full command, category and targets,
+    /// plain-words risk, four decisions.
     private func approvalCard(_ request: CommandApprovalRequest) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Run this command?")
@@ -535,6 +536,18 @@ struct ChatView: View {
                 .padding(6)
                 .background(.bar)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+            HStack(spacing: 10) {
+                Label(request.category.label, systemImage: "folder.badge.gear")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !request.targets.isEmpty {
+                    Text(request.targets.joined(separator: " "))
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(request.targets.joined(separator: "\n"))
+                }
+            }
             Text("\(request.reason.label). Working folder: \((request.workspaceRoot as NSString).lastPathComponent)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -545,6 +558,10 @@ struct ChatView: View {
                 .controlSize(.small)
                 Button("Always This Session") {
                     commandTools.decide(.alwaysThisSession)
+                }
+                .controlSize(.small)
+                Button("Always Allow") {
+                    commandTools.decide(.alwaysAllowPersistent)
                 }
                 .controlSize(.small)
                 Spacer(minLength: 0)

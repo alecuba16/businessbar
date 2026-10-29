@@ -90,6 +90,13 @@ public final class MLXModelStore: ObservableObject {
                     if finished {
                         newState.isFinished = true
                         self.download = newState
+                        // Files are on disk now: read the reasoning controls
+                        // off the model itself so pickers and catalog rows
+                        // show them without a disk probe per render.
+                        MLXModelCatalog.setReasoningCapability(
+                            id: modelID,
+                            MLXReasoningInspector.capabilityFromSnapshot(modelID: modelID)
+                        )
                         self.finish()
                         return
                     }

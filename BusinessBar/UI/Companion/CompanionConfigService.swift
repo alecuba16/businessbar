@@ -503,11 +503,24 @@ enum CompanionConfigService {
     static func upsertLocalMLXProvider() -> ChatProvider? {
         guard let modelID = MLXServerConfig.activeModelID(),
               let entry = MLXModelCatalog.entry(id: modelID) else { return nil }
+        // Discover reasoning from the snapshot when the weights are on
+        // disk; a downloaded model carries its own chat template, so no
+        // guesswork from the name. The result is cached on the catalog so
+        // later upserts and pickers read it without touching the disk again.
+        if MLXModelCatalog.isDownloaded(modelID: modelID),
+           entry.reasoning == nil {
+            let capability = MLXReasoningInspector.capabilityFromSnapshot(modelID: modelID)
+            MLXModelCatalog.setReasoningCapability(id: modelID, capability)
+        }
+        let capability = MLXModelCatalog.reasoningCapability(id: modelID)
         let model = ChatModel(
             name: entry.displayName,
             model: modelID,
+            reasoningEnabled: capability.supported,
+            reasoningEffort: capability.supported ? "medium" : nil,
             acceptsText: true,
-            acceptsImages: entry.kind == .textAndImages
+            acceptsImages: entry.kind == .textAndImages,
+            effortOptions: capability.effortOptions.isEmpty ? nil : capability.effortOptions
         )
         let provider = ChatProvider(
             name: "Local (MLX)",
@@ -521,10 +534,13 @@ enum CompanionConfigService {
             var updated = provider
             updated.id = providers[index].id
             // Keep the existing model id when the catalog model has not
-            // changed so selection survives updates.
+            // changed so selection survives updates. Reasoning picks stay
+            // user-owned: detection only fills them in the first time.
             if let existing = providers[index].models.first, existing.model == modelID {
                 var kept = model
                 kept.id = existing.id
+                kept.reasoningEnabled = existing.reasoningEnabled ?? kept.reasoningEnabled
+                kept.reasoningEffort = existing.reasoningEffort ?? kept.reasoningEffort
                 updated.models = [kept]
             }
             providers[index] = updated
@@ -617,7 +633,47 @@ enum CompanionConfigService {
     /// Effort values offered in the picker. The set is the union of what
     /// OpenAI models accept (low/medium/high/max) and gateway variants seen
     /// in the wild (none, xhigh).
-    static let effortLevels = ["none", "low", "medium", "high", "xhigh", "max"]
+    static let effortLevels = EffortVocabulary.defaultLevels
+
+    /// Effort vocabulary for one model row. Precedence: the model's own
+    /// pinned list, then the local MLX discovery, then known model-name
+    /// patterns, then the global list. A nil model falls back to the
+    /// global list so template editors without a pinned model keep the
+    /// full vocabulary.
+    static func effortOptions(forModel model: ChatModel?, provider: ChatProvider? = nil) -> [String] {
+        let mlxCapability: MLXReasoningCapability?
+        if provider?.kind == .localMLX, let modelID = model?.model, !modelID.isEmpty {
+            mlxCapability = MLXModelCatalog.reasoningCapability(id: modelID)
+        } else {
+            mlxCapability = nil
+        }
+        return EffortVocabulary.resolve(
+            pinnedEffortOptions: model?.effortOptions,
+            mlxModelID: provider?.kind == .localMLX ? model?.model : nil,
+            mlxCapability: mlxCapability,
+            modelID: model?.model
+        )
+    }
+
+    /// Same lookup by model row id, resolving the owning provider so local
+    /// MLX discovery applies. Falls back to the global list when the id
+    /// no longer resolves.
+    static func effortOptions(forModelID id: UUID) -> [String] {
+        for provider in chatProviders() {
+            if let model = provider.model(id: id) {
+                return effortOptions(forModel: model, provider: provider)
+            }
+        }
+        return effortLevels
+    }
+
+    /// Known reasoning vocabularies by model id. Model lists from
+    /// OpenAI-compatible endpoints carry no capability metadata, so
+    /// families with published effort sets are recognized here and
+    /// everything else keeps the global list.
+    static func knownModelEffortOptions(_ model: String) -> [String] {
+        EffortVocabulary.knownModelEffortOptions(model)
+    }
 
     // MARK: - History retention
 
@@ -679,6 +735,40 @@ enum CompanionConfigService {
 
     static func setACPArguments(_ arguments: [String]) {
         UserDefaults.standard.set(arguments, forKey: Constants.Defaults.companionACPArguments)
+    }
+
+    // MARK: - Remote model list
+
+    typealias RemoteModelInfo = BusinessBarCore.RemoteModelInfo
+
+    /// Networking lives in BusinessBarCore so tests can exercise the
+    /// full fetch against a local HTTP server.
+    static func fetchRemoteModels(
+        baseURL: String,
+        apiKey: String,
+        headers: [(name: String, value: String)] = [],
+        session: URLSession = .shared
+    ) async throws -> [RemoteModelInfo] {
+        try await RemoteModelCatalog.fetch(
+            baseURL: baseURL,
+            apiKey: apiKey,
+            headers: headers,
+            session: session
+        )
+    }
+
+    /// Same fetch for an already-saved provider, reading its stored key
+    /// and headers.
+    static func fetchRemoteModels(
+        provider: ChatProvider,
+        session: URLSession = .shared
+    ) async throws -> [RemoteModelInfo] {
+        try await fetchRemoteModels(
+            baseURL: provider.baseURL,
+            apiKey: providerAPIKey(id: provider.id),
+            headers: providerHeaders(id: provider.id).map { ($0.name, $0.value) },
+            session: session
+        )
     }
 
     // MARK: - Client
@@ -755,7 +845,11 @@ enum CompanionConfigService {
                     : nil,
                 extraHeaders: Dictionary(
                     uniqueKeysWithValues: providerHeaders(id: provider.id).map { ($0.name, $0.value) }
-                )
+                ),
+                isLocalMLX: provider.kind == .localMLX,
+                mlxReasoning: provider.kind == .localMLX
+                    ? MLXModelCatalog.reasoningCapability(id: model.model)
+                    : nil
             ),
             tools: chatToolSchemas(),
             toolHandler: searchToolHandler(),
@@ -803,7 +897,11 @@ enum CompanionConfigService {
                     : nil,
                 extraHeaders: Dictionary(
                     uniqueKeysWithValues: providerHeaders(id: provider.id).map { ($0.name, $0.value) }
-                )
+                ),
+                isLocalMLX: provider.kind == .localMLX,
+                mlxReasoning: provider.kind == .localMLX
+                    ? MLXModelCatalog.reasoningCapability(id: model.model)
+                    : nil
             ),
             tools: [],
             toolHandler: nil,
@@ -849,6 +947,68 @@ enum CompanionConfigService {
 
     static func setCommandPermissionMode(_ mode: CommandPermissionMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: "companion.commandPermissionMode")
+        SettingsSavedBus.announce()
+    }
+
+    // MARK: Command permission settings
+
+    /// Per-category dials plus persistent prefix rules, assembled fresh
+    /// per call so changes in Preferences reach the next command.
+    static func commandPermissionSettings() -> CommandPermissionSettings {
+        CommandPermissionSettings(
+            categoryModes: commandCategoryModes(),
+            allowedPrefixes: commandAllowedPrefixes(),
+            deniedPrefixes: commandDeniedPrefixes()
+        )
+    }
+
+    /// Explicit mode for one category; nil when the category follows the
+    /// master mode.
+    static func commandCategoryMode(_ category: CommandCategory) -> CommandPermissionMode? {
+        guard let raw = UserDefaults.standard.string(
+            forKey: "companion.commandPermission.category.\(category.rawValue)"
+        ) else { return nil }
+        return CommandPermissionMode(rawValue: raw)
+    }
+
+    static func setCommandCategoryMode(_ mode: CommandPermissionMode?, for category: CommandCategory) {
+        let key = "companion.commandPermission.category.\(category.rawValue)"
+        if let mode {
+            UserDefaults.standard.set(mode.rawValue, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        SettingsSavedBus.announce()
+    }
+
+    private static func commandCategoryModes() -> [CommandCategory: CommandPermissionMode] {
+        var modes: [CommandCategory: CommandPermissionMode] = [:]
+        for category in CommandCategory.allCases {
+            if let mode = commandCategoryMode(category) {
+                modes[category] = mode
+            }
+        }
+        return modes
+    }
+
+    /// Persistent allow rules: exact commands or `prefix *` wildcards,
+    /// added by "Always allow" on the approval card.
+    static func commandAllowedPrefixes() -> [String] {
+        UserDefaults.standard.stringArray(forKey: "companion.commandAllowedPrefixes") ?? []
+    }
+
+    static func setCommandAllowedPrefixes(_ prefixes: [String]) {
+        UserDefaults.standard.set(prefixes, forKey: "companion.commandAllowedPrefixes")
+        SettingsSavedBus.announce()
+    }
+
+    /// Persistent deny rules. Deny wins over allow rules and Allow mode.
+    static func commandDeniedPrefixes() -> [String] {
+        UserDefaults.standard.stringArray(forKey: "companion.commandDeniedPrefixes") ?? []
+    }
+
+    static func setCommandDeniedPrefixes(_ prefixes: [String]) {
+        UserDefaults.standard.set(prefixes, forKey: "companion.commandDeniedPrefixes")
         SettingsSavedBus.announce()
     }
 

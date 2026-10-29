@@ -28,17 +28,29 @@ public enum MLXModelCatalog {
         public let ramBytes: Int64
         /// Input modality; decides the server package that serves it.
         public let kind: Kind
+        /// Reasoning capability detected from the repo's chat template and
+        /// config. Nil on stored entries predating detection: unknown, not
+        /// absent. Refreshed from the snapshot after download.
+        public let reasoning: MLXReasoningCapability?
 
-        public init(id: String, displayName: String, sizeBytes: Int64, ramBytes: Int64, kind: Kind) {
+        public init(
+            id: String,
+            displayName: String,
+            sizeBytes: Int64,
+            ramBytes: Int64,
+            kind: Kind,
+            reasoning: MLXReasoningCapability? = nil
+        ) {
             self.id = id
             self.displayName = displayName
             self.sizeBytes = sizeBytes
             self.ramBytes = ramBytes
             self.kind = kind
+            self.reasoning = reasoning
         }
 
         private enum CodingKeys: String, CodingKey {
-            case id, displayName, sizeBytes, ramBytes, kind
+            case id, displayName, sizeBytes, ramBytes, kind, reasoning
         }
 
         public init(from decoder: Decoder) throws {
@@ -48,6 +60,7 @@ public enum MLXModelCatalog {
             sizeBytes = try container.decode(Int64.self, forKey: .sizeBytes)
             ramBytes = try container.decode(Int64.self, forKey: .ramBytes)
             kind = try container.decodeIfPresent(Kind.self, forKey: .kind) ?? .text
+            reasoning = try container.decodeIfPresent(MLXReasoningCapability.self, forKey: .reasoning)
         }
     }
 
@@ -166,6 +179,69 @@ public enum MLXModelCatalog {
         customEntries = customEntries.filter { $0.id != id }
         if MLXServerConfig.activeModelID() == id {
             MLXServerConfig.setActiveModelID(nil)
+        }
+    }
+
+    /// Curated entries carry no reasoning metadata by default: it is
+    /// discovered from the downloaded snapshot (or the Check flow for
+    /// custom repos) and kept in the store, so a template fix upstream
+    /// reaches users without an app update.
+    public static func reasoningCapability(id modelID: String) -> MLXReasoningCapability {
+        if let entry = entry(id: modelID), let reasoning = entry.reasoning {
+            return reasoning
+        }
+        if let override = reasoningOverrides[modelID] {
+            return override
+        }
+        if isDownloaded(modelID: modelID) {
+            // Probe once, then remember: rows and pickers call this every
+            // render, the snapshot read must not run each time.
+            let capability = MLXReasoningInspector.capabilityFromSnapshot(modelID: modelID)
+            setReasoningCapability(id: modelID, capability)
+            return capability
+        }
+        return .none
+    }
+
+    /// Stores a discovered capability on a custom entry, or records it in
+    /// the discovered-overrides table for curated entries (their list is
+    /// compile-time and cannot be edited in place).
+    public static func setReasoningCapability(
+        id modelID: String,
+        _ capability: MLXReasoningCapability
+    ) {
+        if let index = customEntries.firstIndex(where: { $0.id == modelID }) {
+            var updated = customEntries
+            let old = updated[index]
+            updated[index] = Entry(
+                id: old.id,
+                displayName: old.displayName,
+                sizeBytes: old.sizeBytes,
+                ramBytes: old.ramBytes,
+                kind: old.kind,
+                reasoning: capability
+            )
+            customEntries = updated
+        } else {
+            var overrides = reasoningOverrides
+            overrides[modelID] = capability
+            reasoningOverrides = overrides
+        }
+    }
+
+    private static let reasoningOverridesKey = "companionMLXReasoningOverrides"
+
+    private static var reasoningOverrides: [String: MLXReasoningCapability] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: reasoningOverridesKey),
+                  let decoded = try? JSONDecoder()
+                      .decode([String: MLXReasoningCapability].self, from: data)
+            else { return [:] }
+            return decoded
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            UserDefaults.standard.set(data, forKey: reasoningOverridesKey)
         }
     }
 

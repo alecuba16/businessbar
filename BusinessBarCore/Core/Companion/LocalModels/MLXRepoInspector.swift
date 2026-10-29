@@ -28,6 +28,8 @@ public enum MLXRepoInspector {
         public let contextLength: Int?
         /// Quantization label from config.json, when present.
         public let quantization: String?
+        /// Reasoning capability detected from the chat template and config.
+        public let reasoning: MLXReasoningCapability
 
         public init(
             repoID: String,
@@ -37,7 +39,8 @@ public enum MLXRepoInspector {
             kind: MLXModelCatalog.Kind,
             architecture: String,
             contextLength: Int?,
-            quantization: String?
+            quantization: String?,
+            reasoning: MLXReasoningCapability = .none
         ) {
             self.repoID = repoID
             self.displayName = displayName
@@ -47,6 +50,7 @@ public enum MLXRepoInspector {
             self.architecture = architecture
             self.contextLength = contextLength
             self.quantization = quantization
+            self.reasoning = reasoning
         }
     }
 
@@ -184,9 +188,11 @@ public enum MLXRepoInspector {
         // config.json carries the context window and quantization details.
         var contextLength: Int?
         var quantization: String?
-        if let configJSON = await fetchConfigJSON(repoID: trimmed) {
-            contextLength = configJSON["max_position_embeddings"] as? Int
-            if let quant = configJSON["quantization"] as? [String: Any] {
+        var configJSON: [String: Any]?
+        if let fetchedConfig = await fetchConfigJSON(repoID: trimmed) {
+            configJSON = fetchedConfig
+            contextLength = fetchedConfig["max_position_embeddings"] as? Int
+            if let quant = fetchedConfig["quantization"] as? [String: Any] {
                 let bits = quant["bits"] as? Int
                 let group = quant["group_size"] as? Int
                 if let bits {
@@ -194,6 +200,32 @@ public enum MLXRepoInspector {
                 }
             }
         }
+
+        // The chat template decides the reasoning shape. Newer Qwen3
+        // repos ship it as a standalone chat_template.jinja instead of
+        // inside tokenizer_config.json, so the standalone file is fetched
+        // first; the JSON layouts follow. Config and architecture act as
+        // fallbacks.
+        var chatTemplate: String?
+        if let raw = await fetchRawText(repoID: trimmed, file: "chat_template.jinja"),
+           !raw.isEmpty {
+            chatTemplate = raw
+        } else {
+            for file in ["chat_template.json", "tokenizer_config.json"] {
+                if let json = await fetchConfigJSON(repoID: trimmed, file: file),
+                   let template = (json["chat_template"] as? String)
+                    ?? (json["chat_template_jinja"] as? String),
+                   !template.isEmpty {
+                    chatTemplate = template
+                    break
+                }
+            }
+        }
+        let reasoning = MLXReasoningInspector.capability(
+            chatTemplate: chatTemplate,
+            configJSON: configJSON,
+            architecture: architecture
+        )
 
         let ramBytes = estimateRAM(sizeBytes: sizeBytes)
         return Report(
@@ -204,13 +236,14 @@ public enum MLXRepoInspector {
             kind: kind(architecture: architecture),
             architecture: architecture,
             contextLength: contextLength,
-            quantization: quantization
+            quantization: quantization,
+            reasoning: reasoning
         )
     }
 
-    /// Fetches and decodes config.json from the repo root.
-    static func fetchConfigJSON(repoID: String) async -> [String: Any]? {
-        guard let url = URL(string: "https://huggingface.co/\(repoID)/resolve/main/config.json") else {
+    /// Fetches and decodes a JSON file from the repo root.
+    static func fetchConfigJSON(repoID: String, file: String = "config.json") async -> [String: Any]? {
+        guard let url = URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(file)") else {
             return nil
         }
         var request = URLRequest(url: url)
@@ -220,5 +253,20 @@ public enum MLXRepoInspector {
               (200..<300).contains(http.statusCode)
         else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    /// Fetches a raw text file from the repo root, for standalone jinja
+    /// chat templates that are not JSON.
+    static func fetchRawText(repoID: String, file: String) async -> String? {
+        guard let url = URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(file)") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode)
+        else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }

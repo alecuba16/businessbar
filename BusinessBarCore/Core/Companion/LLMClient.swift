@@ -114,6 +114,13 @@ public struct CompanionConfiguration: Sendable, Equatable {
     /// over the built-in `Authorization` header, so gateways with their own
     /// auth schemes stay usable.
     public var extraHeaders: [String: String]
+    /// True when the endpoint is the managed local MLX server. Its chat
+    /// completions handler accepts `chat_template_kwargs`, which carries
+    /// the reasoning controls the model's template understands.
+    public var isLocalMLX: Bool
+    /// Reasoning capability detected for the local model; drives the chat
+    /// template kwargs on requests. Nil for remote providers.
+    public var mlxReasoning: MLXReasoningCapability?
 
     public init(
         baseURL: URL,
@@ -122,7 +129,9 @@ public struct CompanionConfiguration: Sendable, Equatable {
         systemPrompt: String = "",
         reasoning: Bool = false,
         reasoningEffort: String? = nil,
-        extraHeaders: [String: String] = [:]
+        extraHeaders: [String: String] = [:],
+        isLocalMLX: Bool = false,
+        mlxReasoning: MLXReasoningCapability? = nil
     ) {
         self.baseURL = baseURL
         self.model = model
@@ -131,6 +140,8 @@ public struct CompanionConfiguration: Sendable, Equatable {
         self.reasoning = reasoning
         self.reasoningEffort = reasoningEffort
         self.extraHeaders = extraHeaders
+        self.isLocalMLX = isLocalMLX
+        self.mlxReasoning = mlxReasoning
     }
 
     public static let `default` = CompanionConfiguration(
@@ -138,4 +149,81 @@ public struct CompanionConfiguration: Sendable, Equatable {
         model: "gpt-4o-mini",
         apiKey: ""
     )
+}
+
+// MARK: - EffortVocabulary
+
+/// Effort vocabulary resolution, the picker-facing half of the reasoning
+/// effort story. Pure logic, no storage: the config layer injects the
+/// store-dependent inputs (pinned list, local MLX capability).
+public enum EffortVocabulary {
+    /// Global default vocabulary every picker starts from.
+    public static let defaultLevels = ["none", "low", "medium", "high", "xhigh", "max"]
+
+    /// Known reasoning vocabularies by model id. Model lists from
+    /// OpenAI-compatible endpoints carry no capability metadata, so
+    /// families with published effort sets are recognized here and
+    /// everything else keeps the global list.
+    public static func knownModelEffortOptions(_ model: String) -> [String] {
+        let lowered = model.lowercased()
+        // gpt-5 family: minimal replaces none.
+        if lowered.contains("gpt-5") {
+            return ["minimal", "low", "medium", "high"]
+        }
+        if lowered.hasPrefix("o1") || lowered.hasPrefix("o3")
+            || lowered.hasPrefix("o4") || lowered.contains("gpt-oss") {
+            return ["low", "medium", "high"]
+        }
+        return []
+    }
+
+    /// Precedence: the model's own pinned list, then the local MLX
+    /// discovery, then known model-name patterns, then the global list.
+    /// A nil model falls back to the global list so template editors
+    /// without a pinned model keep the full vocabulary.
+    public static func resolve(
+        pinnedEffortOptions: [String]?,
+        mlxModelID: String?,
+        mlxCapability: MLXReasoningCapability?,
+        modelID: String?
+    ) -> [String] {
+        if let pinned = pinnedEffortOptions, !pinned.isEmpty {
+            return pinned
+        }
+        if let capability = mlxCapability,
+           capability.supported, !capability.effortOptions.isEmpty {
+            _ = mlxModelID
+            return capability.effortOptions
+        }
+        if let modelID, !modelID.isEmpty {
+            let known = knownModelEffortOptions(modelID)
+            if !known.isEmpty { return known }
+        }
+        return defaultLevels
+    }
+
+    /// Turns free-form editor input into a pinned effort vocabulary:
+    /// commas or spaces separate values, surrounding whitespace drops,
+    /// duplicates and empties drop, case is preserved as typed.
+    public static func parseList(_ input: String) -> [String] {
+        var seen: Set<String> = []
+        var values: [String] = []
+        for piece in input.split(whereSeparator: { $0 == "," || $0.isWhitespace }) {
+            let value = piece.trimmingCharacters(in: .whitespaces)
+            guard !value.isEmpty, !seen.contains(value) else { continue }
+            seen.insert(value)
+            values.append(value)
+        }
+        return values
+    }
+
+    /// Default effort for a freshly added model: "medium" when the
+    /// vocabulary carries it, else its middle value, nil when empty.
+    /// Only called with a published vocabulary, so the request is
+    /// guaranteed to carry a value the endpoint accepts.
+    public static func defaultEffort(in levels: [String]) -> String? {
+        guard !levels.isEmpty else { return nil }
+        if levels.contains("medium") { return "medium" }
+        return levels[levels.count / 2]
+    }
 }

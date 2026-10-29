@@ -88,6 +88,19 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
                     if configuration.reasoning, let effort, !effort.isEmpty {
                         body["reasoning_effort"] = effort
                     }
+                    // Local MLX: the model's chat template owns the reasoning
+                    // controls, addressed through chat_template_kwargs.
+                    // reasoning_effort stays off that request: the server's
+                    // template never reads it.
+                    if configuration.isLocalMLX, let capability = configuration.mlxReasoning {
+                        body.removeValue(forKey: "reasoning_effort")
+                        if let kwargs = capability.requestKwargs(
+                            reasoningEnabled: configuration.reasoning,
+                            effort: effort
+                        ) {
+                            body["chat_template_kwargs"] = kwargs
+                        }
+                    }
 
                     guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
                         continuation.yield(.failed("Could not encode request body."))
