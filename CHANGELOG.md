@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Insert after selection (new line): a fourth template action that starts the rewrite on the line below the selection instead of gluing onto its last line. A selection that already ends in a newline is not doubled, so no blank line appears. Falls back to the overlay like the other direct-write actions when in-place insertion is not possible
+
 ### Fixed
 - Template rewrite shortcuts fire once per keypress. KeyboardShortcuts.onKeyUp appends handlers and the status bar re-registered them on every template edit, so one keypress ran the rewrite N+1 times, each run cancelled the previous task before its body could start, and the cancelled stream ended empty, surfacing a false "model returned an empty response" toast before the surviving run inserted the text a second later
 - The Commands permission picker in the chat header renders its label as a small plain text in front of the Ask/Allow/Deny segments. The picker's own label was capped at 130pt and wrapped into a vertical Com/mands column; both the label and the segments now carry the hover tooltip naming what the active mode does

@@ -130,10 +130,16 @@ final class RewriteCoordinator: ObservableObject {
                     AppLogger.error("rewrite: auto-replace AX write failed, showing overlay", category: "Companion")
                     ToastCenter.shared.show("Could not replace directly, review the result", icon: "exclamationmark.triangle", duration: 2.5)
                 }
-            case .append:
+            case .append, .appendLineBreak:
                 if let selection, selection.viaAccessibility {
+                    // One leading newline puts the reply on the line below
+                    // the selection; a selection already ending in a newline
+                    // would leave a blank line, so it is not doubled.
+                    let text = template.action == .appendLineBreak && !original.hasSuffix("\n")
+                        ? "\n" + finalOutput
+                        : finalOutput
                     AppLogger.info("rewrite: insert-after for \(template.name)", category: "Companion")
-                    let succeeded = await self.selectionService.insertAfterSelection(finalOutput)
+                    let succeeded = await self.selectionService.insertAfterSelection(text)
                     if succeeded {
                         ToastCenter.shared.show("Inserted \(template.name) after selection", icon: "checkmark.circle", duration: 1.2)
                         return
