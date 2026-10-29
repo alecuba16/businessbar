@@ -600,7 +600,7 @@ final class MLXReasoningInspectorTests: XCTestCase {
     }
 
     func testUnsupportedSendsNoKwargs() {
-        XCTAssertEqual(MLXReasoningCapability.none.requestKwargs(reasoningEnabled: true, effort: "high"), nil)
+        XCTAssertNil(MLXReasoningCapability.none.requestKwargs(reasoningEnabled: true, effort: "high"))
     }
 
     func testCapabilityCodableRoundTrip() throws {
@@ -660,7 +660,7 @@ final class CommandCategoryTests: XCTestCase {
 
     func testCategoryDialDenyOverridesAllow() {
         let settings = CommandPermissionSettings(
-            categoryModes: [.fileDelete: .deny],
+            categoryModes: [.fileWrite: .deny],
             allowedPrefixes: [],
             deniedPrefixes: []
         )
@@ -714,7 +714,7 @@ final class CommandCategoryTests: XCTestCase {
         let settings = CommandPermissionSettings(
             categoryModes: [:],
             allowedPrefixes: ["curl *"],
-            deniedPrefixes: ["curl admin*"]
+            deniedPrefixes: ["curl https://admin.example.com*"]
         )
         let resolved = CommandPermissionParser.resolve(
             "curl https://admin.example.com",
@@ -770,14 +770,14 @@ final class CommandCategoryTests: XCTestCase {
 final class ChatModelEffortOptionsTests: XCTestCase {
     func testModelCarriesPinnedEffortOptions() throws {
         let json = """
-        {"name": "m", "model": "gpt-5", "effortOptions": ["minimal", "low", "high"]}
+        {"id": "7E1D9C2A-1111-4C9C-9B1B-000000000001", "name": "m", "model": "gpt-5", "effortOptions": ["minimal", "low", "high"]}
         """
         let model = try JSONDecoder().decode(ChatModel.self, from: json.data(using: .utf8)!)
         XCTAssertEqual(model.effortOptions, ["minimal", "low", "high"])
     }
 
     func testModelDecodesWithoutEffortOptions() throws {
-        let json = "{\"name\": \"m\", \"model\": \"gpt-4o\"}"
+        let json = "{\"id\": \"7E1D9C2A-1111-4C9C-9B1B-000000000002\", \"name\": \"m\", \"model\": \"gpt-4o\"}"
         let model = try JSONDecoder().decode(ChatModel.self, from: json.data(using: .utf8)!)
         XCTAssertNil(model.effortOptions)
     }
