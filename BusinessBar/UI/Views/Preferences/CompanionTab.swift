@@ -458,6 +458,9 @@ struct ProviderEditorSheet: View {
     @State private var apiKey: String
     @State private var headers: [EditableHeaderPair]
     @State private var fetchedModels: [CompanionConfigService.RemoteModelInfo]?
+    /// Fetched ids already added to provider.models this session, so
+    /// rows flip to a checkmark and Add All can skip them.
+    @State private var addedModelIDs: Set<String> = []
     @State private var fetchError: String?
     @State private var isFetchingModels = false
     let onSave: (ChatProvider, String, [(name: String, value: String)]) -> Void
@@ -533,8 +536,15 @@ struct ProviderEditorSheet: View {
                 .disabled(provider.baseURL.isEmpty || isFetchingModels)
                 .help("Fetch the model list from the provider's /models endpoint")
                 if let fetchedModels, !fetchedModels.isEmpty {
-                    Text("\(fetchedModels.count) models")
-                        .foregroundColor(.secondary)
+                    Button("Add All") {
+                        let existing = Set(provider.models.map(\.model))
+                        for info in fetchedModels where !existing.contains(info.id) {
+                            provider.models.append(info.chatModel())
+                            addedModelIDs.insert(info.id)
+                        }
+                    }
+                    .disabled(fetchedModels.allSatisfy { addedModelIDs.contains($0.id) })
+                    .help("Add every fetched model that is not in the list yet")
                 }
                 if let fetchError {
                     Text("Fetch failed: \(fetchError)")
@@ -546,9 +556,29 @@ struct ProviderEditorSheet: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(fetchedModels) { info in
-                            Text(info.id)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(info.supportsReasoning ? .primary : .secondary)
+                            HStack {
+                                Text(info.id)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(info.supportsReasoning ? .primary : .secondary)
+                                if info.supportsReasoning {
+                                    Image(systemName: "lightbulb")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.yellow)
+                                        .help("Endpoint reports reasoning support")
+                                }
+                                Spacer()
+                                if addedModelIDs.contains(info.id) {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.green)
+                                } else {
+                                    Button("Add") {
+                                        provider.models.append(info.chatModel())
+                                        addedModelIDs.insert(info.id)
+                                    }
+                                    .controlSize(.small)
+                                }
+                            }
                         }
                     }
                 }
@@ -651,11 +681,36 @@ struct ModelEditorSheet: View {
     /// non-preset stored values keep it selected on open.
     @State private var effortSelection: String
     @State private var customEffort: String
+    /// Draft text for the effort-options editor; parseList turns it into
+    /// pinned values on Add. Kept separate from model.effortOptions so
+    /// typing never rewrites the list mid-edit.
+    @State private var newEffortValue = ""
 
     /// Effort values offered for this model: pinned options first, then
     /// name-pattern fallback, then the global list.
     private var modelEffortOptions: [String] {
         CompanionConfigService.effortOptions(forModel: model)
+    }
+
+    private func addEffortOption() {
+        let parsed = EffortVocabulary.parseList(newEffortValue)
+        guard !parsed.isEmpty else { return }
+        // Adding to a derived list pins it; adding to a pinned list keeps
+        // its existing values and appends the new ones.
+        var updated = model.effortOptions ?? modelEffortOptions
+        for value in parsed where !updated.contains(value) {
+            updated.append(value)
+        }
+        model.effortOptions = updated
+        newEffortValue = ""
+    }
+
+    private func removeEffortOption(_ level: String) {
+        // Removing from a derived list pins the remainder. Removing the
+        // last value un-pins: the resolver reads an empty list as "no
+        // pin" anyway, so nil is the honest representation.
+        let updated = (model.effortOptions ?? modelEffortOptions).filter { $0 != level }
+        model.effortOptions = updated.isEmpty ? nil : updated
     }
 
     init(model: ChatModel, onSave: @escaping (ChatModel) -> Void) {
@@ -710,25 +765,44 @@ struct ModelEditorSheet: View {
                     Text("Effort options")
                         .foregroundColor(.secondary)
                     Spacer()
-                    Text(modelEffortOptions.joined(separator: " \u{2022}"))
-                        .foregroundColor(.secondary)
-                        .help("Values this model accepts. Detected from the model name or provider model list; pin them below to override.")
+                    if model.effortOptions != nil {
+                        Text("pinned")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                            .help("This list overrides the detected vocabulary")
+                    }
                 }
-                TextField(
-                    "Comma-separated effort values, for example low,medium,high",
-                    text: Binding(
-                        get: {
-                            model.effortOptions?.joined(separator: ",") ?? ""
-                        },
-                        set: {
-                            let parts = $0
-                                .split(separator: ",")
-                                .map { $0.trimmingCharacters(in: .whitespaces) }
-                                .filter { !$0.isEmpty }
-                            model.effortOptions = parts.isEmpty ? nil : parts
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(modelEffortOptions, id: \.self) { level in
+                            HStack {
+                                Text(level)
+                                    .font(.system(size: 11, design: .monospaced))
+                                Spacer()
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundColor(.red)
+                                    .onTapGesture { removeEffortOption(level) }
+                                    .help("Remove \(level)")
+                            }
                         }
-                    )
-                )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 72)
+                HStack {
+                    TextField("Add effort value", text: $newEffortValue)
+                        .onSubmit(addEffortOption)
+                    Button("Add", action: addEffortOption)
+                        .controlSize(.small)
+                        .disabled(newEffortValue.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if model.effortOptions != nil {
+                    Button("Reset to detected") {
+                        model.effortOptions = nil
+                    }
+                    .controlSize(.small)
+                    .help("Drop the pinned list and go back to the detected vocabulary")
+                }
             }
 
             HStack {

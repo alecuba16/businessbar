@@ -16,6 +16,21 @@ public struct RemoteModelInfo: Identifiable, Equatable, Sendable {
         self.effortOptions = effortOptions
         self.supportsReasoning = supportsReasoning
     }
+
+    /// Prefilled model row for one-click add from a fetched list. The
+    /// last path component is the friendly name ("gpt-5" out of
+    /// "openai/gpt-5"), reasoning turns on when the endpoint flagged
+    /// it, and a published effort vocabulary lands pinned so pickers
+    /// show exactly what the endpoint accepts.
+    public func chatModel() -> ChatModel {
+        let friendlyName = id.split(separator: "/").last.map(String.init) ?? id
+        return ChatModel(
+            name: friendlyName,
+            model: id,
+            reasoningEnabled: supportsReasoning ? true : nil,
+            effortOptions: effortOptions
+        )
+    }
 }
 
 public enum RemoteModelCatalog {

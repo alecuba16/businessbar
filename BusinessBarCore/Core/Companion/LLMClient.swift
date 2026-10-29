@@ -201,4 +201,19 @@ public enum EffortVocabulary {
         }
         return defaultLevels
     }
+
+    /// Turns free-form editor input into a pinned effort vocabulary:
+    /// commas or spaces separate values, surrounding whitespace drops,
+    /// duplicates and empties drop, case is preserved as typed.
+    public static func parseList(_ input: String) -> [String] {
+        var seen: Set<String> = []
+        var values: [String] = []
+        for piece in input.split(whereSeparator: { $0 == "," || $0.isWhitespace }) {
+            let value = piece.trimmingCharacters(in: .whitespaces)
+            guard !value.isEmpty, !seen.contains(value) else { continue }
+            seen.insert(value)
+            values.append(value)
+        }
+        return values
+    }
 }

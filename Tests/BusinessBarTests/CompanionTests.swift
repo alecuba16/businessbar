@@ -1064,3 +1064,53 @@ final class ChatModelEffortOptionsTests: XCTestCase {
         XCTAssertNil(model.effortOptions)
     }
 }
+
+// MARK: - EffortParseListTests
+
+final class EffortParseListTests: XCTestCase {
+    func testParseListSplitsCommasAndSpaces() {
+        XCTAssertEqual(EffortVocabulary.parseList("low, medium high"), ["low", "medium", "high"])
+        XCTAssertEqual(EffortVocabulary.parseList("  turbo  "), ["turbo"])
+    }
+
+    func testParseListDropsDuplicatesAndEmpties() {
+        XCTAssertEqual(EffortVocabulary.parseList("low, low,, ,high,"), ["low", "high"])
+        XCTAssertEqual(EffortVocabulary.parseList(""), [])
+    }
+
+    func testParseListPreservesCaseAsTyped() {
+        XCTAssertEqual(EffortVocabulary.parseList("LOW, Medium"), ["LOW", "Medium"])
+    }
+}
+
+// MARK: - RemoteModelInfoChatModelTests
+
+final class RemoteModelInfoChatModelTests: XCTestCase {
+    func testChatModelPrefillsFromOpenRouterStyleRow() {
+        let info = RemoteModelInfo(
+            id: "openai/gpt-5",
+            effortOptions: ["low", "medium", "high"],
+            supportsReasoning: true
+        )
+        let model = info.chatModel()
+        XCTAssertEqual(model.name, "gpt-5")
+        XCTAssertEqual(model.model, "openai/gpt-5")
+        XCTAssertEqual(model.reasoningEnabled, true)
+        XCTAssertEqual(model.effortOptions, ["low", "medium", "high"])
+    }
+
+    func testChatModelLeavesReasoningUntouchedWhenNotFlagged() {
+        let info = RemoteModelInfo(id: "anthropic/claude-haiku")
+        let model = info.chatModel()
+        XCTAssertEqual(model.name, "claude-haiku")
+        XCTAssertNil(model.reasoningEnabled)
+        XCTAssertNil(model.effortOptions)
+    }
+
+    func testChatModelFallsBackToFullIDAsName() {
+        let info = RemoteModelInfo(id: "plain-model")
+        let model = info.chatModel()
+        XCTAssertEqual(model.name, "plain-model")
+        XCTAssertEqual(model.model, "plain-model")
+    }
+}
