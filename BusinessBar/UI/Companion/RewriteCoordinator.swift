@@ -24,7 +24,12 @@ final class RewriteCoordinator: ObservableObject {
     /// Runs one template's rewrite on the current selection. Each template
     /// has its own global shortcut, so the template is fixed at trigger time.
     func startRewrite(template: PromptTemplate, client: LLMClient) {
+        // The flag flips here, not in the task body: a duplicate trigger in
+        // the same runloop turn must hit the guard before any body runs, or
+        // the second run cancels the first mid-stream and the cancelled
+        // stream ends empty, surfacing a false "empty response" toast.
         guard !isStreaming else { return }
+        isStreaming = true
         errorMessage = nil
         run(template: template, client: client)
     }
@@ -34,7 +39,6 @@ final class RewriteCoordinator: ObservableObject {
 
         streamTask = Task { [weak self] in
             guard let self else { return }
-            self.isStreaming = true
             // Rewrite is one shot: once the stream ends there is no further LLM
             // work here, so the shared ACP subprocess must not idle. Skipped
             // when the chat panel is open: it shares the process and session.
