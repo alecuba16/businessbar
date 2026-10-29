@@ -67,6 +67,9 @@ final class RewriteCoordinator: ObservableObject {
             let prompt = template.render(with: original)
             var result = ""
             do {
+                // A template pinned to a local MLX model needs the server up
+                // even when the chat panel's selected model is remote.
+                try await CompanionConfigService.ensureLocalServer(forModelID: template.modelID)
                 let stream = await client.stream(messages: [
                     ChatMessage(role: .user, content: prompt)
                 ], onToolCall: nil, reasoningEffortOverride: template.reasoningEffort)

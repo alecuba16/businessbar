@@ -58,7 +58,7 @@ struct ToolsSection: View {
         } header: {
             Text("Tools")
         } footer: {
-            Text("Tools the model can call on the OpenAI-compatible backend. Toggle a tool to offer or hide it; Configure edits its provider, keys, and defaults. ACP agents bring their own tools.")
+            Text("Tools the model can call. Toggle a tool to offer or hide it; Configure edits its provider, keys, and defaults. ACP agents bring their own tools.")
         }
         .sheet(isPresented: $showsWebSearchSheet) {
             WebSearchToolSheet()
@@ -239,11 +239,13 @@ struct WebSearchToolSheet: View {
 /// new sessions start from, and where the per-session controls live.
 struct CommandRunnerToolSheet: View {
     @State private var defaultWorkingDir: String
+    @State private var defaultMode: CommandPermissionMode
 
     @Environment(\.dismiss) private var dismiss
 
     init() {
         _defaultWorkingDir = State(initialValue: CompanionConfigService.commandDefaultWorkingDir())
+        _defaultMode = State(initialValue: CompanionConfigService.commandPermissionMode())
     }
 
     var body: some View {
@@ -292,7 +294,20 @@ struct CommandRunnerToolSheet: View {
                 .help("Choose default working dir")
             }
 
-            Text("New chat sessions start from this dir; the header in the chat panel shows it and can switch it per session. Read-only commands run without asking, everything else shows a confirmation card, and Auto-run (YOLO) stays per session in the chat header.")
+            Picker("run_command", selection: $defaultMode) {
+                Text("Ask").tag(CommandPermissionMode.ask)
+                Text("Allow").tag(CommandPermissionMode.allow)
+                Text("Deny").tag(CommandPermissionMode.deny)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: defaultMode) { _, newValue in
+                CompanionConfigService.setCommandPermissionMode(newValue)
+            }
+            Text("Default activation for run_command in new sessions: Allow runs commands without asking, Ask confirms anything beyond read-only commands, Deny refuses every call. The chat header can switch it per session, and Allow still prompts for rm and credentials files. read_file and list_files never ask.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Text("New chat sessions start from this dir; the header in the chat panel shows it and can switch it per session.")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
@@ -302,7 +317,7 @@ struct CommandRunnerToolSheet: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .frame(width: 460, height: 320)
+        .frame(width: 460, height: 380)
         .padding()
     }
 }

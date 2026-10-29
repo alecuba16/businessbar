@@ -49,7 +49,10 @@ struct ChatView: View {
         self.store = store
         self.commandTools = commandTools
         self.clientProvider = clientProvider
-        _selectedProfileID = State(initialValue: CompanionConfigService.selectedModel()?.model.id)
+        // An agent selection stores the provider id, a model selection the
+        // model id; both live in the same picker.
+        _selectedProfileID = State(initialValue: CompanionConfigService.selectedACPProvider()?.id
+            ?? CompanionConfigService.selectedModel()?.model.id)
         _selectedEffort = State(initialValue: CompanionConfigService.adhocChatEffort().isEmpty
             ? Self.defaultEffortTag
             : CompanionConfigService.adhocChatEffort())
@@ -135,9 +138,8 @@ struct ChatView: View {
     /// history without restarting anything.
     private var controlBar: some View {
         let providers = CompanionConfigService.chatProviders()
-        let isACP = CompanionConfigService.backend() == .acp
         return HStack(spacing: 8) {
-            if !isACP, !providers.isEmpty {
+            if !providers.isEmpty {
                 Picker("Model", selection: Binding(
                     get: { selectedProfileID },
                     set: { newValue in
@@ -161,9 +163,15 @@ struct ChatView: View {
                     }
                 )) {
                     ForEach(providers) { provider in
-                        Section(provider.name) {
-                            ForEach(provider.models) { model in
-                                Text(model.name).tag(Optional(model.id))
+                        if provider.kind == .acpAgent {
+                            // Agents carry no models; the provider row itself
+                            // selects the backend.
+                            Text(provider.name).tag(Optional(provider.id))
+                        } else {
+                            Section(provider.name) {
+                                ForEach(provider.models) { model in
+                                    Text(model.name).tag(Optional(model.id))
+                                }
                             }
                         }
                     }
@@ -432,9 +440,9 @@ struct ChatView: View {
 
     // MARK: - Chat header
 
-    /// Header row: new chat and history buttons plus the YOLO toggle
-    /// when command tools are active. Session controls live here, next to
-    /// the context they act on, not in the input bar.
+    /// Header row: new chat and history buttons plus the command
+    /// permission picker when command tools are active. Session controls
+    /// live here, next to the context they act on, not in the input bar.
     private var chatHeader: some View {
         HStack(spacing: 8) {
             Button {
@@ -464,20 +472,23 @@ struct ChatView: View {
 
             Spacer(minLength: 0)
 
-            // The toggle is read from the gate directly: hiding it on a
-            // stale gate would leave YOLO on with no way to turn it off.
+            // The picker is read from the gate directly: hiding it on a
+            // stale gate would leave Allow on with no way to see it.
             if commandToolsEnabledNow {
-                Toggle(isOn: $commandTools.yoloEnabled) {
-                    Text("Auto-run (YOLO)")
-                        .font(.caption)
+                Picker("Commands", selection: $commandTools.sessionPermissionMode) {
+                    Text("Ask").tag(CommandPermissionMode.ask)
+                    Text("Allow").tag(CommandPermissionMode.allow)
+                    Text("Deny").tag(CommandPermissionMode.deny)
                 }
-                .toggleStyle(.switch)
+                .pickerStyle(.segmented)
                 .controlSize(.mini)
-                .tint(commandTools.yoloEnabled ? .red : .accentColor)
+                .frame(maxWidth: 130)
                 .help(
-                    commandTools.yoloEnabled
+                    commandTools.sessionPermissionMode == .allow
                         ? "Commands run without asking. rm and credentials files still prompt."
-                        : "Ask before running anything beyond read-only commands"
+                        : commandTools.sessionPermissionMode == .deny
+                            ? "run_command is refused; read_file and list_files keep working."
+                            : "Ask before running anything beyond read-only commands"
                 )
             }
         }
@@ -631,7 +642,7 @@ struct ChatView: View {
     /// True when the currently selected model takes image inputs, so the
     /// paperclip and drop/paste paths are worth showing.
     private var selectedModelAcceptsImages: Bool {
-        guard CompanionConfigService.backend() == .openai else { return false }
+        guard CompanionConfigService.selectedACPProvider() == nil else { return false }
         guard let (_, model) = CompanionConfigService.selectedModel() else { return false }
         return model.acceptsImages == true
     }
@@ -754,7 +765,7 @@ struct ChatView: View {
     }
 
     /// True when the chat's outgoing requests actually offer the command
-    /// tools: user enabled them, the backend is OpenAI-compatible, and the
+    /// tools: user enabled them, no ACP agent is selected, and the
     /// selected model is not the local MLX server (mlx-lsp serves
     /// run_command requests by echoing the arguments back, so every
     /// command would "succeed" with nonsense output).
@@ -763,14 +774,14 @@ struct ChatView: View {
     }
 
     /// Gate refreshed on settings saves while the panel is open, so the
-    /// YOLO toggle never lingers after the Command Runner is turned off
-    /// in Preferences. The revision counter is read here so SwiftUI
+    /// permission picker never lingers after the Command Runner is turned
+    /// off in Preferences. The revision counter is read here so SwiftUI
     /// treats the bus ping as a dependency of the rendered header.
     private var commandToolsEnabledNow: Bool {
         _ = settingsRevision
         return CompanionConfigService.commandToolsEnabled()
-            && CompanionConfigService.backend() == .openai
-            && !(CompanionConfigService.selectedModel()?.provider.isLocalMLX == true)
+            && CompanionConfigService.selectedACPProvider() == nil
+            && !(CompanionConfigService.selectedModel()?.provider.kind == .localMLX)
     }
 
     /// Thumbnails of staged images with a remove button each.

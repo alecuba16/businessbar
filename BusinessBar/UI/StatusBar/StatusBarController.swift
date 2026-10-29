@@ -643,7 +643,7 @@ final class StatusBarController: NSObject {
             guard KeyboardShortcuts.getShortcut(for: shortcutName) != nil else { continue }
             KeyboardShortcuts.onKeyUp(for: shortcutName) { [weak self] in
                 guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion),
-                      let client = CompanionConfigService.makeClient() else { return }
+                      let client = CompanionConfigService.makeClient(forModelID: template.modelID) else { return }
                 ToastCenter.shared.show("Rewriting with \(template.name)…", icon: "wand.and.stars", duration: 1.2)
                 self?.runTemplateRewrite(templateID: template.id, client: client)
             }
