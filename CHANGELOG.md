@@ -5,6 +5,13 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Fixed
+- Template rewrite shortcuts fire once per keypress. KeyboardShortcuts.onKeyUp appends handlers and the status bar re-registered them on every template edit, so one keypress ran the rewrite N+1 times, each run cancelled the previous task before its body could start, and the cancelled stream ended empty, surfacing a false "model returned an empty response" toast before the surviving run inserted the text a second later
+- The Commands permission picker in the chat header renders its label as a small plain text in front of the Ask/Allow/Deny segments. The picker's own label was capped at 130pt and wrapped into a vertical Com/mands column; both the label and the segments now carry the hover tooltip naming what the active mode does
+- Escape closes the history drawer and denies on the command approval card, so abandoning either with the keyboard takes the safe path
+- The empty chat state offers an Open Companion settings button when no model is configured, and it opens Preferences directly on the Companion tab (showPreferences takes an initial tab)
+
 ## [1.4.0] - 2026-10-29
 ### Added
 - Local MLX reasoning discovery: after a model is downloaded (or checked before download), the app reads the model's own files, the chat template and config, and reports whether it supports reasoning and which controls it accepts. Two shapes exist: toggle models (Qwen3 family, template takes `enable_thinking`) and effort models (gpt-oss family, template takes `reasoning_effort` with low/medium/high). The Check card and the catalog rows show a brain icon with the summary, and requests to the local server send the right `chat_template_kwargs` instead of a `reasoning_effort` field the template never reads
