@@ -5,7 +5,7 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-10-29
 ### Added
 - Insert after selection (new line): a fourth template action that starts the rewrite on the line below the selection instead of gluing onto its last line. A selection that already ends in a newline is not doubled, so no blank line appears. Falls back to the overlay like the other direct-write actions when in-place insertion is not possible
 
