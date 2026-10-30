@@ -21,7 +21,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
         static var live: Dependencies {
             Dependencies(
-                isAvailable: { Bundle.main.bundleIdentifier != nil },
+                isAvailable: { RuntimeBundle.isPresent },
                 isEnabled: { NotificationManager.notificationsEnabled() },
                 now: Date.init,
                 configure: { delegate, categories in

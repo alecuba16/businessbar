@@ -326,19 +326,20 @@ enum AppPreferencesUI2Scenarios {
 
         // Granted calendar permission: the selection list renders with the
         // fixture calendar and toggles persist their selection.
-        var notificationGrants: [Bool] = []
+        var notificationGrants = 0
         let granted = UI2Hosted(
             CalendarsTab(
                 meetingManager: meetings,
                 googleAuth: auth,
                 defaults: defaults,
                 calendarAuthorization: { .fullAccess },
-                notificationAuthorization: { receive in receive(true); notificationGrants.append(true) }
+                notificationAuthorization: { receive in receive(true); notificationGrants += 1 }
             ).defaultAppStorage(defaults),
             size: NSSize(width: 900, height: 1400)
         )
         defer { granted.close() }
         await ui2Settle()
+        try context.expect(notificationGrants > 0, "Granted fixture boundary answered the auth refresh")
         try context.expect(granted.text.contains("Enable calendar functionality"), "Feature toggle renders")
         try context.expect(granted.text.contains("Calendar permission granted"), "Granted status row renders")
         try context.expect(granted.text.contains("Coverage calendar"), "Fixture calendar appears in the selection list")
@@ -354,29 +355,24 @@ enum AppPreferencesUI2Scenarios {
 
         // Denied calendar permission: the missing-permission branch renders
         // and the grant button runs the real request through the fake store.
-        var deniedGrants: [Bool] = []
+        var deniedGrants = 0
         let denied = UI2Hosted(
             CalendarsTab(
                 meetingManager: meetings,
                 googleAuth: auth,
                 defaults: defaults,
                 calendarAuthorization: { .denied },
-                notificationAuthorization: { receive in receive(false); deniedGrants.append(false) }
+                notificationAuthorization: { receive in receive(false); deniedGrants += 1 }
             ).defaultAppStorage(defaults),
             size: NSSize(width: 900, height: 1400)
         )
         defer { denied.close() }
         await ui2Settle()
+        try context.expect(deniedGrants > 0, "Injected boundary answered the auth refresh")
         try context.expect(denied.text.contains("Calendar permission is missing."), "Denied status shows the missing-permission text")
         try context.expect(denied.text.contains("Calendar permission required"), "Status row shows required")
-        try context.expect(denied.control("Grant Permission") != nil, "Grant button present in the denied state")
+        try context.expect(denied.control("Grant Notification Permission") != nil, "Grant button present in the denied state")
         try context.expect(denied.text.contains("Notification permission required for reminders"), "Notification status row reflects the injected denial")
-
-        // The notification toggle without authorization requests access
-        // instead of flipping on: the injected boundary reports the outcome.
-        try denied.press("Grant Notification Permission", context)
-        await ui2Settle()
-        try context.expect(!deniedGrants.isEmpty, "Grant request ran through the boundary")
 
         // Provider picker carries both options regardless of configuration.
         try context.expect(granted.text.contains("macOS Calendar"), "Provider picker lists macOS Calendar")

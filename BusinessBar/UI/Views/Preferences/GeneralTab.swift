@@ -199,7 +199,7 @@ struct GeneralTab: View {
         }
 
         // Clear any scheduled/delivered notifications.
-        if Bundle.main.bundleIdentifier != nil {
+        if RuntimeBundle.isPresent {
             UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
             UNUserNotificationCenter.current().removeAllDeliveredNotifications()
             AppLogger.info("All notifications cleared", category: "General")

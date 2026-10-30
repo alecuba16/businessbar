@@ -1,9 +1,14 @@
 import SwiftUI
 import AppKit
+import BusinessBarCore
 
 @MainActor
 final class OnboardingWindowController: NSWindowController {
     convenience init() {
+        self.init(onboardingView: OnboardingView())
+    }
+
+    convenience init(onboardingView: OnboardingView) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
             styleMask: [.titled, .closable],
@@ -13,7 +18,7 @@ final class OnboardingWindowController: NSWindowController {
         
         window.center()
         window.title = "Welcome to BusinessBar"
-        window.contentView = NSHostingView(rootView: OnboardingView())
+        window.contentView = NSHostingView(rootView: onboardingView)
         
         self.init(window: window)
     }
@@ -25,6 +30,20 @@ final class OnboardingWindowController: NSWindowController {
 }
 
 struct OnboardingView: View {
+    private let permissionStatus: () async -> PermissionsStep.PermissionStatus
+    private let requestAccessibility: @MainActor () -> Void
+    private let accessibilityRefreshDelay: () async -> Void
+
+    init(
+        permissionStatus: @escaping () async -> PermissionsStep.PermissionStatus = { await PermissionsStep.livePermissionStatus() },
+        requestAccessibility: @escaping @MainActor () -> Void = { BadgeManager.requestAccessibilityPermission() },
+        accessibilityRefreshDelay: @escaping () async -> Void = { try? await Task.sleep(for: .seconds(1)) }
+    ) {
+        self.permissionStatus = permissionStatus
+        self.requestAccessibility = requestAccessibility
+        self.accessibilityRefreshDelay = accessibilityRefreshDelay
+    }
+
     @State private var currentStep = 0
     
     var body: some View {
@@ -37,7 +56,10 @@ struct OnboardingView: View {
                 
                 PermissionsStep(
                     onBack: { currentStep = 0 },
-                    onNext: finishOnboarding
+                    onNext: finishOnboarding,
+                    permissionStatus: permissionStatus,
+                    requestAccessibility: requestAccessibility,
+                    accessibilityRefreshDelay: accessibilityRefreshDelay
                 )
                     .tag(1)
             }

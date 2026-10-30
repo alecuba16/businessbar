@@ -39,7 +39,7 @@ struct CalendarsTab: View {
         defaults: UserDefaults = .standard,
         calendarAuthorization: @escaping () -> EKAuthorizationStatus = { EKEventStore.authorizationStatus(for: .event) },
         notificationAuthorization: @escaping (@escaping (Bool) -> Void) -> Void = { receive in
-            guard Bundle.main.bundleIdentifier != nil else { receive(false); return }
+            guard RuntimeBundle.isPresent else { receive(false); return }
             UNUserNotificationCenter.current().getNotificationSettings { settings in
                 let granted = [.authorized, .provisional].contains(settings.authorizationStatus)
                 Task { @MainActor in receive(granted) }
@@ -371,8 +371,8 @@ struct CalendarsTab: View {
     }
 
     private func requestNotificationAccess() {
-        guard Bundle.main.bundleIdentifier != nil else {
-            AppLogger.warning("Cannot request notification access — no bundle identifier (running outside .app bundle?)", category: "Permissions")
+        guard RuntimeBundle.isPresent else {
+            AppLogger.warning("Cannot request notification access — no app bundle (running outside .app bundle?)", category: "Permissions")
             return
         }
         UNUserNotificationCenter.current().getNotificationSettings { settings in

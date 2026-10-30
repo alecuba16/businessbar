@@ -191,9 +191,9 @@ struct PermissionsStep: View {
         if !accessibilityGranted { featureBadgesEnabled = false }
     }
 
-    private static func livePermissionStatus() async -> PermissionStatus {
+    static func livePermissionStatus() async -> PermissionStatus {
         let notifications: Bool
-        if Bundle.main.bundleIdentifier != nil {
+        if RuntimeBundle.isPresent {
             notifications = await withCheckedContinuation { continuation in
                 UNUserNotificationCenter.current().getNotificationSettings { settings in
                     continuation.resume(returning: [.authorized, .provisional].contains(settings.authorizationStatus))
@@ -226,7 +226,7 @@ struct PermissionsStep: View {
     }
 
     private func requestNotificationAccess() {
-        guard Bundle.main.bundleIdentifier != nil else { return }
+        guard RuntimeBundle.isPresent else { return }
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             switch settings.authorizationStatus {
             case .denied:

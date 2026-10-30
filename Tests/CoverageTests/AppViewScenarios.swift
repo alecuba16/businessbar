@@ -295,9 +295,19 @@ enum AppViewScenarios {
     }
 
     private static func onboardingFlow(_ context: CoverageContext) async throws {
-        // OnboardingWindowController convenience init builds the real window
-        // and hosts the real OnboardingView without ordering it front.
-        let controller = OnboardingWindowController()
+        var flowRequests = 0
+        var flowDelays = 0
+        let flowStatus: () async -> PermissionsStep.PermissionStatus = {
+            .init(calendar: false, notifications: false, accessibility: false)
+        }
+        // The controller builds the real window; the hosted view carries fake
+        // permission boundaries so the bare-binary harness never touches live
+        // UNUserNotificationCenter.
+        let controller = OnboardingWindowController(onboardingView: OnboardingView(
+            permissionStatus: flowStatus,
+            requestAccessibility: { flowRequests += 1 },
+            accessibilityRefreshDelay: { flowDelays += 1 }
+        ))
         try context.expect(controller.window != nil, "Onboarding controller owns a window")
         if let window = controller.window {
             try context.equal(window.title, "Welcome to BusinessBar", "Onboarding window keeps its title")
@@ -308,7 +318,11 @@ enum AppViewScenarios {
 
         // The full TabView flow: welcome screen first, Get Started advances to
         // the permissions step, Back returns to welcome.
-        let flow = Hosted(OnboardingView(), size: NSSize(width: 600, height: 500))
+        let flow = Hosted(OnboardingView(
+            permissionStatus: flowStatus,
+            requestAccessibility: { flowRequests += 1 },
+            accessibilityRefreshDelay: { flowDelays += 1 }
+        ), size: NSSize(width: 600, height: 500))
         defer { flow.close() }
         await settle()
         try flow.render(context)
@@ -316,9 +330,27 @@ enum AppViewScenarios {
         try flow.press("Get Started", context)
         await settle()
         try context.expect(flow.text.contains("Calendar") && flow.text.contains("Badge"), "Onboarding flow advances to permissions step")
+        try context.expect(flow.text.contains("Grant Permission"), "Ungranted status renders explicit grant buttons")
         try flow.press("Back", context)
         await settle()
         try context.expect(flow.text.contains("Get Started"), "Back returns to the welcome step")
+        try context.equal(flowRequests, 0, "Flow navigation never requests accessibility")
+
+        // Default boundaries: outside an app bundle the live status probe
+        // reports notifications as ungranted without UserNotifications, while
+        // EventKit and accessibility remain read-only queries.
+        let liveDefaults = try context.defaults("onboarding-live")
+        liveDefaults.set(true, forKey: Constants.Defaults.featureNotifications)
+        liveDefaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        liveDefaults.set(true, forKey: Constants.Defaults.featureBadges)
+        let live = Hosted(PermissionsStep(onBack: {}, onNext: {}).defaultAppStorage(liveDefaults), size: NSSize(width: 750, height: 900))
+        defer { live.close() }
+        await settle()
+        try live.render(context)
+        try context.expect(live.text.contains("Permissions & Features"), "Live status probe renders the permissions step")
+        try context.expect(!liveDefaults.bool(forKey: Constants.Defaults.featureNotifications), "Ungranted live notifications clear the feature flag")
+        try live.press("Back", context)
+        try live.press("Finish", context)
     }
 
     private static func appearance(_ context: CoverageContext) async throws {
