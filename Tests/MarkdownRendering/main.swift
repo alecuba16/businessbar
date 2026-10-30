@@ -27,20 +27,132 @@ for literal in [
     "Hello!", "*unfinished", "**unfinished", "_unfinished", "__unfinished",
     "`unfinished", "~unfinished", "~~unfinished", "[label](", "![alt](",
     "snake_case_identifier", "trailing*", "trailing_", "trailing`",
-    "trailing~", "trailing[", "trailing!", "🙂 [", "a\\*", ""
+    "trailing~", "trailing[", "trailing!", "🙂 [", ""
 ] {
     expectText(literal, literal.isEmpty ? "" : literal + "\n")
 }
 
 expectText("`code`", "code\n")
+expectText("a\\*", "a*\n")
 expectText("[link](https://example.com)", "link\n")
 expectText("First paragraph!\n\nSecond paragraph!", "First paragraph!\n\nSecond paragraph!\n")
+
+func expectStyle(_ markdown: String, text: String, span: String, bold: Bool, italic: Bool) {
+    let rendered = MarkdownAttributedStringLoader.attributedString(for: markdown)
+    guard rendered.string == text + "\n" else {
+        fputs("FAIL: emphasis text \(markdown.debugDescription) rendered as \(rendered.string.debugDescription)\n", stderr)
+        exit(1)
+    }
+    let range = (rendered.string as NSString).range(of: span)
+    guard range.location != NSNotFound else {
+        fputs("FAIL: emphasis span \(span.debugDescription) is missing\n", stderr)
+        exit(1)
+    }
+    rendered.enumerateAttributes(in: range) { attributes, _, _ in
+        let font = attributes[.font] as? NSFont ?? NSFont.systemFont(ofSize: 13)
+        let traits = NSFontManager.shared.traits(of: font)
+        let isBold = traits.contains(.boldFontMask)
+        let obliqueness = (attributes[.obliqueness] as? NSNumber)?.doubleValue ?? 0
+        let isItalic = traits.contains(.italicFontMask) || obliqueness != 0
+        guard isBold == bold, isItalic == italic else {
+            fputs("FAIL: wrong emphasis for \(span.debugDescription) in \(markdown.debugDescription): bold=\(isBold), italic=\(isItalic)\n", stderr)
+            exit(1)
+        }
+    }
+    checks += 1
+}
+
+expectStyle("**bold**", text: "bold", span: "bold", bold: true, italic: false)
+expectStyle("*italic*", text: "italic", span: "italic", bold: false, italic: true)
+expectStyle("***both***", text: "both", span: "both", bold: true, italic: true)
+expectStyle("Before *italic* and **bold** after.", text: "Before italic and bold after.", span: "Before", bold: false, italic: false)
+expectStyle("Before *italic* and **bold** after.", text: "Before italic and bold after.", span: "italic", bold: false, italic: true)
+expectStyle("Before *italic* and **bold** after.", text: "Before italic and bold after.", span: "bold", bold: true, italic: false)
+expectStyle("Before *italic* and **bold** after.", text: "Before italic and bold after.", span: "after", bold: false, italic: false)
+expectStyle("**bold *both***", text: "bold both", span: "both", bold: true, italic: true)
+expectStyle("*italic **both***", text: "italic both", span: "both", bold: true, italic: true)
+expectStyle("*unfinished", text: "*unfinished", span: "unfinished", bold: false, italic: false)
+expectStyle("**unfinished", text: "**unfinished", span: "unfinished", bold: false, italic: false)
+expectStyle("**bold *italic* bold**", text: "bold italic bold", span: "bold", bold: true, italic: false)
+expectStyle("**bold *italic* bold**", text: "bold italic bold", span: "italic", bold: true, italic: true)
+expectStyle("*italic **bold** italic*", text: "italic bold italic", span: "italic", bold: false, italic: true)
+expectStyle("*italic **bold** italic*", text: "italic bold italic", span: "bold", bold: true, italic: true)
+expectStyle("🙂 prefix **bold** tail", text: "🙂 prefix bold tail", span: "🙂 prefix", bold: false, italic: false)
+expectStyle("🙂 prefix **bold** tail", text: "🙂 prefix bold tail", span: "bold", bold: true, italic: false)
+expectStyle("__bold__ and _italic_", text: "bold and italic", span: "bold", bold: true, italic: false)
+expectStyle("__bold__ and _italic_", text: "bold and italic", span: "italic", bold: false, italic: true)
+expectStyle("snake_case_identifier", text: "snake_case_identifier", span: "snake_case_identifier", bold: false, italic: false)
+expectStyle("Before * padded * after", text: "Before * padded * after", span: "padded", bold: false, italic: false)
+expectStyle("Before \\*literal\\* after", text: "Before *literal* after", span: "literal", bold: false, italic: false)
+expectStyle("Before `**literal**` after", text: "Before **literal** after", span: "literal", bold: false, italic: false)
+expectStyle("Before *unfinished", text: "Before *unfinished", span: "unfinished", bold: false, italic: false)
+expectStyle("Before **unfinished", text: "Before **unfinished", span: "unfinished", bold: false, italic: false)
+expectStyle("Before [*link*](https://example.com) after", text: "Before link after", span: "link", bold: false, italic: true)
+
+func expectAttribute(
+    _ markdown: String,
+    span: String,
+    key: NSAttributedString.Key,
+    baseURL: URL? = nil,
+    matches: (Any?) -> Bool
+) {
+    let rendered = MarkdownAttributedStringLoader.attributedString(for: markdown, baseURL: baseURL)
+    let range = (rendered.string as NSString).range(of: span)
+    guard range.location != NSNotFound else {
+        fputs("FAIL: attribute span \(span.debugDescription) is missing in \(rendered.string.debugDescription)\n", stderr)
+        exit(1)
+    }
+    rendered.enumerateAttribute(key, in: range) { value, _, _ in
+        guard matches(value) else {
+            fputs("FAIL: wrong \(key.rawValue) for \(span.debugDescription) in \(markdown.debugDescription)\n", stderr)
+            exit(1)
+        }
+    }
+    checks += 1
+}
+
+expectAttribute("Before [*link*](https://example.com) after", span: "link", key: .link) {
+    ($0 as? URL)?.absoluteString == "https://example.com"
+}
+expectAttribute("Before [link](https://example.com) after", span: "Before", key: .link) { $0 == nil }
+expectAttribute("Before [link](https://example.com) after", span: "after", key: .link) { $0 == nil }
+expectAttribute("[guide](guide)", span: "guide", key: .link, baseURL: URL(string: "https://example.com/docs/")) {
+    ($0 as? URL)?.absoluteString == "https://example.com/docs/guide"
+}
+for url in ["http://example.com", "mailto:test@example.com", "tel:+123456789"] {
+    expectAttribute("[link](\(url))", span: "link", key: .link) { ($0 as? URL)?.absoluteString == url }
+}
+for url in ["javascript:alert(1)", "file:///etc/passwd", "data:text/plain,test"] {
+    expectText("Before [*unsafe* link](\(url)) after", "Before unsafe link (\(url)) after\n")
+    expectAttribute("Before [*unsafe* link](\(url)) after", span: "unsafe link", key: .link) { $0 == nil }
+}
+expectText("Before ~~strike~~ after", "Before strike after\n")
+expectAttribute("Before ~~strike~~ after", span: "strike", key: .strikethroughStyle) {
+    ($0 as? NSNumber)?.intValue == NSUnderlineStyle.single.rawValue
+}
+expectAttribute("Before ~~strike~~ after", span: "after", key: .strikethroughStyle) { $0 == nil }
+expectAttribute("Before `**literal**` after", span: "**literal**", key: .font) {
+    ($0 as? NSFont)?.isFixedPitch == true
+}
+expectAttribute("# *Heading*", span: "Heading", key: .font) { ($0 as? NSFont)?.pointSize == 17.5 }
+expectText("Before ![alt **text**](https://example.com/a.png) after", "Before [image: alt text] after\n")
+expectText("![](https://example.com/a.png)", "[image]\n")
+expectText("![a](https://example.com/a.png)![b](https://example.com/a.png)", "[image: a][image: b]\n")
+expectAttribute("![alt](https://example.com/a.png)", span: "[image: alt]", key: .imageURL) { $0 == nil }
+expectAttribute("![alt](https://example.com/a.png)", span: "[image: alt]", key: .attachment) { $0 == nil }
+expectText("[![alt](https://example.com/a.png)](https://example.com)", "[image: alt]\n")
+for key in [NSAttributedString.Key.link, .attachment, .imageURL] {
+    expectAttribute("[![alt](https://example.com/a.png)](https://example.com)", span: "[image: alt]", key: key) { $0 == nil }
+}
+expectText("Before `**literal**` after\n\n```\n*still literal*\n```", "Before **literal** after\n\n*still literal*\n")
 
 let streamedReplies = [
     "Hello! A *partial emphasis*, **bold**, ~~strike~~ and `code`.",
     "A [link](https://example.com) and ![image](https://example.com/a.png).",
     "## Heading\n\nFirst paragraph!\n\n- One\n- Two\n\n```swift\nlet value = 1\n```",
-    "snake_case_identifier with trailing punctuation: [!_*~` 🙂"
+    "snake_case_identifier with trailing punctuation: [!_*~` 🙂",
+    "Before *italic* and **bold** after.",
+    "**bold *italic* bold** and *italic **bold** italic*"
 ]
 for reply in streamedReplies {
     for end in reply.indices {
@@ -143,6 +255,18 @@ let nativeReply = "Hello! [unfinished"
 for end in nativeReply.indices {
     renderNative(String(nativeReply[..<end]))
 }
+let emphasizedView = renderNative("Before *italic* and **bold** after.", expected: "Before italic and bold after.\n")
+let italicRange = (emphasizedView.string as NSString).range(of: "italic")
+let boldRange = (emphasizedView.string as NSString).range(of: "bold")
+guard let storage = emphasizedView.textStorage,
+      let italic = storage.attribute(.obliqueness, at: italicRange.location, effectiveRange: nil) as? NSNumber,
+      italic.doubleValue != 0,
+      let boldFont = storage.attribute(.font, at: boldRange.location, effectiveRange: nil) as? NSFont,
+      NSFontManager.shared.traits(of: boldFont).contains(.boldFontMask) else {
+    fputs("FAIL: native text storage lost italic or bold styling\n", stderr)
+    exit(1)
+}
+checks += 1
 renderNative("First paragraph!\n\nSecond paragraph!", expected: "First paragraph!\n\nSecond paragraph!\n")
 if let textView = findTextView(in: hostingView) {
     let lineHeight = NSLayoutManager().defaultLineHeight(for: NSFont.systemFont(ofSize: 13))
