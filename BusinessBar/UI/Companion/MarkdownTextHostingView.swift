@@ -39,12 +39,31 @@ struct MarkdownTextHostingView: NSViewRepresentable {
         }
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: MarkdownTextView, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
+
+        // NSTextView has no intrinsic height. Its live container can also report zero during a resize,
+        // so measure the same attributed text without changing the displayed container.
+        let inset = nsView.textContainerInset
+        let storage = NSTextStorage(attributedString: nsView.attributedString())
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(containerSize: NSSize(
+            width: max(1, width - inset.width * 2),
+            height: CGFloat.greatestFiniteMagnitude
+        ))
+        container.lineFragmentPadding = nsView.textContainer?.lineFragmentPadding ?? 0
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        layout.ensureLayout(for: container)
+        let height = max(layout.usedRect(for: container).maxY, layout.extraLineFragmentRect.maxY)
+        return CGSize(width: width, height: ceil(height + inset.height * 2))
+    }
+
     private func apply(_ markdown: String, to textView: MarkdownTextView) {
         let attributed = MarkdownAttributedStringLoader.attributedString(for: markdown)
         textView.textStorage?.setAttributedString(attributed)
         textView.markdownTag = markdown
-        // Height follows content: SwiftUI asks for the intrinsic size
-        // through fitted sizing, the container grows without a cap.
+        // Stream updates can change the height returned by sizeThatFits.
         textView.invalidateIntrinsicContentSize()
     }
 }

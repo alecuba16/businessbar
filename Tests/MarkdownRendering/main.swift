@@ -65,12 +65,26 @@ struct MarkdownBubbleFixture: View {
     let markdown: String
 
     var body: some View {
-        VStack(alignment: .leading) {
-            MarkdownTextHostingView(markdown: markdown)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Spacer(minLength: 40)
+                    Text("Test prompt").padding(10)
+                }
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        MarkdownTextHostingView(markdown: markdown)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(10)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        Text("Copy").font(.caption)
+                    }
+                    Spacer(minLength: 40)
+                }
+            }
+            .padding()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -88,7 +102,8 @@ var heartbeats = 0
 let heartbeat = Timer(timeInterval: 0.002, repeats: true) { _ in heartbeats += 1 }
 RunLoop.main.add(heartbeat, forMode: .common)
 
-func renderNative(_ markdown: String, expected: String? = nil) {
+@discardableResult
+func renderNative(_ markdown: String, expected: String? = nil) -> MarkdownTextView {
     hostingView.rootView = MarkdownBubbleFixture(markdown: markdown)
     hostingView.layoutSubtreeIfNeeded()
     RunLoop.main.run(until: Date().addingTimeInterval(0.01))
@@ -101,7 +116,27 @@ func renderNative(_ markdown: String, expected: String? = nil) {
         fputs("FAIL: native text storage differs from the expected reply\n", stderr)
         exit(1)
     }
+    if !textView.string.isEmpty {
+        guard let layout = textView.layoutManager,
+              let container = textView.textContainer,
+              let wrapper = textView.superview else {
+            fputs("FAIL: native reply has no text layout\n", stderr)
+            exit(1)
+        }
+        layout.ensureLayout(for: container)
+        let textBounds = layout.usedRect(for: container).offsetBy(
+            dx: textView.textContainerOrigin.x,
+            dy: textView.textContainerOrigin.y
+        )
+        let allocatedBounds = textView.convert(wrapper.bounds, from: wrapper)
+        guard textBounds.height > 0,
+              allocatedBounds.insetBy(dx: -0.5, dy: -0.5).contains(textBounds) else {
+            fputs("FAIL: chat bubble clips reply glyphs: \(markdown.count) characters at \(window.contentLayoutRect.size), text \(textBounds), allocated \(allocatedBounds)\n", stderr)
+            exit(1)
+        }
+    }
     checks += 1
+    return textView
 }
 
 let nativeReply = "Hello! [unfinished"
@@ -123,6 +158,45 @@ if let textView = findTextView(in: hostingView) {
     }
     checks += 1
 }
+
+let wrappedReply = String(repeating: "Wrapped reply text. ", count: 12) + "\n\nLast paragraph!"
+for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+    window.appearance = NSAppearance(named: appearance)
+    var heights: [CGFloat] = []
+    for width: CGFloat in [300, 480, 900] {
+        window.setContentSize(NSSize(width: width, height: 900))
+        let textView = renderNative(wrappedReply, expected: wrappedReply + "\n")
+        heights.append(textView.frame.height)
+    }
+    guard heights[0] > heights[2] else {
+        fputs("FAIL: chat reply height did not follow narrower wrapping widths: \(heights)\n", stderr)
+        exit(1)
+    }
+    checks += 1
+    let shortReply = renderNative("Short!", expected: "Short!\n")
+    let shortHeight = shortReply.frame.height
+    guard shortHeight < heights[2] else {
+        fputs("FAIL: chat reply height did not shrink after a shorter update\n", stderr)
+        exit(1)
+    }
+    checks += 1
+    renderNative("", expected: "")
+    let restored = renderNative(wrappedReply, expected: wrappedReply + "\n")
+    guard restored.frame.height > shortHeight else {
+        fputs("FAIL: chat reply height did not grow after an empty update\n", stderr)
+        exit(1)
+    }
+    checks += 1
+    renderNative(streamedReplies[2])
+}
+let overflowingReply = renderNative(String(repeating: "A long reply paragraph!\n\n", count: 40))
+guard overflowingReply.frame.height > window.contentLayoutRect.height else {
+    fputs("FAIL: long reply did not retain its full height beyond the scroll viewport\n", stderr)
+    exit(1)
+}
+checks += 1
+window.appearance = nil
+window.setContentSize(NSSize(width: 480, height: 360))
 
 if let option = CommandLine.arguments.firstIndex(of: "--stream-chunks") {
     guard option + 1 < CommandLine.arguments.count else {
