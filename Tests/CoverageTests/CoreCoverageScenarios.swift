@@ -13,9 +13,11 @@ enum CoreCoverageScenarios {
         var failures: [String] = []
         for (name, scenario) in suites {
             let before = context.checks
+            let started = Date()
+            print("RUN: Core \(name)")
             do {
                 try await scenario(context)
-                print("PASS: Core \(name), \(context.checks - before) checks")
+                print("PASS: Core \(name), \(context.checks - before) checks in \(Int(Date().timeIntervalSince(started)))s")
             } catch {
                 failures.append("\(name): \(error)")
                 print("FAIL: Core \(name): \(error)")

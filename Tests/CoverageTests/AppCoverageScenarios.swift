@@ -26,22 +26,34 @@ enum AppCoverageScenarios {
             CompanionConfigService.credentials = previousCredentials
         }
         var failures: [String] = []
-        do { try preferences(context, defaults: defaults) } catch { failures.append("preferences: \(error)") }
-        do { try await AppConfigScenarios.run(context) } catch { failures.append("providers: \(error)") }
-        do { try await AppRewriteScenarios.run(context) } catch { failures.append("rewrite: \(error)") }
-        do { try await commandTools(context) } catch { failures.append("commands: \(error)") }
-        do { try await AppCommandExecutionScenarios.run(context) } catch { failures.append("command execution: \(error)") }
-        do { try await conversations(context) } catch { failures.append("conversations: \(error)") }
-        do { try await AppCompanionViewScenarios.run(context) } catch { failures.append("companion views: \(error)") }
-        do { try await AppServiceScenarios.run(context) } catch { failures.append("services: \(error)") }
-        do { try await AppViewScenarios.run(context) } catch { failures.append("views: \(error)") }
-        do { try await AppStatusScenarios.run(context) } catch { failures.append("status: \(error)") }
-        do { try await AppChatScenarios.run(context) } catch { failures.append("chat: \(error)") }
-        do { try await AppPreferencesUI1Scenarios.run(context) } catch { failures.append("preferences-ui1: \(error)") }
-        do { try await AppPreferencesUI2Scenarios.run(context) } catch { failures.append("preferences-ui2: \(error)") }
-        do { try await AppCrashAcpScenarios.run(context) } catch { failures.append("crash-acp: \(error)") }
-        do { try await AppLoggingScenarios.run(context) } catch { failures.append("logging: \(error)") }
+        await run("preferences", failures: &failures) { try preferences(context, defaults: defaults) }
+        await run("providers", failures: &failures) { try await AppConfigScenarios.run(context) }
+        await run("rewrite", failures: &failures) { try await AppRewriteScenarios.run(context) }
+        await run("commands", failures: &failures) { try await commandTools(context) }
+        await run("command execution", failures: &failures) { try await AppCommandExecutionScenarios.run(context) }
+        await run("conversations", failures: &failures) { try await conversations(context) }
+        await run("companion views", failures: &failures) { try await AppCompanionViewScenarios.run(context) }
+        await run("services", failures: &failures) { try await AppServiceScenarios.run(context) }
+        await run("views", failures: &failures) { try await AppViewScenarios.run(context) }
+        await run("status", failures: &failures) { try await AppStatusScenarios.run(context) }
+        await run("chat", failures: &failures) { try await AppChatScenarios.run(context) }
+        await run("preferences-ui1", failures: &failures) { try await AppPreferencesUI1Scenarios.run(context) }
+        await run("preferences-ui2", failures: &failures) { try await AppPreferencesUI2Scenarios.run(context) }
+        await run("crash-acp", failures: &failures) { try await AppCrashAcpScenarios.run(context) }
+        await run("logging", failures: &failures) { try await AppLoggingScenarios.run(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
+    }
+
+    private static func run(_ name: String, failures: inout [String], body: @escaping () async throws -> Void) async {
+        let started = Date()
+        print("RUN: app \(name)")
+        do {
+            try await body()
+            print("PASS: app \(name) in \(Int(Date().timeIntervalSince(started)))s")
+        } catch {
+            failures.append("\(name): \(error)")
+            print("FAIL: app \(name): \(error)")
+        }
     }
 
     private static func preferences(_ context: CoverageContext, defaults: UserDefaults) throws {

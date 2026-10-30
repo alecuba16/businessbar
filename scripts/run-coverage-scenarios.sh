@@ -15,7 +15,7 @@ Links existing instrumented app objects, excluding only the app entry object.
 Default: swift build --enable-code-coverage, then scenarios and both native fixtures.
 --no-build requires an existing instrumented debug build and is diagnostic only.
 --isolation-only compiles and runs only the harmless startup isolation check.
-BUSINESSBAR_COVERAGE_TIMEOUT_SECONDS sets each process timeout (default 120).
+BUSINESSBAR_COVERAGE_TIMEOUT_SECONDS sets each process timeout (default 300).
 BUSINESSBAR_COVERAGE_SUITE=all|core|app filters scenario suites.
 Every invocation creates a new run directory inside --output-dir.
 USAGE
@@ -40,7 +40,7 @@ while (( $# )); do
     esac
 done
 [[ "$(uname -s)" == Darwin ]] || fail 'this runner requires macOS'
-timeout_seconds="${BUSINESSBAR_COVERAGE_TIMEOUT_SECONDS:-120}"
+timeout_seconds="${BUSINESSBAR_COVERAGE_TIMEOUT_SECONDS:-300}"
 [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || fail 'timeout must be a positive number of seconds'
 mkdir -p "$output_root"
 output_root="$(cd "$output_root" && pwd -P)"

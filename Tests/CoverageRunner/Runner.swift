@@ -119,6 +119,8 @@ enum CoverageRuntimeIsolation {
 struct CoverageRunner {
     @MainActor
     static func main() async {
+        setvbuf(stdout, nil, _IONBF, 0)
+        setvbuf(stderr, nil, _IONBF, 0)
         CoverageRuntimeIsolation.verify()
         do {
             if CommandLine.arguments.contains("--write-source-snapshot") {
