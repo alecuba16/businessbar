@@ -5,6 +5,13 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- Chat copy affordances: every finished assistant answer gets a Copy button (flips to a checkmark for a moment so the click visibly landed), and right-clicking any message offers Copy Reply plus Copy Conversation, which copies the whole thread with You:/Assistant: speaker prefixes and the in-flight answer included. Native drag selection keeps working per paragraph
+
+### Fixed
+- Selecting text in the chat no longer stops at the first paragraph: MarkdownUI renders each markdown block as its own SwiftUI Text view and macOS text selection never crosses separate Text views, so a drag could not reach past a single paragraph. Native paragraph-level selection still applies where a single Text spans the content (user prompts, the thinking block, code blocks); whole-message and whole-chat copy go through the new buttons and context menu
+
 ## [1.5.0] - 2026-10-29
 ### Added
 - Insert after selection (new line): a fourth template action that starts the rewrite on the line below the selection instead of gluing onto its last line. A selection that already ends in a newline is not doubled, so no blank line appears. Falls back to the overlay like the other direct-write actions when in-place insertion is not possible

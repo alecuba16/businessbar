@@ -380,7 +380,8 @@ struct ChatView: View {
                     ForEach(store.messages) { message in
                         MessageBubble(
                             message: message,
-                            onEditPrompt: editCallback(for: message)
+                            onEditPrompt: editCallback(for: message),
+                            chatMenuActions: chatMenuActions
                         )
                         .id(message.id)
                     }
@@ -397,7 +398,8 @@ struct ChatView: View {
                                 thinking: streaming
                             ),
                             isStreaming: true,
-                            streamingThinkingOnly: true
+                            streamingThinkingOnly: true,
+                            chatMenuActions: chatMenuActions
                         )
                         .id("streaming")
                     } else if let streaming = store.streamingText {
@@ -407,7 +409,8 @@ struct ChatView: View {
                                 content: streaming,
                                 thinking: store.streamingThinking
                             ),
-                            isStreaming: true
+                            isStreaming: true,
+                            chatMenuActions: chatMenuActions
                         )
                         .id("streaming")
                     }
@@ -825,6 +828,30 @@ struct ChatView: View {
         commandToolsEnabledNow
     }
 
+    /// Actions injected into every bubble's context menu. Built per render
+    /// so Copy Conversation snapshots the thread at click time, not at
+    /// render time.
+    private var chatMenuActions: ChatMenuActions {
+        ChatMenuActions(copyConversation: copyConversation)
+    }
+
+    /// Whole-thread copy. One block per message, speaker-prefixed, thinking
+    /// excluded; the in-flight stream rides along so a mid-generation copy
+    /// is not silently missing the latest answer.
+    private func copyConversation() {
+        var blocks = store.messages
+            .filter { !$0.content.isEmpty }
+            .map { message -> String in
+                "\(message.role == .user ? "You" : "Assistant"): \(message.content)"
+            }
+        if let streaming = store.streamingText, !streaming.isEmpty {
+            blocks.append("Assistant: \(streaming)")
+        }
+        guard !blocks.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(blocks.joined(separator: "\n\n"), forType: .string)
+    }
+
     /// Hover text for the command permission row, shared by the label and
     /// the segments. Names what the current mode actually does, so the
     /// consequence of the active choice is one hover away.
@@ -1064,6 +1091,15 @@ private struct NewSessionShortcutAnchor: View {
     }
 }
 
+// MARK: - ChatMenuActions
+
+/// Chat-wide actions offered on every message's context menu. Kept as a
+/// value so bubbles stay decoupled from the store; the chat view injects
+/// closures that read live state.
+struct ChatMenuActions {
+    let copyConversation: () -> Void
+}
+
 // MARK: - MessageBubble
 
 struct MessageBubble: View {
@@ -1075,6 +1111,10 @@ struct MessageBubble: View {
     /// Edit affordance for the latest user prompt. Non-nil only on the
     /// last user message while nothing streams; nil everywhere else.
     var onEditPrompt: (() -> Void)? = nil
+    /// Chat-wide actions for the context menu. SwiftUI text selection stops
+    /// at each paragraph (every markdown block is its own Text view), so the
+    /// menu carries the whole-conversation copy the native path cannot.
+    var chatMenuActions: ChatMenuActions? = nil
 
     /// Whether the user toggled the thinking block themselves; their choice
     /// wins over the automatic open-while-reasoning behavior.
@@ -1139,6 +1179,10 @@ struct MessageBubble: View {
                             )
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+
+                    if message.role == .assistant, !message.content.isEmpty, !isStreaming {
+                        CopyReplyButton(text: message.content)
+                    }
                 }
 
                 if isStreaming && message.content.isEmpty && !showsThinkingRow {
@@ -1156,9 +1200,54 @@ struct MessageBubble: View {
                     .help("Edit this prompt and resend it with the updated text")
                 }
             }
+            .contextMenu {
+                // Right-clicking the text itself still opens the native
+                // selection menu (Copy, Look Up); this menu covers the rest
+                // of the bubble and adds the actions the native path cannot
+                // offer.
+                if message.role == .assistant, !message.content.isEmpty, !isStreaming {
+                    Button("Copy Reply") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(message.content, forType: .string)
+                    }
+                    Divider()
+                }
+                if let chatMenuActions {
+                    Button("Copy Conversation", action: chatMenuActions.copyConversation)
+                }
+            }
 
             if message.role == .assistant { Spacer(minLength: 40) }
         }
+    }
+}
+
+// MARK: - CopyReplyButton
+
+/// Copy affordance shown under each finished assistant answer. Flips to a
+/// checkmark for a moment so the click visibly landed on the clipboard.
+private struct CopyReplyButton: View {
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                copied = false
+            }
+        } label: {
+            Label(
+                copied ? "Copied" : "Copy",
+                systemImage: copied ? "checkmark" : "doc.on.doc"
+            )
+            .font(.caption)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Copy this reply")
     }
 }
 
