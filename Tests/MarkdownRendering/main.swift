@@ -1,6 +1,12 @@
 import AppKit
 import Foundation
 import SwiftUI
+#if canImport(BusinessBar)
+@testable import BusinessBar
+#if BUSINESSBAR_COVERAGE_NATIVE
+CoverageRuntimeIsolation.verify()
+#endif
+#endif
 
 let watchdog = DispatchSource.makeTimerSource(queue: .global())
 watchdog.schedule(deadline: .now() + 10)

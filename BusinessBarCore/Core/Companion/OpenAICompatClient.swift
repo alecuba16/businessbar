@@ -102,7 +102,11 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
                         }
                     }
 
-                    guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
+                    // JSONSerialization raises an ObjC exception, which
+                    // `try?` cannot catch, when a value is not JSON-writable
+                    // (e.g. a tool payload carrying a Date). Validate first.
+                    guard JSONSerialization.isValidJSONObject(body),
+                        let payload = try? JSONSerialization.data(withJSONObject: body) else {
                         continuation.yield(.failed("Could not encode request body."))
                         continuation.finish()
                         return

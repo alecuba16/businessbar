@@ -1,5 +1,11 @@
 import AppKit
 import SwiftUI
+#if canImport(BusinessBar)
+@testable import BusinessBar
+#if BUSINESSBAR_COVERAGE_NATIVE
+CoverageRuntimeIsolation.verify()
+#endif
+#endif
 
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)

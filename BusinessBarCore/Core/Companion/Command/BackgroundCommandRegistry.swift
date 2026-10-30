@@ -1,6 +1,23 @@
 import Darwin
 import Foundation
 
+protocol CommandProcess: AnyObject, Sendable {
+    func terminate()
+    func forceKill()
+    func onTermination(_ handler: @escaping @Sendable (Int32) -> Void)
+}
+
+private final class FoundationCommandProcess: CommandProcess, @unchecked Sendable {
+    let process: Process
+
+    init(_ process: Process) { self.process = process }
+    func terminate() { process.terminate() }
+    func forceKill() { kill(process.processIdentifier, SIGKILL) }
+    func onTermination(_ handler: @escaping @Sendable (Int32) -> Void) {
+        process.terminationHandler = { handler($0.terminationStatus) }
+    }
+}
+
 /// App-wide registry of executed commands. Every command the tool layer
 /// runs, foreground or background, becomes an entry here first; the
 /// terminationHandler is the only reaping path. Sessions filter by their
@@ -45,10 +62,10 @@ public actor BackgroundCommandRegistry {
         let handle = UUID()
         let sessionID: UUID?
         let command: String
-        let process: Process
+        let process: any CommandProcess
         let buffer: OutputRingBuffer
         let origin: Origin
-        let startedAt = Date()
+        let startedAt: Date
 
         var continuation: CheckedContinuation<ForegroundOutcome, Never>?
         var watchdog: Task<Void, Never>?
@@ -61,15 +78,17 @@ public actor BackgroundCommandRegistry {
         init(
             sessionID: UUID?,
             command: String,
-            process: Process,
+            process: any CommandProcess,
             buffer: OutputRingBuffer,
-            origin: Origin
+            origin: Origin,
+            startedAt: Date
         ) {
             self.sessionID = sessionID
             self.command = command
             self.process = process
             self.buffer = buffer
             self.origin = origin
+            self.startedAt = startedAt
         }
     }
 
@@ -78,6 +97,9 @@ public actor BackgroundCommandRegistry {
     private let onExitHook: (@Sendable (CompletedResult) -> Void)?
     private let inactivity: TimeInterval
     private let wallClock: TimeInterval
+    private let spawn: @Sendable ([String], String) throws -> (any CommandProcess, OutputRingBuffer)
+    private let now: @Sendable () -> Date
+    private let sleep: @Sendable (UInt64) async throws -> Void
 
     public init(
         onExit: (@Sendable (CompletedResult) -> Void)? = nil,
@@ -87,6 +109,28 @@ public actor BackgroundCommandRegistry {
         self.onExitHook = onExit
         self.inactivity = inactivity
         self.wallClock = wallClock
+        self.spawn = { argv, cwd in
+            let (process, buffer) = try ShellExecutor.spawn(argv: argv, cwd: cwd)
+            return (FoundationCommandProcess(process), buffer)
+        }
+        self.now = { Date() }
+        self.sleep = { try await Task.sleep(nanoseconds: $0) }
+    }
+
+    init(
+        onExit: (@Sendable (CompletedResult) -> Void)? = nil,
+        inactivity: TimeInterval = ShellExecutor.foregroundInactivity,
+        wallClock: TimeInterval = ShellExecutor.foregroundWallClock,
+        spawn: @escaping @Sendable ([String], String) throws -> (any CommandProcess, OutputRingBuffer),
+        now: @escaping @Sendable () -> Date,
+        sleep: @escaping @Sendable (UInt64) async throws -> Void
+    ) {
+        self.onExitHook = onExit
+        self.inactivity = inactivity
+        self.wallClock = wallClock
+        self.spawn = spawn
+        self.now = now
+        self.sleep = sleep
     }
 
     // MARK: - Foreground
@@ -182,7 +226,7 @@ public actor BackgroundCommandRegistry {
         entry.endReason = .stoppedByUser
         entry.process.terminate()
         Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await self.sleep(3_000_000_000)
             self.escalateStop(handle)
         }
         return true
@@ -194,7 +238,7 @@ public actor BackgroundCommandRegistry {
             if entry.exitCode == nil {
                 entry.endReason = .killedAtQuit
                 entry.process.terminate()
-                kill(entry.process.processIdentifier, SIGKILL)
+                entry.process.forceKill()
             }
             // Foreground awaits must not outlive the sweep.
             if let continuation = entry.continuation {
@@ -229,13 +273,14 @@ public actor BackgroundCommandRegistry {
         cwd: String,
         origin: Origin
     ) throws -> Entry {
-        let (process, buffer) = try ShellExecutor.spawn(argv: argv, cwd: cwd)
+        let (process, buffer) = try spawn(argv, cwd)
         let entry = Entry(
             sessionID: sessionID,
             command: command,
             process: process,
             buffer: buffer,
-            origin: origin
+            origin: origin,
+            startedAt: now()
         )
         entries[entry.handle] = entry
         installTerminationHandler(entry)
@@ -244,9 +289,8 @@ public actor BackgroundCommandRegistry {
     }
 
     private func installTerminationHandler(_ entry: Entry) {
-        entry.process.terminationHandler = { [weak self] process in
-            let handle = entry.handle
-            let code = process.terminationStatus
+        let handle = entry.handle
+        entry.process.onTermination { [weak self] code in
             Task { await self?.handleExited(handle, code: code) }
         }
     }
@@ -254,7 +298,7 @@ public actor BackgroundCommandRegistry {
     private func handleExited(_ handle: UUID, code: Int32) {
         guard let entry = entries[handle], entry.exitCode == nil else { return }
         entry.exitCode = code
-        entry.exitedAt = Date()
+        entry.exitedAt = now()
         if entry.endReason == nil {
             entry.endReason = .normal
         }
@@ -286,7 +330,7 @@ public actor BackgroundCommandRegistry {
     /// so long sessions do not accumulate ring buffers. Handles referenced
     /// only by chat history fall out naturally.
     public func pruneExited(olderThan age: TimeInterval = 3_600) {
-        let cutoff = Date().addingTimeInterval(-age)
+        let cutoff = now().addingTimeInterval(-age)
         entries = entries.filter { (_, entry) in
             guard let exitDate = entry.exitedAt else { return true }
             return exitDate >= cutoff
@@ -316,7 +360,7 @@ public actor BackgroundCommandRegistry {
     private func startWatchdog(_ entry: Entry) {
         entry.watchdog = Task { [weak self] in
             while true {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                do { try await self?.sleep(1_000_000_000) } catch { return }
                 guard let self else { return }
                 let alive = await self.watchdogTick(entry.handle)
                 if !alive { return }
@@ -329,7 +373,7 @@ public actor BackgroundCommandRegistry {
         guard let entry = entries[handle], entry.exitCode == nil else {
             return false
         }
-        let wall = Date().timeIntervalSince(entry.startedAt)
+        let wall = now().timeIntervalSince(entry.startedAt)
         if wall > wallClock || entry.buffer.idleInterval > inactivity {
             _ = promoteIfRunning(handle)
             return false
@@ -340,7 +384,7 @@ public actor BackgroundCommandRegistry {
     private func startOverflowMonitor(_ entry: Entry) {
         entry.monitor = Task { [weak self] in
             while true {
-                try? await Task.sleep(nanoseconds: 500_000_000)
+                do { try await self?.sleep(500_000_000) } catch { return }
                 guard let self else { return }
                 let alive = await self.overflowTick(entry.handle)
                 if !alive { return }
@@ -356,7 +400,7 @@ public actor BackgroundCommandRegistry {
         }
         if entry.buffer.exceededKillCeiling {
             entry.endReason = .outputOverflow
-            kill(entry.process.processIdentifier, SIGKILL)
+            entry.process.forceKill()
             return false
         }
         return true
@@ -364,7 +408,7 @@ public actor BackgroundCommandRegistry {
 
     private func escalateStop(_ handle: UUID) {
         guard let entry = entries[handle], entry.exitCode == nil else { return }
-        kill(entry.process.processIdentifier, SIGKILL)
+        entry.process.forceKill()
     }
 
     private static func info(_ entry: Entry) -> HandleInfo {

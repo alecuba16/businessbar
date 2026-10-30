@@ -7,10 +7,16 @@ import SwiftUI
 /// active so a grant in System Settings shows up on return.
 @MainActor
 private final class AccessibilityPermissionModel: ObservableObject {
-    @Published private(set) var isGranted = AXIsProcessTrusted()
+    @Published private(set) var isGranted: Bool
+    private let status: () -> Bool
+
+    init(status: @escaping () -> Bool) {
+        self.status = status
+        isGranted = status()
+    }
 
     func refresh() {
-        isGranted = AXIsProcessTrusted()
+        isGranted = status()
     }
 }
 
@@ -20,7 +26,7 @@ private final class AccessibilityPermissionModel: ObservableObject {
 /// provider configuration and prompt templates.
 struct CompanionTab: View {
     @AppStorage(Constants.Defaults.featureCompanion) private var companionEnabled = true
-    @StateObject private var accessibilityPermission = AccessibilityPermissionModel()
+    @StateObject private var accessibilityPermission: AccessibilityPermissionModel
 
     @State private var historyMaxAgeDays: Int
     @State private var historyMaxSessions: Int
@@ -36,12 +42,14 @@ struct CompanionTab: View {
     @State private var editingModel: EditingModelTarget?
     @State private var showsLocalModels = false
 
-    private let templateStore = TemplateStore()
+    private let templateStore: TemplateStore
 
-    init() {
+    init(templateStore: TemplateStore = TemplateStore(), accessibilityStatus: @escaping () -> Bool = { AXIsProcessTrusted() }) {
+        self.templateStore = templateStore
+        _accessibilityPermission = StateObject(wrappedValue: AccessibilityPermissionModel(status: accessibilityStatus))
         _historyMaxAgeDays = State(initialValue: CompanionConfigService.historyMaxAgeDays())
         _historyMaxSessions = State(initialValue: CompanionConfigService.historyMaxSessions())
-        _templates = State(initialValue: TemplateStore().load())
+        _templates = State(initialValue: templateStore.load())
         _providers = State(initialValue: CompanionConfigService.chatProviders())
     }
 

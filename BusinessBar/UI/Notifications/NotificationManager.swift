@@ -7,15 +7,59 @@ import UserNotifications
 
 @MainActor
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
-    // UNUserNotificationCenter.current() requires a valid bundle proxy (i.e. the
-    // process must be running inside a .app bundle). Accessing it as a lazy stored
-    // property means the call only happens on first use, after the bundle is fully
-    // registered — it never fires at stored-property initialisation time.
-    private lazy var center: UNUserNotificationCenter = UNUserNotificationCenter.current()
+    struct Dependencies {
+        var isAvailable: () -> Bool
+        var isEnabled: () -> Bool
+        var now: () -> Date
+        var configure: (any UNUserNotificationCenterDelegate, Set<UNNotificationCategory>) -> Void
+        var authorize: () -> Void
+        var add: (UNNotificationRequest) -> Void
+        var remove: ([String]) -> Void
+        var removeAll: () -> Void
+        var openURL: (URL) -> Void
+        var notificationCenter: NotificationCenter = .default
+
+        static var live: Dependencies {
+            Dependencies(
+                isAvailable: { Bundle.main.bundleIdentifier != nil },
+                isEnabled: { NotificationManager.notificationsEnabled() },
+                now: Date.init,
+                configure: { delegate, categories in
+                    let center = UNUserNotificationCenter.current()
+                    center.delegate = delegate
+                    center.setNotificationCategories(categories)
+                },
+                authorize: {
+                    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                        if let error {
+                            AppLogger.error("Notification authorization error: \(error.localizedDescription)", category: "Notifications")
+                        } else if granted {
+                            AppLogger.info("Notification authorization granted", category: "Notifications")
+                        } else {
+                            AppLogger.warning("Notification authorization denied by user", category: "Notifications")
+                        }
+                    }
+                },
+                add: { request in
+                    UNUserNotificationCenter.current().add(request) { error in
+                        if let error { AppLogger.error("Failed to schedule notification: \(error.localizedDescription)", category: "Notifications") }
+                    }
+                },
+                remove: { UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: $0) },
+                removeAll: {
+                    UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+                    UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+                },
+                openURL: { NSWorkspace.shared.open($0) }
+            )
+        }
+    }
+
+    private let dependencies: Dependencies
     private var cancellables = Set<AnyCancellable>()
 
     private var areNotificationsEnabled: Bool {
-        Self.notificationsEnabled()
+        dependencies.isEnabled()
     }
     nonisolated private static func notificationsEnabled() -> Bool {
         if let value = UserDefaults.standard.object(forKey: Constants.Defaults.featureNotifications) as? Bool {
@@ -24,23 +68,27 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         return true
     }
 
-    override init() {
+    override convenience init() {
+        self.init(dependencies: .live)
+    }
+
+    init(dependencies: Dependencies) {
+        self.dependencies = dependencies
         super.init()
         // Only wire up the delegate / categories when a real bundle is present.
         // Running as a raw SPM binary (.build/…/BusinessBar) has no bundle proxy
         // and will crash inside UNUserNotificationCenter.current() otherwise.
-        guard Bundle.main.bundleIdentifier != nil else {
+        guard dependencies.isAvailable() else {
             AppLogger.warning("No bundle identifier — skipping notification setup (running outside .app bundle?)", category: "Notifications")
             return
         }
         AppLogger.info("Initializing NotificationManager", category: "Notifications")
-        center.delegate = self
         setupCategories()
         setupPreferenceObserver()
     }
     
     func requestAuthorization() {
-        guard Bundle.main.bundleIdentifier != nil else {
+        guard dependencies.isAvailable() else {
             AppLogger.warning("Cannot request notification authorization — no bundle identifier", category: "Notifications")
             return
         }
@@ -49,15 +97,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             return
         }
         AppLogger.info("Requesting notification authorization", category: "Notifications")
-        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-            if let error {
-                AppLogger.error("Notification authorization error: \(error.localizedDescription)", category: "Notifications")
-            } else if granted {
-                AppLogger.info("Notification authorization granted", category: "Notifications")
-            } else {
-                AppLogger.warning("Notification authorization denied by user", category: "Notifications")
-            }
-        }
+        dependencies.authorize()
     }
     
     private func setupCategories() {
@@ -92,18 +132,17 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             options: []
         )
         
-        center.setNotificationCategories([eventCategory])
+        dependencies.configure(self, [eventCategory])
     }
 
     private func setupPreferenceObserver() {
-        NotificationCenter.default
+        dependencies.notificationCenter
             .publisher(for: .businessBarPreferencesDidChange)
             .sink { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
-                    if !Self.notificationsEnabled() {
-                        self.center.removeAllPendingNotificationRequests()
-                        self.center.removeAllDeliveredNotifications()
+                    if !self.areNotificationsEnabled {
+                        self.dependencies.removeAll()
                     }
                 }
             }
@@ -111,7 +150,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
     
     func scheduleNotification(for event: CalendarEvent, minutesBefore: Int) {
-        guard Bundle.main.bundleIdentifier != nil else { return }
+        guard dependencies.isAvailable() else { return }
         guard areNotificationsEnabled else { return }
         let content = UNMutableNotificationContent()
         content.title = "Upcoming Meeting"
@@ -126,7 +165,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         
         let triggerDate = event.startDate.addingTimeInterval(-TimeInterval(minutesBefore * 60))
         
-        guard triggerDate > Date() else { return }
+        guard triggerDate > dependencies.now() else { return }
         
         let dateComponents = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: triggerDate)
         let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: false)
@@ -137,54 +176,48 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             trigger: trigger
         )
         
-        let eventID = event.id  // capture as Sendable String before @Sendable closure
-        center.add(request) { error in
-            if let error {
-                AppLogger.error("Failed to schedule notification for event \(eventID): \(error.localizedDescription)", category: "Notifications")
-            }
-        }
+        dependencies.add(request)
     }
     
     func cancelNotifications(for eventID: String) {
-        guard Bundle.main.bundleIdentifier != nil else { return }
+        guard dependencies.isAvailable() else { return }
         guard areNotificationsEnabled else { return }
-        center.removePendingNotificationRequests(withIdentifiers: [eventID])
+        dependencies.remove([eventID])
     }
 
     func cancelAllNotifications() {
-        guard Bundle.main.bundleIdentifier != nil else { return }
-        center.removeAllPendingNotificationRequests()
-        center.removeAllDeliveredNotifications()
+        guard dependencies.isAvailable() else { return }
+        dependencies.removeAll()
     }
     
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
-        guard Self.notificationsEnabled() else {
-            completionHandler()
-            return
-        }
         let userInfo = response.notification.request.content.userInfo
-        
-        switch response.actionIdentifier {
+        let action = response.actionIdentifier
+        let meetingLink = userInfo["meetingLink"] as? String
+        let eventID = userInfo["eventID"] as? String
+        Task { @MainActor in
+            self.handleAction(action, meetingLink: meetingLink, eventID: eventID)
+        }
+        completionHandler()
+    }
+
+    func handleAction(_ action: String, meetingLink: String?, eventID: String?) {
+        guard areNotificationsEnabled else { return }
+        switch action {
         case "JOIN_ACTION":
-            if let urlString = userInfo["meetingLink"] as? String,
+            if let urlString = meetingLink,
                let url = URL(string: urlString) {
-                Task { @MainActor in
-                    NSWorkspace.shared.open(url)
-                }
+                dependencies.openURL(url)
             }
             
         case "SNOOZE_5":
-            if let eventID = userInfo["eventID"] as? String {
-                Task { @MainActor in
-                    self.snoozeNotification(eventID: eventID, minutes: 5)
-                }
+            if let eventID {
+                snoozeNotification(eventID: eventID, minutes: 5)
             }
             
         case "SNOOZE_10":
-            if let eventID = userInfo["eventID"] as? String {
-                Task { @MainActor in
-                    self.snoozeNotification(eventID: eventID, minutes: 10)
-                }
+            if let eventID {
+                snoozeNotification(eventID: eventID, minutes: 10)
             }
             
         case "DISMISS_ACTION":
@@ -194,7 +227,6 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             break
         }
         
-        completionHandler()
     }
     
     private func snoozeNotification(eventID: String, minutes: Int) {
@@ -213,6 +245,6 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             trigger: trigger
         )
         
-        center.add(request)
+        dependencies.add(request)
     }
 }

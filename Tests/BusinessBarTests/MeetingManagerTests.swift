@@ -24,15 +24,23 @@ final class MockEventStore: EventStoreProtocol {
 
 @MainActor
 final class MeetingManagerTests: XCTestCase {
+    private func isolatedDefaults() -> (UserDefaults, String) {
+        let name = "com.businessbar.tests.meeting.\(UUID().uuidString)"
+        return (UserDefaults(suiteName: name)!, name)
+    }
 
     func test_initialStateHasNoEvents() {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = MockEventStore()
-        let manager = MeetingManager(eventStore: store)
+        let manager = MeetingManager(eventStore: store, defaults: defaults, notificationCenter: NotificationCenter())
         // Give the async init a moment but we can assert initial state is empty
         XCTAssertTrue(manager.events.isEmpty || manager.isLoading)
     }
 
     func test_nextEventIsNilWhenNoEvents() async throws {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = MockEventStore()
         store.stubbedCalendars = [
             MBCalendar(id: "cal1", title: "Work", color: "#FF0000", source: "iCloud")
@@ -41,16 +49,18 @@ final class MeetingManagerTests: XCTestCase {
 
         // Force the selected calendars defaults so the manager doesn't short-circuit
         let calendarData = try JSONEncoder().encode(["cal1"])
-        UserDefaults.standard.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
-        defer { UserDefaults.standard.removeObject(forKey: Constants.Defaults.selectedCalendars) }
+        defaults.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
+        defer { defaults.removeObject(forKey: Constants.Defaults.selectedCalendars) }
 
-        let manager = MeetingManager(eventStore: store)
+        let manager = MeetingManager(eventStore: store, defaults: defaults, notificationCenter: NotificationCenter())
         // Wait for async refresh
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertNil(manager.nextEvent)
     }
 
     func test_nextEventIsSetWhenFutureEventExists() async throws {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = MockEventStore()
         let calendar = MBCalendar(id: "cal1", title: "Work", color: "#FF0000", source: "iCloud")
         store.stubbedCalendars = [calendar]
@@ -71,15 +81,17 @@ final class MeetingManagerTests: XCTestCase {
         store.stubbedEvents = [event]
 
         let calendarData = try JSONEncoder().encode(["cal1"])
-        UserDefaults.standard.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
-        defer { UserDefaults.standard.removeObject(forKey: Constants.Defaults.selectedCalendars) }
+        defaults.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
+        defer { defaults.removeObject(forKey: Constants.Defaults.selectedCalendars) }
 
-        let manager = MeetingManager(eventStore: store)
+        let manager = MeetingManager(eventStore: store, defaults: defaults, notificationCenter: NotificationCenter())
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(manager.nextEvent?.id, "evt1")
     }
 
     func test_dismissedEventIsExcludedFromNextEvent() async throws {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = MockEventStore()
         let calendar = MBCalendar(id: "cal1", title: "Work", color: "#FF0000", source: "iCloud")
         store.stubbedCalendars = [calendar]
@@ -100,10 +112,10 @@ final class MeetingManagerTests: XCTestCase {
         store.stubbedEvents = [event]
 
         let calendarData = try JSONEncoder().encode(["cal1"])
-        UserDefaults.standard.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
-        defer { UserDefaults.standard.removeObject(forKey: Constants.Defaults.selectedCalendars) }
+        defaults.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
+        defer { defaults.removeObject(forKey: Constants.Defaults.selectedCalendars) }
 
-        let manager = MeetingManager(eventStore: store)
+        let manager = MeetingManager(eventStore: store, defaults: defaults, notificationCenter: NotificationCenter())
         try await Task.sleep(nanoseconds: 200_000_000)
 
         manager.dismissEvent("evt1")
@@ -111,6 +123,8 @@ final class MeetingManagerTests: XCTestCase {
     }
 
     func test_dismissedIDsArePrunedWhenEventLeavesWindow() async throws {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = MockEventStore()
         let calendar = MBCalendar(id: "cal1", title: "Work", color: "#FF0000", source: "iCloud")
         store.stubbedCalendars = [calendar]
@@ -127,10 +141,10 @@ final class MeetingManagerTests: XCTestCase {
         store.stubbedEvents = [event]
 
         let calendarData = try JSONEncoder().encode(["cal1"])
-        UserDefaults.standard.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
-        defer { UserDefaults.standard.removeObject(forKey: Constants.Defaults.selectedCalendars) }
+        defaults.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
+        defer { defaults.removeObject(forKey: Constants.Defaults.selectedCalendars) }
 
-        let manager = MeetingManager(eventStore: store)
+        let manager = MeetingManager(eventStore: store, defaults: defaults, notificationCenter: NotificationCenter())
         try await Task.sleep(nanoseconds: 200_000_000)
 
         manager.dismissEvent("evt1")
@@ -157,6 +171,8 @@ final class MeetingManagerTests: XCTestCase {
     }
 
     func test_midnightRolloverRefetchesAndWindowAdvances() async throws {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = MockEventStore()
         let calendar = MBCalendar(id: "cal1", title: "Work", color: "#FF0000", source: "iCloud")
         store.stubbedCalendars = [calendar]
@@ -173,10 +189,10 @@ final class MeetingManagerTests: XCTestCase {
         store.stubbedEvents = [todayEvent]
 
         let calendarData = try JSONEncoder().encode(["cal1"])
-        UserDefaults.standard.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
-        defer { UserDefaults.standard.removeObject(forKey: Constants.Defaults.selectedCalendars) }
+        defaults.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
+        defer { defaults.removeObject(forKey: Constants.Defaults.selectedCalendars) }
 
-        let manager = MeetingManager(eventStore: store, nowProvider: { now })
+        let manager = MeetingManager(eventStore: store, nowProvider: { now }, defaults: defaults, notificationCenter: NotificationCenter())
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(manager.events.map(\.id), ["today-evt"])
         XCTAssertEqual(store.fetchedWindows.count, 1, "initial refresh should fetch exactly one window")

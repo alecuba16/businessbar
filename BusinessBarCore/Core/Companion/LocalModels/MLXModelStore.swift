@@ -34,7 +34,28 @@ public final class MLXModelStore: ObservableObject {
     private var process: Process?
     private var progressTask: Task<Void, Never>?
 
-    private init() {}
+    private let defaults: UserDefaults
+    private let home: String
+    private let driver: MLXProcessDriver
+    private let locateUV: () -> String?
+    private let sleep: (UInt64) async throws -> Void
+
+    private convenience init() {
+        self.init(defaults: .standard, home: NSHomeDirectory(),
+                  driver: .live(registerForQuit: Self.registerForQuitKill),
+                  locateUV: { Self.uvPathOverride ?? MLXEnvironment.locateUV() },
+                  sleep: { try await Task.sleep(nanoseconds: $0) })
+    }
+
+    public init(defaults: UserDefaults, home: String, driver: MLXProcessDriver,
+                locateUV: @escaping () -> String?,
+                sleep: @escaping (UInt64) async throws -> Void) {
+        self.defaults = defaults
+        self.home = home
+        self.driver = driver
+        self.locateUV = locateUV
+        self.sleep = sleep
+    }
 
     /// Starts an explicit download of the model. Throws when uv is
     /// missing or another download is in flight.
@@ -42,10 +63,10 @@ public final class MLXModelStore: ObservableObject {
         guard download == nil else {
             throw StoreError.downloadAlreadyRunning
         }
-        guard let uv = Self.uvPathOverride ?? MLXEnvironment.locateUV() else {
+        guard let uv = locateUV() else {
             throw MLXEnvironment.EnvironmentError.uvNotFound
         }
-        guard let entry = MLXModelCatalog.entry(id: modelID) else {
+        guard let entry = MLXModelCatalog.entry(id: modelID, defaults: defaults) else {
             throw StoreError.unknownModel(modelID)
         }
 
@@ -59,10 +80,10 @@ public final class MLXModelStore: ObservableObject {
         child.environment = ProcessInfo.processInfo.environment
         child.standardOutput = Pipe()
         child.standardError = Pipe()
-        MLXModelStore.registerForQuitKill(child)
+        driver.registerForQuit(child)
 
         do {
-            try child.run()
+            try driver.run(child)
         } catch {
             throw StoreError.spawnFailed(error.localizedDescription)
         }
@@ -75,18 +96,18 @@ public final class MLXModelStore: ObservableObject {
             failureReason: nil
         )
 
-        let pid = child.processIdentifier
         progressTask = Task { [weak self] in
             var lastBytes: Int64 = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self else { return }
+                do { try await self.sleep(1_000_000_000) } catch { return }
+                guard !Task.isCancelled else { return }
                 guard let state = self.download, !state.isFinished else { return }
 
-                if !self.isProcessAlive(pid: pid) {
-                    let finished = MLXModelCatalog.isDownloaded(modelID: modelID)
+                if !self.driver.isRunning(child) {
+                    let finished = MLXModelCatalog.isDownloaded(modelID: modelID, home: self.home)
                     var newState = state
-                    newState.bytesDone = MLXModelCatalog.downloadedBytes(modelID: modelID)
+                    newState.bytesDone = MLXModelCatalog.downloadedBytes(modelID: modelID, home: self.home)
                     if finished {
                         newState.isFinished = true
                         self.download = newState
@@ -95,7 +116,8 @@ public final class MLXModelStore: ObservableObject {
                         // show them without a disk probe per render.
                         MLXModelCatalog.setReasoningCapability(
                             id: modelID,
-                            MLXReasoningInspector.capabilityFromSnapshot(modelID: modelID)
+                            MLXReasoningInspector.capabilityFromSnapshot(modelID: modelID, home: self.home),
+                            defaults: self.defaults
                         )
                         self.finish()
                         return
@@ -107,7 +129,7 @@ public final class MLXModelStore: ObservableObject {
                     return
                 }
 
-                let bytes = MLXModelCatalog.downloadedBytes(modelID: modelID)
+                let bytes = MLXModelCatalog.downloadedBytes(modelID: modelID, home: self.home)
                 if bytes != lastBytes {
                     lastBytes = bytes
                     var newState = state
@@ -123,8 +145,8 @@ public final class MLXModelStore: ObservableObject {
     public func cancelDownload() {
         progressTask?.cancel()
         progressTask = nil
-        if let child = process, child.isRunning {
-            child.terminate()
+        if let child = process, driver.isRunning(child) {
+            driver.terminate(child)
         }
         process = nil
         if download != nil {
@@ -138,17 +160,13 @@ public final class MLXModelStore: ObservableObject {
         if let state = download, state.modelID == modelID, !state.isFinished {
             throw StoreError.downloadInFlight
         }
-        let dir = MLXModelCatalog.cacheDirectory(modelID: modelID)
-        let bytes = MLXModelCatalog.downloadedBytes(modelID: modelID)
+        let dir = MLXModelCatalog.cacheDirectory(modelID: modelID, home: home)
+        let bytes = MLXModelCatalog.downloadedBytes(modelID: modelID, home: self.home)
         guard bytes > 0 else {
             throw StoreError.nothingDownloaded(modelID)
         }
         try FileManager.default.removeItem(at: dir)
         return bytes
-    }
-
-    private func isProcessAlive(pid: pid_t) -> Bool {
-        kill(pid, 0) == 0
     }
 
     private func finish() {

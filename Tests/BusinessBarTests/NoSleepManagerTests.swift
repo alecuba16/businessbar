@@ -3,45 +3,59 @@ import XCTest
 
 @MainActor
 final class NoSleepManagerTests: XCTestCase {
+    private var clock = Date(timeIntervalSince1970: 1_000)
+    private lazy var defaults: UserDefaults = {
+        let name = "com.businessbar.tests.nosleep.\(UUID().uuidString)"
+        let value = UserDefaults(suiteName: name)!
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        return value
+    }()
+
+    private func makeManager() -> NoSleepManager {
+        NoSleepManager(defaults: defaults, notifications: NotificationCenter(), workspace: NotificationCenter(),
+                       trust: { false }, now: { self.clock },
+                       schedule: { interval, _ in Timer(timeInterval: interval, repeats: false) { _ in } },
+                       activateSleep: { _ in }, deactivateSleep: {}, startActivity: {}, stopActivity: {})
+    }
 
     // MARK: - Initial State
 
     func test_initialStateIsInactive() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         XCTAssertFalse(manager.isActive)
         XCTAssertEqual(manager.timeRemaining, 0)
     }
 
     func test_initialModeIsSystemOnly() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         XCTAssertEqual(manager.mode, .systemOnly)
     }
 
     // MARK: - Activation
 
     func test_activateWithDurationSetsActiveAndTimeRemaining() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: 3600)
         XCTAssertTrue(manager.isActive)
         XCTAssertEqual(manager.timeRemaining, 3600, accuracy: 1)
     }
 
     func test_activateIndefinitelySetsInfiniteTimeRemaining() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: nil)
         XCTAssertTrue(manager.isActive)
         XCTAssertTrue(manager.timeRemaining.isInfinite)
     }
 
     func test_activateWithMode() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: nil, mode: .systemAndDisplay)
         XCTAssertTrue(manager.isActive)
         XCTAssertEqual(manager.mode, .systemAndDisplay)
     }
 
     func test_activateWithoutModePreservesCurrentMode() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
 
         // Default mode is systemOnly; activating without an explicit mode keeps it
         manager.activate(duration: nil)
@@ -59,7 +73,7 @@ final class NoSleepManagerTests: XCTestCase {
     }
 
     func test_activateWithDurationNilAndNoModeUsesDefaults() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: nil)
         XCTAssertTrue(manager.isActive)
         XCTAssertTrue(manager.timeRemaining.isInfinite)
@@ -69,7 +83,7 @@ final class NoSleepManagerTests: XCTestCase {
     // MARK: - Deactivation
 
     func test_deactivateResetsState() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: 60)
         manager.deactivate()
         XCTAssertFalse(manager.isActive)
@@ -77,7 +91,7 @@ final class NoSleepManagerTests: XCTestCase {
     }
 
     func test_deactivatePreservesMode() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: nil, mode: .systemAndDisplay)
         XCTAssertEqual(manager.mode, .systemAndDisplay)
 
@@ -88,7 +102,7 @@ final class NoSleepManagerTests: XCTestCase {
     }
 
     func test_deactivateAfterIndefiniteActivation() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: nil)
         XCTAssertTrue(manager.timeRemaining.isInfinite)
 
@@ -101,7 +115,7 @@ final class NoSleepManagerTests: XCTestCase {
     // MARK: - Toggle
 
     func test_toggleActivatesWhenInactive() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         XCTAssertFalse(manager.isActive)
 
         manager.toggle()
@@ -110,7 +124,7 @@ final class NoSleepManagerTests: XCTestCase {
     }
 
     func test_toggleDeactivatesWhenActive() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: nil)
         XCTAssertTrue(manager.isActive)
 
@@ -120,7 +134,7 @@ final class NoSleepManagerTests: XCTestCase {
     }
 
     func test_toggleUsesCurrentMode() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
 
         // Set mode to systemAndDisplay, deactivate, then toggle
         manager.activate(duration: nil, mode: .systemAndDisplay)
@@ -135,19 +149,19 @@ final class NoSleepManagerTests: XCTestCase {
 
     func test_toggleWithConfiguredDefaultDuration() {
         // When no default duration is set, toggle activates indefinitely
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.toggle()
         XCTAssertTrue(manager.isActive)
         XCTAssertTrue(manager.timeRemaining.isInfinite)
         manager.deactivate()
 
         // Configure a default duration (5 minutes) in UserDefaults
-        UserDefaults.standard.set(5, forKey: Constants.Defaults.noSleepDefaultDuration)
+        defaults.set(5, forKey: Constants.Defaults.noSleepDefaultDuration)
         defer {
-            UserDefaults.standard.removeObject(forKey: Constants.Defaults.noSleepDefaultDuration)
+            defaults.removeObject(forKey: Constants.Defaults.noSleepDefaultDuration)
         }
 
-        let managerWithDefault = NoSleepManager()
+        let managerWithDefault = makeManager()
         managerWithDefault.toggle()
         XCTAssertTrue(managerWithDefault.isActive)
         // 5 minutes = 300 seconds
@@ -157,7 +171,7 @@ final class NoSleepManagerTests: XCTestCase {
     // MARK: - Multiple Activations
 
     func test_reactivatingWithDifferentModeUpdatesMode() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: nil, mode: .systemOnly)
         XCTAssertEqual(manager.mode, .systemOnly)
 
@@ -169,7 +183,7 @@ final class NoSleepManagerTests: XCTestCase {
     }
 
     func test_reactivatingWithDurationUpdatesTimeRemaining() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: 3600)
         XCTAssertEqual(manager.timeRemaining, 3600, accuracy: 1)
 
@@ -181,7 +195,7 @@ final class NoSleepManagerTests: XCTestCase {
     }
 
     func test_reactivatingIndefinitelyAfterTimed() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: 3600)
         XCTAssertFalse(manager.timeRemaining.isInfinite)
 
@@ -195,7 +209,7 @@ final class NoSleepManagerTests: XCTestCase {
     // MARK: - timeRemaining Computation
 
     func test_timeRemainingIsZeroWhenInactive() {
-        let manager = NoSleepManager()
+        let manager = makeManager()
 
         // Never activated
         XCTAssertEqual(manager.timeRemaining, 0)
@@ -207,14 +221,12 @@ final class NoSleepManagerTests: XCTestCase {
     }
 
     func test_timeRemainingDecreasesOverTime() async throws {
-        let manager = NoSleepManager()
+        let manager = makeManager()
         manager.activate(duration: 10)
 
         let firstReading = manager.timeRemaining
 
-        // Since timeRemaining is computed on-demand, it should reflect
-        // the passage of time after a short wait.
-        try await Task.sleep(for: .milliseconds(200))
+        clock = clock.addingTimeInterval(0.2)
 
         let secondReading = manager.timeRemaining
 

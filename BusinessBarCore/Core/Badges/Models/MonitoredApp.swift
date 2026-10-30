@@ -34,18 +34,22 @@ public struct MonitoredApp: Identifiable, Hashable, Codable {
         return resolved
     }
 
-    private func resolveIcon() -> NSImage? {
+    func resolveIcon(
+        iconForFile: (String) -> NSImage? = { NSWorkspace.shared.icon(forFile: $0) },
+        applicationPath: (String) -> String? = { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)?.path },
+        loadImage: (String) -> NSImage? = { NSImage(contentsOfFile: $0) }
+    ) -> NSImage? {
         if let iconPath {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: iconPath, isDirectory: &isDir), isDir.boolValue {
-                return NSWorkspace.shared.icon(forFile: iconPath)
+                return iconForFile(iconPath)
             }
-            if let image = NSImage(contentsOfFile: iconPath) {
+            if let image = loadImage(iconPath) {
                 return image
             }
         }
-        if let path = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)?.path {
-            return NSWorkspace.shared.icon(forFile: path)
+        if let path = applicationPath(bundleIdentifier) {
+            return iconForFile(path)
         }
         return nil
     }

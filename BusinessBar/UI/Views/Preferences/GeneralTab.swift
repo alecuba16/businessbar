@@ -11,7 +11,9 @@ struct GeneralTab: View {
     @EnvironmentObject private var updaterViewModel: UpdaterViewModel
 
     // Reflects actual launch-at-login state — updated after every toggle.
-    @State private var launchAtLogin: Bool = LaunchAtLoginHelper.isEnabled
+    @State private var launchAtLogin: Bool
+    private let launchAtLoginStatus: () -> Bool
+    private let setLaunchAtLogin: (Bool) -> Void
 
     // MARK: - Logging configuration
     @AppStorage(Constants.Defaults.loggingEnabled)     private var loggingEnabled     = true
@@ -20,14 +22,23 @@ struct GeneralTab: View {
 
     @State private var showingResetConfirmation = false
 
+    init(
+        launchAtLoginStatus: @escaping () -> Bool = { LaunchAtLoginHelper.isEnabled },
+        setLaunchAtLogin: @escaping (Bool) -> Void = { LaunchAtLoginHelper.setEnabled($0) }
+    ) {
+        self.launchAtLoginStatus = launchAtLoginStatus
+        self.setLaunchAtLogin = setLaunchAtLogin
+        _launchAtLogin = State(initialValue: launchAtLoginStatus())
+    }
+
     var body: some View {
         Form {
             // MARK: General
             Section("General") {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, enabled in
-                        LaunchAtLoginHelper.setEnabled(enabled)
-                        launchAtLogin = LaunchAtLoginHelper.isEnabled
+                        setLaunchAtLogin(enabled)
+                        launchAtLogin = launchAtLoginStatus()
                         AppLogger.info("Launch at login \(enabled ? "enabled" : "disabled")", category: "General")
                     }
 

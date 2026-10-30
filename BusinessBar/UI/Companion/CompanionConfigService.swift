@@ -11,6 +11,21 @@ import Foundation
 /// `makeClient()` returns a fresh client per call so config edits take
 /// effect on the next request without invalidating in-flight streams.
 enum CompanionConfigService {
+    struct Credentials {
+        var load: (String) throws -> Data?
+        var save: (String, Data) throws -> Void
+        var delete: (String) throws -> Void
+
+        static let keychain = Credentials(
+            load: { try KeychainHelper.load(key: $0) },
+            save: { try KeychainHelper.save(key: $0, data: $1) },
+            delete: { try KeychainHelper.delete(key: $0) }
+        )
+    }
+
+    static var defaults: UserDefaults = .standard
+    static var credentials: Credentials = .keychain
+
     static let keychainKey = "com.businessbar.companion.apiKey"
 
     /// Fires after any companion setting write, so mounted views can
@@ -51,20 +66,20 @@ enum CompanionConfigService {
     /// migration seeds the entry, selection alone drives `backend()` and
     /// this key stops mattering.
     private static func legacyBackendIsACP() -> Bool {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionBackend) == Backend.acp.rawValue
+        defaults.string(forKey: Constants.Defaults.companionBackend) == Backend.acp.rawValue
     }
 
     /// Kept for a hypothetical downgrade and for tests: writes the legacy
     /// key. New UI never calls it.
     static func setBackend(_ backend: Backend) {
-        UserDefaults.standard.set(backend.rawValue, forKey: Constants.Defaults.companionBackend)
+        defaults.set(backend.rawValue, forKey: Constants.Defaults.companionBackend)
         SettingsSavedBus.announce()
     }
 
     // MARK: - Storage
 
     static func baseURL() -> URL {
-        let raw = UserDefaults.standard.string(forKey: Constants.Defaults.companionBaseURL)
+        let raw = defaults.string(forKey: Constants.Defaults.companionBaseURL)
             ?? Constants.DefaultValues.companionBaseURL
         // Accept both "https://host/v1" and "https://host/v1/" spellings.
         var normalized = raw
@@ -75,55 +90,55 @@ enum CompanionConfigService {
     }
 
     static func setBaseURL(_ url: URL) {
-        UserDefaults.standard.set(url.absoluteString, forKey: Constants.Defaults.companionBaseURL)
+        defaults.set(url.absoluteString, forKey: Constants.Defaults.companionBaseURL)
     }
 
     static func model() -> String {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionModel)
+        defaults.string(forKey: Constants.Defaults.companionModel)
             ?? Constants.DefaultValues.companionModel
     }
 
     static func setModel(_ model: String) {
-        UserDefaults.standard.set(model, forKey: Constants.Defaults.companionModel)
+        defaults.set(model, forKey: Constants.Defaults.companionModel)
     }
 
     static func systemPrompt() -> String {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionSystemPrompt) ?? ""
+        defaults.string(forKey: Constants.Defaults.companionSystemPrompt) ?? ""
     }
 
     static func setSystemPrompt(_ prompt: String) {
-        UserDefaults.standard.set(prompt, forKey: Constants.Defaults.companionSystemPrompt)
+        defaults.set(prompt, forKey: Constants.Defaults.companionSystemPrompt)
     }
 
     // MARK: - Keychain
 
     static func apiKey() -> String {
-        guard let data = try? KeychainHelper.load(key: keychainKey) else { return "" }
+        guard let data = try? credentials.load(keychainKey) else { return "" }
         return String(data: data, encoding: .utf8) ?? ""
     }
 
     static func setAPIKey(_ key: String) throws {
-        try KeychainHelper.save(key: keychainKey, data: Data(key.utf8))
+        try credentials.save(keychainKey, Data(key.utf8))
         SettingsSavedBus.announce()
     }
 
     static func deleteAPIKey() {
-        try? KeychainHelper.delete(key: keychainKey)
+        try? credentials.delete(keychainKey)
     }
 
     // MARK: - Search provider
 
     static func searchProviderKind() -> String {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionSearchProvider)
+        defaults.string(forKey: Constants.Defaults.companionSearchProvider)
             ?? Constants.DefaultValues.companionSearchProvider
     }
 
     static func setSearchProviderKind(_ kind: String) {
-        UserDefaults.standard.set(kind, forKey: Constants.Defaults.companionSearchProvider)
+        defaults.set(kind, forKey: Constants.Defaults.companionSearchProvider)
         // Remember the last real choice so toggling the tool off and back
         // on restores it instead of resetting to a default.
         if kind != "none" {
-            UserDefaults.standard.set(kind, forKey: Constants.Defaults.companionLastSearchProvider)
+            defaults.set(kind, forKey: Constants.Defaults.companionLastSearchProvider)
         }
         SettingsSavedBus.announce()
     }
@@ -131,18 +146,18 @@ enum CompanionConfigService {
     /// The kind the web search tool should return to when re-enabled:
     /// the last used kind, or the scraped default that needs no key.
     static func lastSearchProviderKind() -> String {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionLastSearchProvider)
+        defaults.string(forKey: Constants.Defaults.companionLastSearchProvider)
             ?? "scrape-ddg"
     }
 
     static func customSearchEndpoint() -> URL? {
-        guard let raw = UserDefaults.standard.string(forKey: Constants.Defaults.companionCustomSearchEndpoint),
+        guard let raw = defaults.string(forKey: Constants.Defaults.companionCustomSearchEndpoint),
               !raw.isEmpty else { return nil }
         return URL(string: raw)
     }
 
     static func setCustomSearchEndpoint(_ url: URL?) {
-        UserDefaults.standard.set(url?.absoluteString ?? "", forKey: Constants.Defaults.companionCustomSearchEndpoint)
+        defaults.set(url?.absoluteString ?? "", forKey: Constants.Defaults.companionCustomSearchEndpoint)
         SettingsSavedBus.announce()
     }
 
@@ -150,16 +165,16 @@ enum CompanionConfigService {
     /// which `URL(string:)` percent-encodes, so the raw string is the only
     /// faithful roundtrip; `customSearchEndpoint()` still parses it into a URL.
     static func setCustomSearchEndpointText(_ raw: String) {
-        UserDefaults.standard.set(raw, forKey: Constants.Defaults.companionCustomSearchEndpoint)
+        defaults.set(raw, forKey: Constants.Defaults.companionCustomSearchEndpoint)
         SettingsSavedBus.announce()
     }
 
     static func customSearchHeaderName() -> String {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionCustomSearchHeaderName) ?? ""
+        defaults.string(forKey: Constants.Defaults.companionCustomSearchHeaderName) ?? ""
     }
 
     static func setCustomSearchHeaderName(_ name: String) {
-        UserDefaults.standard.set(name, forKey: Constants.Defaults.companionCustomSearchHeaderName)
+        defaults.set(name, forKey: Constants.Defaults.companionCustomSearchHeaderName)
     }
 
     // MARK: - Search keys (Keychain)
@@ -169,7 +184,7 @@ enum CompanionConfigService {
     }
 
     static func setBraveKey(_ key: String) throws {
-        try KeychainHelper.save(key: braveKeychainKey, data: Data(key.utf8))
+        try credentials.save(braveKeychainKey, Data(key.utf8))
         SettingsSavedBus.announce()
     }
 
@@ -178,7 +193,7 @@ enum CompanionConfigService {
     }
 
     static func setTavilyKey(_ key: String) throws {
-        try KeychainHelper.save(key: tavilyKeychainKey, data: Data(key.utf8))
+        try credentials.save(tavilyKeychainKey, Data(key.utf8))
         SettingsSavedBus.announce()
     }
 
@@ -187,14 +202,14 @@ enum CompanionConfigService {
     }
 
     static func setCustomSearchKey(_ key: String) throws {
-        try KeychainHelper.save(key: customSearchKeychainKey, data: Data(key.utf8))
+        try credentials.save(customSearchKeychainKey, Data(key.utf8))
         SettingsSavedBus.announce()
     }
 
     /// Extra headers for the custom search endpoint, Keychain-stored as
     /// JSON like provider headers, because values can be tokens.
     static func customSearchHeaders() -> [(name: String, value: String)] {
-        guard let data = try? KeychainHelper.load(key: customHeadersKeychainKey),
+        guard let data = try? credentials.load(customHeadersKeychainKey),
               let raw = try? JSONDecoder().decode([[String: String]].self, from: data)
         else { return [] }
         return raw.compactMap { pair in
@@ -208,7 +223,7 @@ enum CompanionConfigService {
         guard let data = try? JSONEncoder().encode(raw) else {
             throw CocoaError(.coderInvalidValue)
         }
-        try KeychainHelper.save(key: customHeadersKeychainKey, data: data)
+        try credentials.save(customHeadersKeychainKey, data)
         SettingsSavedBus.announce()
     }
 
@@ -220,7 +235,7 @@ enum CompanionConfigService {
     }
 
     static func setGitHubSearchKey(_ key: String) throws {
-        try KeychainHelper.save(key: githubSearchKeychainKey, data: Data(key.utf8))
+        try credentials.save(githubSearchKeychainKey, Data(key.utf8))
         SettingsSavedBus.announce()
     }
 
@@ -228,23 +243,23 @@ enum CompanionConfigService {
     /// is only advertised when this is on AND a token exists, so the model
     /// can never see a tool that cannot run.
     static func githubSearchEnabled() -> Bool {
-        UserDefaults.standard.bool(forKey: Constants.Defaults.companionGitHubSearchEnabled)
+        defaults.bool(forKey: Constants.Defaults.companionGitHubSearchEnabled)
     }
 
     static func setGitHubSearchEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: Constants.Defaults.companionGitHubSearchEnabled)
+        defaults.set(enabled, forKey: Constants.Defaults.companionGitHubSearchEnabled)
         SettingsSavedBus.announce()
     }
 
     private static func keychainString(_ key: String) -> String {
-        guard let data = try? KeychainHelper.load(key: key) else { return "" }
+        guard let data = try? credentials.load(key) else { return "" }
         return String(data: data, encoding: .utf8) ?? ""
     }
 
     // MARK: - Providers and models
 
     /// Shared store for providers (endpoint + models + effort).
-    static let chatProviderStore = ChatProviderStore()
+    static var chatProviderStore = ChatProviderStore()
 
     /// Loads providers, migrating a stored legacy `[ModelProfile]` blob once,
     /// then seeding from the legacy single-model config when both stores are
@@ -312,7 +327,7 @@ enum CompanionConfigService {
         setSelectedModelProfileID(agent.id)
         // Clear the legacy key so this seed never runs twice; selection owns
         // the backend from here on.
-        UserDefaults.standard.removeObject(forKey: Constants.Defaults.companionBackend)
+        defaults.removeObject(forKey: Constants.Defaults.companionBackend)
         return updated
     }
 
@@ -320,11 +335,11 @@ enum CompanionConfigService {
     /// copy idempotent so later edits to per-model fields are never
     /// overwritten by a re-read of the old defaults.
     private static func legacyFieldsAttached() -> Bool {
-        UserDefaults.standard.bool(forKey: "companion.legacyFieldsAttachedToProviders")
+        defaults.bool(forKey: "companion.legacyFieldsAttachedToProviders")
     }
 
     private static func markLegacyFieldsAttached() {
-        UserDefaults.standard.set(true, forKey: "companion.legacyFieldsAttachedToProviders")
+        defaults.set(true, forKey: "companion.legacyFieldsAttachedToProviders")
     }
 
     /// One-time copy of the legacy global fields (system prompt, reasoning
@@ -370,7 +385,7 @@ enum CompanionConfigService {
     /// or an ACP agent entry. Nil when nothing resolves.
     static func selectedProvider() -> ChatProvider? {
         let providers = chatProviders()
-        guard let storedID = UserDefaults.standard.string(forKey: Constants.Defaults.companionSelectedModelProfile),
+        guard let storedID = defaults.string(forKey: Constants.Defaults.companionSelectedModelProfile),
               let id = UUID(uuidString: storedID) else {
             return nil
         }
@@ -398,7 +413,7 @@ enum CompanionConfigService {
         if selectedACPProvider() != nil { return nil }
         let providers = chatProviders()
         guard !providers.isEmpty else { return nil }
-        let storedID = UserDefaults.standard.string(forKey: Constants.Defaults.companionSelectedModelProfile)
+        let storedID = defaults.string(forKey: Constants.Defaults.companionSelectedModelProfile)
         if let storedID, let id = UUID(uuidString: storedID) {
             for provider in providers {
                 if let model = provider.model(id: id) {
@@ -436,7 +451,7 @@ enum CompanionConfigService {
     }
 
     static func setSelectedModelProfileID(_ id: UUID) {
-        UserDefaults.standard.set(id.uuidString, forKey: Constants.Defaults.companionSelectedModelProfile)
+        defaults.set(id.uuidString, forKey: Constants.Defaults.companionSelectedModelProfile)
         SettingsSavedBus.announce()
     }
 
@@ -447,7 +462,7 @@ enum CompanionConfigService {
     }
 
     static func setProviderAPIKey(_ id: UUID, _ key: String) throws {
-        try KeychainHelper.save(key: ChatProviderStore.keychainKeyPrefix + id.uuidString, data: Data(key.utf8))
+        try credentials.save(ChatProviderStore.keychainKeyPrefix + id.uuidString, Data(key.utf8))
         SettingsSavedBus.announce()
     }
 
@@ -457,7 +472,7 @@ enum CompanionConfigService {
         var providers = chatProviders()
         providers.removeAll { $0.id == id }
         chatProviderStore.save(providers)
-        try? KeychainHelper.delete(key: ChatProviderStore.keychainKeyPrefix + id.uuidString)
+        try? credentials.delete(ChatProviderStore.keychainKeyPrefix + id.uuidString)
     }
 
     /// Deletes a single model from its provider, keeping the provider.
@@ -477,7 +492,7 @@ enum CompanionConfigService {
         "com.businessbar.companion.provider.headers."
 
     static func providerHeaders(id: UUID) -> [(name: String, value: String)] {
-        guard let data = try? KeychainHelper.load(key: providerHeadersKeychainKeyPrefix + id.uuidString),
+        guard let data = try? credentials.load(providerHeadersKeychainKeyPrefix + id.uuidString),
               let raw = try? JSONDecoder().decode([[String: String]].self, from: data)
         else { return [] }
         return raw.compactMap { pair in
@@ -491,7 +506,7 @@ enum CompanionConfigService {
         guard let data = try? JSONEncoder().encode(raw) else {
             throw CocoaError(.coderInvalidValue)
         }
-        try KeychainHelper.save(key: providerHeadersKeychainKeyPrefix + id.uuidString, data: data)
+        try credentials.save(providerHeadersKeychainKeyPrefix + id.uuidString, data)
         SettingsSavedBus.announce()
     }
 
@@ -593,41 +608,41 @@ enum CompanionConfigService {
     /// Effort the chat panel uses for its next request; empty string means
     /// "use the profile/default effort".
     static func adhocChatEffort() -> String {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionAdhocEffort) ?? ""
+        defaults.string(forKey: Constants.Defaults.companionAdhocEffort) ?? ""
     }
 
     static func setAdhocChatEffort(_ effort: String) {
-        UserDefaults.standard.set(effort, forKey: Constants.Defaults.companionAdhocEffort)
+        defaults.set(effort, forKey: Constants.Defaults.companionAdhocEffort)
     }
 
     /// Whether the chat input starts in its tall layout. The toggle in the
     /// input bar flips it and the choice survives restarts.
     static func chatInputExpanded() -> Bool {
-        UserDefaults.standard.bool(forKey: Constants.Defaults.companionInputExpanded)
+        defaults.bool(forKey: Constants.Defaults.companionInputExpanded)
     }
 
     static func setChatInputExpanded(_ expanded: Bool) {
-        UserDefaults.standard.set(expanded, forKey: Constants.Defaults.companionInputExpanded)
+        defaults.set(expanded, forKey: Constants.Defaults.companionInputExpanded)
         SettingsSavedBus.announce()
     }
 
     // MARK: - Reasoning
 
     static func reasoningEnabled() -> Bool {
-        UserDefaults.standard.bool(forKey: Constants.Defaults.companionReasoning)
+        defaults.bool(forKey: Constants.Defaults.companionReasoning)
     }
 
     static func setReasoningEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: Constants.Defaults.companionReasoning)
+        defaults.set(enabled, forKey: Constants.Defaults.companionReasoning)
     }
 
     static func reasoningEffort() -> String {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionReasoningEffort)
+        defaults.string(forKey: Constants.Defaults.companionReasoningEffort)
             ?? Constants.DefaultValues.companionReasoningEffort
     }
 
     static func setReasoningEffort(_ effort: String) {
-        UserDefaults.standard.set(effort, forKey: Constants.Defaults.companionReasoningEffort)
+        defaults.set(effort, forKey: Constants.Defaults.companionReasoningEffort)
     }
 
     /// Effort values offered in the picker. The set is the union of what
@@ -679,21 +694,21 @@ enum CompanionConfigService {
 
     /// Days after which a saved conversation is deleted. Zero keeps forever.
     static func historyMaxAgeDays() -> Int {
-        UserDefaults.standard.integer(forKey: Constants.Defaults.companionHistoryMaxAgeDays)
+        defaults.integer(forKey: Constants.Defaults.companionHistoryMaxAgeDays)
     }
 
     static func setHistoryMaxAgeDays(_ days: Int) {
-        UserDefaults.standard.set(days, forKey: Constants.Defaults.companionHistoryMaxAgeDays)
+        defaults.set(days, forKey: Constants.Defaults.companionHistoryMaxAgeDays)
     }
 
     /// Maximum number of saved conversations; older ones get deleted.
     /// Zero keeps everything.
     static func historyMaxSessions() -> Int {
-        UserDefaults.standard.integer(forKey: Constants.Defaults.companionHistoryMaxSessions)
+        defaults.integer(forKey: Constants.Defaults.companionHistoryMaxSessions)
     }
 
     static func setHistoryMaxSessions(_ count: Int) {
-        UserDefaults.standard.set(count, forKey: Constants.Defaults.companionHistoryMaxSessions)
+        defaults.set(count, forKey: Constants.Defaults.companionHistoryMaxSessions)
     }
 
     // MARK: - Custom request headers (Keychain)
@@ -701,7 +716,7 @@ enum CompanionConfigService {
     /// Header pairs sent with every chat request. Values can be secrets, so
     /// the whole list lives in the Keychain as JSON, not in UserDefaults.
     static func customHeaders() -> [(name: String, value: String)] {
-        guard let data = try? KeychainHelper.load(key: customHeadersKeychainKey),
+        guard let data = try? credentials.load(customHeadersKeychainKey),
               let raw = try? JSONDecoder().decode([[String: String]].self, from: data)
         else { return [] }
         return raw.compactMap { pair in
@@ -715,26 +730,26 @@ enum CompanionConfigService {
         guard let data = try? JSONEncoder().encode(raw) else {
             throw CocoaError(.coderInvalidValue)
         }
-        try KeychainHelper.save(key: customHeadersKeychainKey, data: data)
+        try credentials.save(customHeadersKeychainKey, data)
         SettingsSavedBus.announce()
     }
 
     // MARK: - ACP configuration
 
     static func acpCommand() -> String {
-        UserDefaults.standard.string(forKey: Constants.Defaults.companionACPCommand) ?? ""
+        defaults.string(forKey: Constants.Defaults.companionACPCommand) ?? ""
     }
 
     static func setACPCommand(_ command: String) {
-        UserDefaults.standard.set(command, forKey: Constants.Defaults.companionACPCommand)
+        defaults.set(command, forKey: Constants.Defaults.companionACPCommand)
     }
 
     static func acpArguments() -> [String] {
-        UserDefaults.standard.stringArray(forKey: Constants.Defaults.companionACPArguments) ?? []
+        defaults.stringArray(forKey: Constants.Defaults.companionACPArguments) ?? []
     }
 
     static func setACPArguments(_ arguments: [String]) {
-        UserDefaults.standard.set(arguments, forKey: Constants.Defaults.companionACPArguments)
+        defaults.set(arguments, forKey: Constants.Defaults.companionACPArguments)
     }
 
     // MARK: - Remote model list
@@ -933,11 +948,11 @@ enum CompanionConfigService {
     /// User-facing switch for the command execution tools. Off by default;
     /// enabling is an explicit opt-in like the search providers.
     static func commandToolsEnabled() -> Bool {
-        UserDefaults.standard.bool(forKey: "companion.commandToolsEnabled")
+        defaults.bool(forKey: "companion.commandToolsEnabled")
     }
 
     static func setCommandToolsEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: "companion.commandToolsEnabled")
+        defaults.set(enabled, forKey: "companion.commandToolsEnabled")
         SettingsSavedBus.announce()
     }
 
@@ -945,12 +960,12 @@ enum CompanionConfigService {
     /// picker in the chat can override it per session.
     static func commandPermissionMode() -> CommandPermissionMode {
         CommandPermissionMode(
-            rawValue: UserDefaults.standard.string(forKey: "companion.commandPermissionMode") ?? ""
+            rawValue: defaults.string(forKey: "companion.commandPermissionMode") ?? ""
         ) ?? .ask
     }
 
     static func setCommandPermissionMode(_ mode: CommandPermissionMode) {
-        UserDefaults.standard.set(mode.rawValue, forKey: "companion.commandPermissionMode")
+        defaults.set(mode.rawValue, forKey: "companion.commandPermissionMode")
         SettingsSavedBus.announce()
     }
 
@@ -969,7 +984,7 @@ enum CompanionConfigService {
     /// Explicit mode for one category; nil when the category follows the
     /// master mode.
     static func commandCategoryMode(_ category: CommandCategory) -> CommandPermissionMode? {
-        guard let raw = UserDefaults.standard.string(
+        guard let raw = defaults.string(
             forKey: "companion.commandPermission.category.\(category.rawValue)"
         ) else { return nil }
         return CommandPermissionMode(rawValue: raw)
@@ -978,9 +993,9 @@ enum CompanionConfigService {
     static func setCommandCategoryMode(_ mode: CommandPermissionMode?, for category: CommandCategory) {
         let key = "companion.commandPermission.category.\(category.rawValue)"
         if let mode {
-            UserDefaults.standard.set(mode.rawValue, forKey: key)
+            defaults.set(mode.rawValue, forKey: key)
         } else {
-            UserDefaults.standard.removeObject(forKey: key)
+            defaults.removeObject(forKey: key)
         }
         SettingsSavedBus.announce()
     }
@@ -998,28 +1013,28 @@ enum CompanionConfigService {
     /// Persistent allow rules: exact commands or `prefix *` wildcards,
     /// added by "Always allow" on the approval card.
     static func commandAllowedPrefixes() -> [String] {
-        UserDefaults.standard.stringArray(forKey: "companion.commandAllowedPrefixes") ?? []
+        defaults.stringArray(forKey: "companion.commandAllowedPrefixes") ?? []
     }
 
     static func setCommandAllowedPrefixes(_ prefixes: [String]) {
-        UserDefaults.standard.set(prefixes, forKey: "companion.commandAllowedPrefixes")
+        defaults.set(prefixes, forKey: "companion.commandAllowedPrefixes")
         SettingsSavedBus.announce()
     }
 
     /// Persistent deny rules. Deny wins over allow rules and Allow mode.
     static func commandDeniedPrefixes() -> [String] {
-        UserDefaults.standard.stringArray(forKey: "companion.commandDeniedPrefixes") ?? []
+        defaults.stringArray(forKey: "companion.commandDeniedPrefixes") ?? []
     }
 
     static func setCommandDeniedPrefixes(_ prefixes: [String]) {
-        UserDefaults.standard.set(prefixes, forKey: "companion.commandDeniedPrefixes")
+        defaults.set(prefixes, forKey: "companion.commandDeniedPrefixes")
         SettingsSavedBus.announce()
     }
 
     /// Default working dir for new chat sessions. Falls back to home so
     /// the tools work before any pick, same rule as the chat header.
     static func commandDefaultWorkingDir() -> String {
-        let raw = UserDefaults.standard.string(forKey: Constants.Defaults.companionCommandDefaultWorkingDir)
+        let raw = defaults.string(forKey: Constants.Defaults.companionCommandDefaultWorkingDir)
         guard let raw, !raw.isEmpty,
               FileManager.default.fileExists(atPath: raw) else {
             return NSHomeDirectory()
@@ -1028,7 +1043,7 @@ enum CompanionConfigService {
     }
 
     static func setCommandDefaultWorkingDir(_ path: String) {
-        UserDefaults.standard.set(path, forKey: Constants.Defaults.companionCommandDefaultWorkingDir)
+        defaults.set(path, forKey: Constants.Defaults.companionCommandDefaultWorkingDir)
         SettingsSavedBus.announce()
     }
 

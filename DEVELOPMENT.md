@@ -67,6 +67,36 @@ client deltas. The JSON contains `chunks` (an ordered string array),
 `fullText` (their joined text) and `terminal` ("finished"). This replay
 does not call a model or modify the app's chat history or preferences.
 
+### Whole-application coverage
+
+Run `bash scripts/test-coverage.sh` for the instrumented production-module
+scenarios and native markdown/composer regressions. With full Xcode, run
+`bash scripts/test-coverage.sh --with-xctest` to include the original XCTest
+suite and the shared application scenarios through XCTest. CI uses this
+second command and uploads its coverage inventory and exports.
+
+The gate requires strictly more than 90% across **all** Swift production
+sources in `BusinessBar/` and `BusinessBarCore/`, including unchanged and
+zero-hit files. It checks both LLVM's summary-line count and deduplicated
+LCOV `(file, line)` entries. LLVM's summary count can be larger than the
+unique source-line count, so both are reported. Tests and dependencies
+are outside the denominator. Declaration-only sources with
+no executable mappings are listed explicitly, not counted as covered.
+
+Each run needs a fresh output directory. Use `--output-dir /path/to/output`
+to retain profiles, `summary.json`, `coverage.json`, and `coverage.lcov`.
+`--report-only` is diagnostic: it can exit successfully below the threshold,
+but the report still says `FAIL`. It is not the PR or CI gate.
+Reusing a build with `--no-build` requires `--report-only`; it cannot satisfy
+the acceptance gate. A gating run checks the complete production source
+fingerprint before and after execution.
+
+Shared scenarios use injected system boundaries and isolated storage.
+The standalone runner links the actual instrumented app and core objects,
+not rewritten production sources. It substitutes only its own executable
+entry point. Coverage is exported from the complete app executable, so
+the original application entry remains in the denominator.
+
 ### Building the Project
 
 #### Option 1: Using Make (Recommended)

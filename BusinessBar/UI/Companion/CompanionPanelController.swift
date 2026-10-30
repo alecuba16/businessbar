@@ -17,13 +17,36 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
     static let shared = CompanionPanelController()
 
     private var panel: NSPanel?
-    private let chatStore = ChatStore()
+    private let chatStore: ChatStore
     /// Command tool state: approvals, background processes, workspace,
     /// permission mode. One instance lives with the chat store.
-    let commandTools = CommandToolController()
+    let commandTools: CommandToolController
     private var restoredOnLaunch = false
 
-    override init() {
+    struct Effects {
+        var show: (NSPanel) -> Void
+        var activate: () -> Void
+        var shutdownAgent: () -> Void
+
+        static var live: Effects {
+            Effects(show: { $0.makeKeyAndOrderFront(nil) }, activate: {
+                NSApp.activate(ignoringOtherApps: true)
+            }, shutdownAgent: {
+                Task { await CompanionConfigService.shutdownACP() }
+            })
+        }
+    }
+
+    private let effects: Effects
+
+    override convenience init() {
+        self.init(chatStore: ChatStore(), commandTools: CommandToolController(), effects: .live)
+    }
+
+    init(chatStore: ChatStore, commandTools: CommandToolController, effects: Effects) {
+        self.chatStore = chatStore
+        self.commandTools = commandTools
+        self.effects = effects
         super.init()
         // Session-scoped command state (permission mode, approved prefixes,
         // workspace folder) follows the conversation: switching chats drops
@@ -93,13 +116,13 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
             panel = focusPanel
             observeWorkspace()
             positionDefault(focusPanel)
-            focusPanel.makeKeyAndOrderFront(nil)
+            effects.show(focusPanel)
         } else {
             panel?.contentView = hosting
             reassertFloating()
-            panel?.makeKeyAndOrderFront(nil)
+            if let panel { effects.show(panel) }
         }
-        NSApp.activate(ignoringOtherApps: true)
+        effects.activate()
     }
 
     func close() {
@@ -109,7 +132,7 @@ final class CompanionPanelController: NSObject, NSWindowDelegate {
         // An unanswered approval must not stay suspended while hidden.
         commandTools.denyPendingApproval()
         // Kill the ACP subprocess: nothing companion-related outlives the UI.
-        Task { await CompanionConfigService.shutdownACP() }
+        effects.shutdownAgent()
     }
 
     /// True when the chat panel exists and is on screen. The rewrite flow

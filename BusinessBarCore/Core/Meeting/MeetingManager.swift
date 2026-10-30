@@ -13,6 +13,8 @@ public final class MeetingManager: ObservableObject {
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "Meeting")
 
     private let eventStore: EventStoreProtocol
+    private let defaults: UserDefaults
+    private let notificationCenter: NotificationCenter
     /// Injectable clock. Tests pass a closure over a mutable date to simulate
     /// midnight rollover without waiting for a real day change.
     private let nowProvider: () -> Date
@@ -40,22 +42,29 @@ public final class MeetingManager: ObservableObject {
     }
 
     private var showTomorrowEvents: Bool {
-        if let value = UserDefaults.standard.object(forKey: Constants.Defaults.showTomorrowEvents) as? Bool {
+        if let value = defaults.object(forKey: Constants.Defaults.showTomorrowEvents) as? Bool {
             return value
         }
         return true
     }
 
-    public init(eventStore: EventStoreProtocol, nowProvider: @escaping () -> Date = Date.init) {
+    public init(
+        eventStore: EventStoreProtocol,
+        nowProvider: @escaping () -> Date = Date.init,
+        defaults: UserDefaults = .standard,
+        notificationCenter: NotificationCenter = .default
+    ) {
         self.eventStore = eventStore
+        self.defaults = defaults
+        self.notificationCenter = notificationCenter
         self.nowProvider = nowProvider
-        self.lastFeatureState = Self.calendarFeatureEnabled()
+        self.lastFeatureState = defaults.object(forKey: Constants.Defaults.featureCalendar) as? Bool ?? true
 
         setupEventStoreObserver()
         setupPreferencesObserver()
 
         Task {
-            guard Self.calendarFeatureEnabled() else {
+            guard calendarFeatureEnabled() else {
                 events = []
                 nextEvent = nil
                 calendars = []
@@ -71,7 +80,7 @@ public final class MeetingManager: ObservableObject {
     }
 
     public func loadCalendars() async {
-        guard Self.calendarFeatureEnabled() else {
+        guard calendarFeatureEnabled() else {
             calendars = []
             return
         }
@@ -85,7 +94,7 @@ public final class MeetingManager: ObservableObject {
     }
 
     public func refreshEvents() async {
-        guard Self.calendarFeatureEnabled() else {
+        guard calendarFeatureEnabled() else {
             events = []
             nextEvent = nil
             lastFetchDayStart = nil
@@ -119,7 +128,7 @@ public final class MeetingManager: ObservableObject {
             fetchedEvents = EventDisplayPlanner.filter(
                 fetchedEvents,
                 dismissedIDs: dismissedEventIDs,
-                showDeclined: UserDefaults.standard.bool(forKey: Constants.Defaults.showDeclinedEvents)
+                showDeclined: defaults.bool(forKey: Constants.Defaults.showDeclinedEvents)
             )
             if !showTomorrow {
                 fetchedEvents = fetchedEvents.filter { $0.startDate < window.end }
@@ -127,7 +136,7 @@ public final class MeetingManager: ObservableObject {
             fetchedEvents.sort { $0.startDate < $1.startDate }
 
             events = fetchedEvents
-            nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs)
+            nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs, now: nowProvider())
             lastFetchDayStart = window.start
         } catch {
             Self.logger.error("Failed to refresh events: \(error.localizedDescription)")
@@ -136,7 +145,7 @@ public final class MeetingManager: ObservableObject {
 
     public func dismissEvent(_ eventID: String) {
         dismissedEventIDs.insert(eventID)
-        nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs)
+        nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs, now: nowProvider())
     }
 
     /// Recalculation of `nextEvent` from the cached events array, plus day
@@ -150,7 +159,7 @@ public final class MeetingManager: ObservableObject {
                 await self?.refreshEvents()
             }
         }
-        nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs)
+        nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs, now: nowProvider())
     }
 
     private func hasDayChangedSinceLastFetch(calendar: Calendar = .current) -> Bool {
@@ -166,7 +175,7 @@ public final class MeetingManager: ObservableObject {
     }
 
     private func getSelectedCalendarIDs() -> [String] {
-        guard let data = UserDefaults.standard.data(forKey: Constants.Defaults.selectedCalendars),
+        guard let data = defaults.data(forKey: Constants.Defaults.selectedCalendars),
               let calendarIDs = try? JSONDecoder().decode([String].self, from: data) else {
             return calendars.map { $0.id }
         }
@@ -175,24 +184,24 @@ public final class MeetingManager: ObservableObject {
     }
 
     private func setupEventStoreObserver() {
-        NotificationCenter.default.publisher(for: .EKEventStoreChanged)
+        notificationCenter.publisher(for: .EKEventStoreChanged)
             .debounce(for: .seconds(1), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    guard Self.calendarFeatureEnabled() else { return }
-                    await self?.refreshEvents()
+                    guard let self, self.calendarFeatureEnabled() else { return }
+                    await self.refreshEvents()
                 }
             }
             .store(in: &cancellables)
     }
 
     private func setupPreferencesObserver() {
-        NotificationCenter.default.publisher(for: .businessBarPreferencesDidChange)
+        notificationCenter.publisher(for: .businessBarPreferencesDidChange)
             .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    let isEnabled = Self.calendarFeatureEnabled()
+                    let isEnabled = self.calendarFeatureEnabled()
                     if isEnabled != self.lastFeatureState {
                         self.lastFeatureState = isEnabled
                         guard isEnabled else { return }
@@ -205,8 +214,8 @@ public final class MeetingManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    nonisolated private static func calendarFeatureEnabled() -> Bool {
-        if let value = UserDefaults.standard.object(forKey: Constants.Defaults.featureCalendar) as? Bool {
+    private func calendarFeatureEnabled() -> Bool {
+        if let value = defaults.object(forKey: Constants.Defaults.featureCalendar) as? Bool {
             return value
         }
         return true

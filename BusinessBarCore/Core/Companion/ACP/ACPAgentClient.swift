@@ -299,6 +299,7 @@ public final class ACPAgentClient: LLMClient, @unchecked Sendable {
     ) async throws -> PromptOutcome {
         lock.lock()
         accumulatedTextStorage = ""
+        accumulatedMapper = ACPUpdateMapper()
         lock.unlock()
 
         let requestID = allocateRequestID()

@@ -77,6 +77,57 @@ final class GoogleAuth: NSObject, ObservableObject,
 
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "GoogleAuth")
 
+    struct Configuration {
+        var clientNumber: String
+        var clientSecret: String
+        var isConfigured: Bool { !clientNumber.hasPrefix("YOUR_") && !clientSecret.hasPrefix("YOUR_") }
+        var clientID: String { "\(clientNumber).apps.googleusercontent.com" }
+        var redirectURI: String { "com.googleusercontent.apps.\(clientNumber):/oauthredirect" }
+    }
+
+    struct Dependencies {
+        var loadCredential: () throws -> Data
+        var saveCredential: (Data) throws -> Void
+        var deleteCredential: () throws -> Void
+        var configuration: () -> Configuration
+        var request: (URLRequest) async throws -> (Data, URLResponse)
+        var openURL: (URL) -> Bool
+        var oauth: OAuth = .live
+
+        static var live: Dependencies {
+            Dependencies(
+                loadCredential: { try KeychainHelper.load(key: GoogleAuthConfig.keychainKey) },
+                saveCredential: { try KeychainHelper.save(key: GoogleAuthConfig.keychainKey, data: $0) },
+                deleteCredential: { try KeychainHelper.delete(key: GoogleAuthConfig.keychainKey) },
+                configuration: { Configuration(clientNumber: GoogleAuthConfig.clientNumber, clientSecret: GoogleAuthConfig.clientSecret) },
+                request: { try await URLSession.shared.data(for: $0) },
+                openURL: { NSWorkspace.shared.open($0) }
+            )
+        }
+    }
+
+    struct OAuth {
+        var discover: (URL, @escaping (OIDServiceConfiguration?, Error?) -> Void) -> Void
+        var authorize: (OIDAuthorizationRequest, any OIDExternalUserAgent, @escaping (OIDAuthState?, Error?) -> Void) -> (any OIDExternalUserAgentSession)?
+        var refresh: (OIDAuthState, @escaping (String?, Error?) -> Void) -> Void
+
+        static var live: OAuth {
+            OAuth(
+                discover: { issuer, completion in
+                    OIDAuthorizationService.discoverConfiguration(forIssuer: issuer) { configuration, error in
+                        completion(configuration, error)
+                    }
+                },
+                authorize: { OIDAuthState.authState(byPresenting: $0, externalUserAgent: $1, callback: $2) },
+                refresh: { state, completion in
+                    state.performAction { accessToken, _, error in completion(accessToken, error) }
+                }
+            )
+        }
+    }
+
+    private let dependencies: Dependencies
+
     // MARK: Published state
     @Published private(set) var isAuthenticated = false
     @Published private(set) var userEmail: String?
@@ -99,7 +150,12 @@ final class GoogleAuth: NSObject, ObservableObject,
     private var refreshTask: Task<String, Error>?
 
     // MARK: Init
-    override init() {
+    override convenience init() {
+        self.init(dependencies: .live)
+    }
+
+    init(dependencies: Dependencies) {
+        self.dependencies = dependencies
         super.init()
         if let restored = restoreAuthState() {
             Self.logger.info("Restored existing Google auth state — authenticated: \(restored.isAuthorized)")
@@ -117,11 +173,12 @@ final class GoogleAuth: NSObject, ObservableObject,
     // MARK: - Public API
 
     func signIn(forcePrompt: Bool = false) async throws {
-        guard GoogleAuthConfig.isConfigured else {
+        let configuration = dependencies.configuration()
+        guard configuration.isConfigured else {
             Self.logger.error("Sign-in attempted but Google OAuth not configured")
             throw GoogleAuthError.notConfigured
         }
-        guard let redirectURL = URL(string: GoogleAuthConfig.redirectURI) else {
+        guard let redirectURL = URL(string: configuration.redirectURI) else {
             Self.logger.error("Sign-in attempted but redirect URI is invalid")
             throw GoogleAuthError.notConfigured
         }
@@ -134,7 +191,7 @@ final class GoogleAuth: NSObject, ObservableObject,
 
         // Discover OIDC configuration for the Google issuer.
         let config = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<OIDServiceConfiguration, Error>) in
-            OIDAuthorizationService.discoverConfiguration(forIssuer: GoogleAuthConfig.issuer) { cfg, err in
+            dependencies.oauth.discover(GoogleAuthConfig.issuer) { cfg, err in
                 if let cfg { cont.resume(returning: cfg) }
                 else { cont.resume(throwing: err ?? GoogleAuthError.discoveryFailed) }
             }
@@ -145,8 +202,8 @@ final class GoogleAuth: NSObject, ObservableObject,
 
         let request = OIDAuthorizationRequest(
             configuration: config,
-            clientId: GoogleAuthConfig.clientID,
-            clientSecret: GoogleAuthConfig.clientSecret,
+            clientId: configuration.clientID,
+            clientSecret: configuration.clientSecret,
             scopes: GoogleAuthConfig.scopes,
             redirectURL: redirectURL,
             responseType: OIDResponseTypeCode,
@@ -156,10 +213,7 @@ final class GoogleAuth: NSObject, ObservableObject,
         // OIDAuthState.authState(byPresenting:externalUserAgent:) calls
         // self.present(_:session:) → we open the system browser there.
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            self.currentAuthorizationFlow = OIDAuthState.authState(
-                byPresenting: request,
-                externalUserAgent: self
-            ) { [weak self] state, error in
+            self.currentAuthorizationFlow = dependencies.oauth.authorize(request, self) { [weak self] state, error in
                 guard let self else { return }
                 if let state {
                     Self.logger.info("Google sign-in successful — authenticated: \(state.isAuthorized)")
@@ -199,7 +253,7 @@ final class GoogleAuth: NSObject, ObservableObject,
         let token = try await validAccessToken()
         var req = URLRequest(url: url)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await dependencies.request(req)
         if let http = response as? HTTPURLResponse,
            !(200...299).contains(http.statusCode) {
             if (http.statusCode == 401 || http.statusCode == 403) {
@@ -218,7 +272,7 @@ final class GoogleAuth: NSObject, ObservableObject,
     func present(_ request: OIDExternalUserAgentRequest,
                  session: OIDExternalUserAgentSession) -> Bool {
         guard let url = request.externalUserAgentRequestURL() else { return false }
-        return NSWorkspace.shared.open(url)
+        return dependencies.openURL(url)
     }
 
     func dismiss(animated: Bool, completion: @escaping () -> Void) {
@@ -252,11 +306,11 @@ final class GoogleAuth: NSObject, ObservableObject,
 
         if let running = refreshTask { return try await running.value }
 
-        let task = Task<String, Error> {
+        let task = Task<String, Error> { [self] in
             defer { self.refreshTask = nil }
             return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
                 if forceRefresh { state.setNeedsTokenRefresh() }
-                state.performAction { [weak self] accessToken, _, error in
+                self.dependencies.oauth.refresh(state) { [weak self] accessToken, error in
                     if let token = accessToken {
                         cont.resume(returning: token)
                     } else {
@@ -281,7 +335,7 @@ final class GoogleAuth: NSObject, ObservableObject,
     private func persistAuthState() {
         guard let state = authState else {
             do {
-                try KeychainHelper.delete(key: GoogleAuthConfig.keychainKey)
+                try dependencies.deleteCredential()
             } catch {
                 Self.logger.error("Failed to delete keychain entry during clear: \(error.localizedDescription)")
             }
@@ -294,7 +348,7 @@ final class GoogleAuth: NSObject, ObservableObject,
             return
         }
         do {
-            try KeychainHelper.save(key: GoogleAuthConfig.keychainKey, data: data)
+            try dependencies.saveCredential(data)
         } catch {
             Self.logger.error("Failed to save auth state to keychain: \(error.localizedDescription)")
         }
@@ -303,7 +357,7 @@ final class GoogleAuth: NSObject, ObservableObject,
     private func restoreAuthState() -> OIDAuthState? {
         let data: Data
         do {
-            data = try KeychainHelper.load(key: GoogleAuthConfig.keychainKey)
+            data = try dependencies.loadCredential()
         } catch {
             Self.logger.info("No saved Google auth state in keychain (expected on first launch)")
             return nil
@@ -316,7 +370,7 @@ final class GoogleAuth: NSObject, ObservableObject,
             return state
         } catch {
             Self.logger.error("Failed to unarchive Google auth state from keychain: \(error.localizedDescription) — clearing corrupted state")
-            try? KeychainHelper.delete(key: GoogleAuthConfig.keychainKey)
+            try? dependencies.deleteCredential()
             return nil
         }
     }
@@ -327,7 +381,7 @@ final class GoogleAuth: NSObject, ObservableObject,
         userEmail = nil
         isAuthenticated = false
         do {
-            try KeychainHelper.delete(key: GoogleAuthConfig.keychainKey)
+            try dependencies.deleteCredential()
         } catch {
             Self.logger.error("Failed to delete keychain entry during auth state clear: \(error.localizedDescription)")
         }
@@ -340,7 +394,7 @@ final class GoogleAuth: NSObject, ObservableObject,
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.httpBody = Data("token=\(token)".utf8)
-        _ = try await URLSession.shared.data(for: req)
+        _ = try await dependencies.request(req)
     }
 }
 

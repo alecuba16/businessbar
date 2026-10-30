@@ -32,17 +32,20 @@ enum CredentialLoader {
 
     // MARK: - Loading
 
-    private static func load() -> CredentialValues {
+    static func load(
+        resourceURL: (String) -> URL? = { Bundle.main.url(forResource: $0, withExtension: "json") },
+        read: (URL) throws -> Data = { try Data(contentsOf: $0) }
+    ) -> CredentialValues {
         // 1. Try credentials.local.json (local dev override)
-        if let url = Bundle.main.url(forResource: "credentials.local", withExtension: "json"),
-           let values = parseJSON(url) {
+        if let url = resourceURL("credentials.local"),
+           let values = parseJSON(url, read: read) {
             AppLogger.debug("Loaded credentials from credentials.local.json", category: "Credentials")
             return values
         }
 
         // 2. Try credentials.json (bundled default — real in release, placeholder in debug)
-        if let url = Bundle.main.url(forResource: "credentials", withExtension: "json"),
-           let values = parseJSON(url) {
+        if let url = resourceURL("credentials"),
+           let values = parseJSON(url, read: read) {
             let isPlaceholder = values.googleClientNumber.hasPrefix("YOUR_")
             AppLogger.debug("Loaded credentials from credentials.json (placeholder: \(isPlaceholder))", category: "Credentials")
             return values
@@ -58,10 +61,10 @@ enum CredentialLoader {
 
     // MARK: - JSON Parsing
 
-    private static func parseJSON(_ url: URL) -> CredentialValues? {
+    private static func parseJSON(_ url: URL, read: (URL) throws -> Data) -> CredentialValues? {
         let data: Data
         do {
-            data = try Data(contentsOf: url)
+            data = try read(url)
         } catch {
             AppLogger.error("Failed to read credentials file: \(error.localizedDescription)", category: "Credentials")
             return nil

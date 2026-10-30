@@ -7,6 +7,14 @@ import SwiftUI
 /// Orchestrates a rewrite: capture selection, pick template, stream the
 /// completion, present the result overlay. Lives in the app target because
 /// it drives UI; the LLM call itself is pure BusinessBarCore.
+protocol RewriteSelectionSource {
+    func captureSelectedText() async -> Result<SelectionService.CapturedSelection, SelectionService.CaptureError>
+    func replaceSelection(with text: String) async -> Bool
+    func insertAfterSelection(_ text: String) async -> Bool
+}
+
+extension SelectionService: RewriteSelectionSource {}
+
 @MainActor
 final class RewriteCoordinator: ObservableObject {
     static let shared = RewriteCoordinator()
@@ -14,11 +22,39 @@ final class RewriteCoordinator: ObservableObject {
     @Published var isStreaming = false
     @Published var errorMessage: String?
 
-    private let selectionService: SelectionService
+    @MainActor
+    struct Effects {
+        var prepareModel: @MainActor (UUID?) async throws -> Void
+        var finished: @MainActor () -> Void
+        var toast: @MainActor (String, String, TimeInterval) -> Void
+        var present: @MainActor (String, String, String, SelectionService.CapturedSelection?) -> Void
+        var log: @MainActor (String, Bool) -> Void
+
+        static var live: Effects {
+            Effects(
+                prepareModel: { try await CompanionConfigService.ensureLocalServer(forModelID: $0) },
+                finished: {
+                    if !CompanionPanelController.shared.isPanelVisible {
+                        Task { await CompanionConfigService.shutdownACP() }
+                    }
+                },
+                toast: { ToastCenter.shared.show($0, icon: $1, duration: $2) },
+                present: { RewriteOverlayController.shared.present(original: $0, rewritten: $1, templateName: $2, selection: $3) },
+                log: { message, error in
+                    if error { AppLogger.error(message, category: "Companion") }
+                    else { AppLogger.info(message, category: "Companion") }
+                }
+            )
+        }
+    }
+
+    private let selectionService: any RewriteSelectionSource
+    private let effects: Effects
     private var streamTask: Task<Void, Never>?
 
-    init(selectionService: SelectionService = SelectionService()) {
+    init(selectionService: any RewriteSelectionSource = SelectionService(), effects: Effects? = nil) {
         self.selectionService = selectionService
+        self.effects = effects ?? .live
     }
 
     /// Runs one template's rewrite on the current selection. Each template
@@ -44,9 +80,7 @@ final class RewriteCoordinator: ObservableObject {
             // when the chat panel is open: it shares the process and session.
             defer {
                 self.isStreaming = false
-                if !CompanionPanelController.shared.isPanelVisible {
-                    Task { await CompanionConfigService.shutdownACP() }
-                }
+                self.effects.finished()
             }
 
             // 1. Capture the selection before the panel/overlay takes focus.
@@ -57,13 +91,13 @@ final class RewriteCoordinator: ObservableObject {
             case .success(let captured):
                 selection = captured
                 original = captured.text
-                AppLogger.info("rewrite: captured \(captured.text.utf8.count) bytes viaAX=\(captured.viaAccessibility)", category: "Companion")
+                self.effects.log("rewrite: captured \(captured.text.utf8.count) bytes viaAX=\(captured.viaAccessibility)", false)
             case .failure(let error):
                 selection = nil
                 original = ""
-                AppLogger.error("rewrite: capture failed \(error)", category: "Companion")
+                self.effects.log("rewrite: capture failed \(error)", true)
                 self.errorMessage = Self.message(for: error)
-                ToastCenter.shared.show(Self.message(for: error), icon: "exclamationmark.triangle", duration: 3.0)
+                self.effects.toast(Self.message(for: error), "exclamationmark.triangle", 3.0)
                 return
             }
 
@@ -73,7 +107,7 @@ final class RewriteCoordinator: ObservableObject {
             do {
                 // A template pinned to a local MLX model needs the server up
                 // even when the chat panel's selected model is remote.
-                try await CompanionConfigService.ensureLocalServer(forModelID: template.modelID)
+                try await self.effects.prepareModel(template.modelID)
                 let stream = await client.stream(messages: [
                     ChatMessage(role: .user, content: prompt)
                 ], onToolCall: nil, reasoningEffortOverride: template.reasoningEffort)
@@ -88,7 +122,7 @@ final class RewriteCoordinator: ObservableObject {
                         result = fullText
                     case .failed(let message):
                         self.errorMessage = message
-                        ToastCenter.shared.show(message, icon: "exclamationmark.triangle", duration: 3.0)
+                        self.effects.toast(message, "exclamationmark.triangle", 3.0)
                         return
                     case .cancelled:
                         return
@@ -97,15 +131,15 @@ final class RewriteCoordinator: ObservableObject {
                     }
                 }
             } catch {
-                AppLogger.error("rewrite: stream error \(error.localizedDescription)", category: "Companion")
+                self.effects.log("rewrite: stream error \(error.localizedDescription)", true)
                 self.errorMessage = error.localizedDescription
-                ToastCenter.shared.show(error.localizedDescription, icon: "exclamationmark.triangle", duration: 3.0)
+                self.effects.toast(error.localizedDescription, "exclamationmark.triangle", 3.0)
                 return
             }
 
             guard !result.isEmpty else {
                 self.errorMessage = "The model returned an empty response."
-                ToastCenter.shared.show("The model returned an empty response.", icon: "exclamationmark.triangle", duration: 3.0)
+                self.effects.toast("The model returned an empty response.", "exclamationmark.triangle", 3.0)
                 return
             }
 
@@ -125,14 +159,14 @@ final class RewriteCoordinator: ObservableObject {
                 break
             case .replace:
                 if tagged, let selection, selection.viaAccessibility {
-                    AppLogger.info("rewrite: auto-replace for \(template.name)", category: "Companion")
+                    self.effects.log("rewrite: auto-replace for \(template.name)", false)
                     let succeeded = await self.selectionService.replaceSelection(with: finalOutput)
                     if succeeded {
-                        ToastCenter.shared.show("Replaced with \(template.name)", icon: "checkmark.circle", duration: 1.2)
+                        self.effects.toast("Replaced with \(template.name)", "checkmark.circle", 1.2)
                         return
                     }
-                    AppLogger.error("rewrite: auto-replace AX write failed, showing overlay", category: "Companion")
-                    ToastCenter.shared.show("Could not replace directly, review the result", icon: "exclamationmark.triangle", duration: 2.5)
+                    self.effects.log("rewrite: auto-replace AX write failed, showing overlay", true)
+                    self.effects.toast("Could not replace directly, review the result", "exclamationmark.triangle", 2.5)
                 }
             case .append, .appendLineBreak:
                 if let selection, selection.viaAccessibility {
@@ -142,24 +176,19 @@ final class RewriteCoordinator: ObservableObject {
                     let text = template.action == .appendLineBreak && !original.hasSuffix("\n")
                         ? "\n" + finalOutput
                         : finalOutput
-                    AppLogger.info("rewrite: insert-after for \(template.name)", category: "Companion")
+                    self.effects.log("rewrite: insert-after for \(template.name)", false)
                     let succeeded = await self.selectionService.insertAfterSelection(text)
                     if succeeded {
-                        ToastCenter.shared.show("Inserted \(template.name) after selection", icon: "checkmark.circle", duration: 1.2)
+                        self.effects.toast("Inserted \(template.name) after selection", "checkmark.circle", 1.2)
                         return
                     }
-                    AppLogger.error("rewrite: insert-after AX write failed, showing overlay", category: "Companion")
-                    ToastCenter.shared.show("Could not insert directly, review the result", icon: "exclamationmark.triangle", duration: 2.5)
+                    self.effects.log("rewrite: insert-after AX write failed, showing overlay", true)
+                    self.effects.toast("Could not insert directly, review the result", "exclamationmark.triangle", 2.5)
                 }
             }
 
-            RewriteOverlayController.shared.present(
-                original: original,
-                rewritten: finalOutput,
-                templateName: template.name,
-                selection: selection
-            )
-            ToastCenter.shared.show("Rewrite ready: \(template.name)", icon: "checkmark.circle", duration: 1.2)
+            self.effects.present(original, finalOutput, template.name, selection)
+            self.effects.toast("Rewrite ready: \(template.name)", "checkmark.circle", 1.2)
         }
     }
 
