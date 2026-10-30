@@ -26,32 +26,45 @@ func descendant<T: NSView>(_ root: NSView, of type: T.Type) -> T? {
     return nil
 }
 
-func rows(in view: ComposerNSTextView) -> [NSRect] {
+func fragments(in view: ComposerNSTextView) -> [(rect: NSRect, start: Int, continuation: Bool)] {
     let manager = view.layoutManager!
     let container = view.textContainer!
     manager.ensureLayout(for: container)
-    var result: [NSRect] = []
+    let text = view.string as NSString
+    var result: [(rect: NSRect, start: Int, continuation: Bool)] = []
     manager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)) {
-        rect, _, _, _, _ in result.append(rect)
+        rect, _, _, glyphRange, _ in
+        let start = manager.characterIndexForGlyph(at: glyphRange.location)
+        let logicalStart = text.lineRange(for: NSRange(location: start, length: 0)).location
+        result.append((rect, start, start != logicalStart))
     }
     if manager.extraLineFragmentTextContainer === container {
-        result.append(manager.extraLineFragmentRect)
+        result.append((manager.extraLineFragmentRect, text.length, false))
     }
     return result
+}
+
+func rows(in view: ComposerNSTextView) -> [NSRect] {
+    fragments(in: view).map(\.rect)
 }
 
 func verifyMarkers(_ view: ComposerNSTextView, _ label: String, expected: Int? = nil) {
     let text = view.string
     let selection = view.selectedRange()
     view.layout()
-    let fragments = rows(in: view)
-    let wanted = text.isEmpty ? 0 : max(0, fragments.count - 1)
-    if let expected { expect(wanted == expected, "\(label): native row count \(wanted), expected \(expected)") }
+    let nativeFragments = fragments(in: view)
+    let wrapped = nativeFragments.filter(\.continuation)
+    let wanted = wrapped.count
+    if let expected { expect(wanted == expected, "\(label): native continuation count \(wanted), expected \(expected)") }
     let markers = view.markerLayers
     expect(markers.count == wanted, "\(label): expected \(wanted) arrows, got \(markers.count)")
     expect(markers.allSatisfy { ($0.string as? String) == "↩" }, "\(label): only return arrows, got \(markers.map { $0.string ?? "nil" })")
     expect(markers.allSatisfy { $0.frame.minX >= 0 && $0.frame.maxX <= view.textContainerOrigin.x + 0.01 }, "\(label): arrows stay in left gutter")
-    for (marker, fragment) in zip(markers, fragments.dropFirst()) {
+    for fragment in nativeFragments where !fragment.continuation {
+        expect(!markers.contains { abs($0.frame.minY - (view.textContainerOrigin.y + fragment.rect.minY)) < 0.1 }, "\(label): no arrow at logical-line/caret start \(fragment.start)")
+    }
+    for (marker, row) in zip(markers, wrapped) {
+        let fragment = row.rect
         expect(abs(marker.frame.minY - (view.textContainerOrigin.y + fragment.minY)) < 0.1, "\(label): arrow follows row y")
         expect(abs(marker.frame.height - fragment.height) < 0.1, "\(label): arrow follows row height")
         expect(abs(marker.frame.width - 12) < 0.1, "\(label): existing 12pt marker width")
@@ -105,7 +118,7 @@ guard let view = descendant(host, of: ComposerNSTextView.self),
     exit(1)
 }
 view.wantsLayer = true
-verifyMarkers(view, "hard break", expected: 1)
+verifyMarkers(view, "hard break", expected: 0)
 if CommandLine.arguments.contains("--red-only") {
     print("Composer markers: \(checks) checks, \(failures) failures")
     exit(failures == 0 ? 0 : 1)
@@ -114,16 +127,22 @@ if CommandLine.arguments.contains("--red-only") {
 let cases: [(String, String, Int?)] = [
     ("empty", "", 0),
     ("plain", "plain text", 0),
-    ("hard break", "one\ntwo", 1),
-    ("trailing newline", "one\n", 1),
-    ("single newline", "\n", 1),
-    ("blank consecutive lines", "one\n\n\ntwo", 3),
-    ("blank trailing lines", "one\n\n", 2),
-    ("CRLF", "one\r\ntwo\r\n", 2),
-    ("literal pilcrow", "¶ user text\n¶ stays", 1),
+    ("hard break", "one\ntwo", 0),
+    ("trailing newline", "one\n", 0),
+    ("single newline", "\n", 0),
+    ("blank consecutive lines", "one\n\n\ntwo", 0),
+    ("blank trailing lines", "one\n\n", 0),
+    ("CRLF", "one\r\ntwo\r\n", 0),
+    ("literal pilcrow", "¶ user text\n¶ stays", 0),
     ("soft wrap", String(repeating: "word ", count: 35), nil),
     ("mixed", String(repeating: "word ", count: 20) + "\n\n" + String(repeating: "tail ", count: 20) + "\n", nil),
-    ("unicode", "👨‍👩‍👧‍👦 café\n日本語\n", 2)
+    ("long second paragraph", "one\n" + String(repeating: "second ", count: 40), nil),
+    ("wrapped paragraph reset", String(repeating: "word ", count: 40) + "\nshort\n", nil),
+    ("wrapped CRLF reset", String(repeating: "word ", count: 40) + "\r\nshort\r\n", nil),
+    ("unicode", "👨‍👩‍👧‍👦 café\n日本語\n", 0),
+    ("unicode wrapping", String(repeating: "👨‍👩‍👧‍👦 café 日本語 ", count: 30) + "\n日本語\n", nil),
+    ("unicode line separator", "one\u{2028}two\u{2028}", 0),
+    ("unicode paragraph separator", "one\u{2029}two\u{2029}", 0)
 ]
 
 for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
@@ -138,7 +157,16 @@ for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let label = "\(appearanceName.rawValue)/\(Int(width))/\(name)"
             // Exact short-line counts apply only where their text fits without a soft wrap.
             verifyMarkers(view, label, expected: width >= 280 ? count : nil)
-            if name == "soft wrap" { expect(view.markerLayers.count > 0, "\(label): wrapping exercised") }
+            if ["soft wrap", "mixed", "long second paragraph", "wrapped paragraph reset", "wrapped CRLF reset", "unicode wrapping"].contains(name) {
+                expect(view.markerLayers.count > 0, "\(label): wrapping exercised")
+            }
+            if name == "long second paragraph" {
+                let secondStart = (text as NSString).lineRange(for: NSRange(location: 4, length: 0)).location
+                expect(fragments(in: view).contains { $0.start > secondStart && $0.continuation }, "\(label): second paragraph has continuation rows")
+            }
+            if name == "unicode line separator" || name == "unicode paragraph separator" {
+                expect(rows(in: view).count >= 3, "\(label): native separator creates separate rows")
+            }
         }
     }
 }
@@ -146,13 +174,14 @@ for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
 scroll.frame = NSRect(x: 0, y: 0, width: 200, height: 64)
 scroll.tile()
 view.setFrameSize(NSSize(width: scroll.contentSize.width, height: 1200))
-view.string = (0..<40).map { "row \($0)" }.joined(separator: "\n")
+view.string = (0..<40).map { "row \($0) " + String(repeating: "scroll word ", count: 8) }.joined(separator: "\n")
 view.setSelectedRange(NSRange(location: 0, length: 0))
-verifyMarkers(view, "before scrolling", expected: 39)
+verifyMarkers(view, "before scrolling")
+expect(!view.markerLayers.isEmpty, "scrolling fixture has soft-wrap arrows")
 let originalFrames = view.markerLayers.map(\.frame)
 scroll.contentView.scroll(to: NSPoint(x: 0, y: 160))
 scroll.reflectScrolledClipView(scroll.contentView)
-verifyMarkers(view, "after scrolling", expected: 39)
+verifyMarkers(view, "after scrolling")
 expect(scroll.contentView.bounds.origin.y > 0, "scrolling fixture actually scrolled")
 expect(view.markerLayers.map(\.frame) == originalFrames, "scrolling preserves document-relative marker positions")
 
@@ -171,12 +200,12 @@ host.rootView = composer()
 host.layoutSubtreeIfNeeded()
 pump()
 expect(view.string == storage.text, "Binding update reaches native text")
-verifyMarkers(view, "Binding update", expected: 2)
+verifyMarkers(view, "Binding update", expected: 0)
 storage.text = String(repeating: "row\n", count: 12)
 host.rootView = composer()
 host.layoutSubtreeIfNeeded()
 pump()
-verifyMarkers(view, "overflowing Binding update", expected: 12)
+verifyMarkers(view, "overflowing Binding update", expected: 0)
 let caretRowBottom = view.textContainerOrigin.y + (rows(in: view).last?.maxY ?? 0)
 expect(view.frame.height + 0.1 >= caretRowBottom, "Binding update: document height \(view.frame.height) includes trailing caret row bottom \(caretRowBottom)")
 expect(view.markerLayers.allSatisfy { $0.frame.maxY <= view.bounds.maxY + 0.1 }, "overflowing Binding update: all arrows fit document bounds")
@@ -204,7 +233,7 @@ for code: UInt16 in [36, 76] {
         expect(view.string == "line\n", "key \(code)/\(modifiers.rawValue): modifier inserts newline")
         expect(storage.text == view.string, "key \(code)/\(modifiers.rawValue): edit updates Binding")
         expect(storage.sends == sends, "key \(code)/\(modifiers.rawValue): newline does not send")
-        verifyMarkers(view, "modified Return \(code)/\(modifiers.rawValue)", expected: 1)
+        verifyMarkers(view, "modified Return \(code)/\(modifiers.rawValue)", expected: 0)
     }
 }
 
@@ -253,5 +282,5 @@ if let flag = CommandLine.arguments.firstIndex(of: "--snapshot-dir"), flag + 1 <
 }
 
 window.close()
-print("Composer markers: \(checks) checks, \(failures) failures, 72 appearance/width/content combinations")
+print("Composer markers: \(checks) checks, \(failures) failures, \(2 * 3 * cases.count) appearance/width/content combinations")
 exit(failures == 0 ? 0 : 1)

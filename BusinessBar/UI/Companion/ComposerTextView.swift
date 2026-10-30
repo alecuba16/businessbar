@@ -260,11 +260,12 @@ final class ComposerNSTextView: NSTextView {
         positionBreakMarkers()
     }
 
-    // Hard breaks and soft wraps share the left gutter. Markers stay
+    // Only soft-wrap continuation rows get markers. Layers stay
     // document-relative so scrolling keeps them beside their rows.
     private func positionBreakMarkers() {
         guard let container = textContainer, let layoutManager = layoutManager else { return }
         layoutManager.ensureLayout(for: container)
+        let text = string as NSString
         var keptLayers: [CATextLayer] = []
 
         var glyph = 0
@@ -276,21 +277,17 @@ final class ComposerNSTextView: NSTextView {
             rangePointer.deallocate()
             let fragmentEnd = glyphRange.location + glyphRange.length
 
-            if glyphRange.location > 0 {
-                keptLayers.append(
-                    markerLayer("\u{21A9}", startOfRow: fragment)
-                )
+            let characterStart = layoutManager.characterIndexForGlyph(at: glyphRange.location)
+            if characterStart > 0 {
+                let previous = UnicodeScalar(text.character(at: characterStart - 1))
+                let followsManualBreak = previous.map { CharacterSet.newlines.contains($0) } ?? false
+                if !followsManualBreak {
+                    keptLayers.append(
+                        markerLayer("\u{21A9}", startOfRow: fragment)
+                    )
+                }
             }
             glyph = fragmentEnd
-        }
-
-        // A trailing newline's empty caret row has no glyph range.
-        if string.last?.isNewline == true,
-           layoutManager.extraLineFragmentTextContainer === container,
-           layoutManager.extraLineFragmentRect.height > 0 {
-            keptLayers.append(
-                markerLayer("\u{21A9}", startOfRow: layoutManager.extraLineFragmentRect)
-            )
         }
 
         markerLayers.forEach {
