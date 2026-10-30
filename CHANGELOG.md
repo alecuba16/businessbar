@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Text selection in the chat spans whole replies now: assistant answers render through a native text document (one NSTextView per message) instead of the SwiftUI markdown stack, which emitted one Text per markdown block and macOS selection never crosses Text views, so a drag died at every paragraph boundary. Markdown coverage keeps headings, emphasis, strikethrough, inline code, fenced code blocks (monospace, no syntax highlighting), bullet and numbered lists, quotes, and links with the same scheme gate (http, https, mailto, tel). Remote inline images render as [image: alt] placeholders and the raw markdown stays one Copy button away
+- The no-tool-handler and round-limit errors name the requested tools, so a failed request points at the actual culprit instead of a generic refusal
+- run_command is no longer advertised to local MLX models: the panel refuses to execute those (mlx-lsp echoes arguments back), so the model kept calling a tool that could only fail with the no-handler error
 
 ## [1.5.0] - 2026-10-29
 ### Added
