@@ -260,25 +260,14 @@ final class ComposerNSTextView: NSTextView {
         positionBreakMarkers()
     }
 
-    // Wrap arrow at the start of each row that continues a wrapped
-    // line (the CotEditor convention: the mark sits left of the row
-    // that jumped, not at the end of the wrapped row), plus a
-    // paragraph mark after the last glyph of a line a Return created.
-    // Hard breaks stay visibly distinct from wraps: the arrow means
-    // "this row continues the line above", the paragraph mark means
-    // "you pressed Return here". Layers travel with the document, so
-    // scrolled-away markers keep their positions.
+    // Hard breaks and soft wraps share the left gutter. Markers stay
+    // document-relative so scrolling keeps them beside their rows.
     private func positionBreakMarkers() {
         guard let container = textContainer, let layoutManager = layoutManager else { return }
         layoutManager.ensureLayout(for: container)
-        let string = (self.string as NSString)
         var keptLayers: [CATextLayer] = []
 
-        // Enumerate layout fragments: each is one visual row. A row
-        // whose text does not end in a newline continues on the next
-        // row; that next row is the wrap jump and carries the arrow.
         var glyph = 0
-        var previousRowEndedInNewline = true
         let totalGlyphs = layoutManager.numberOfGlyphs
         while glyph < totalGlyphs {
             let rangePointer = UnsafeMutablePointer<NSRange>.allocate(capacity: 1)
@@ -287,42 +276,21 @@ final class ComposerNSTextView: NSTextView {
             rangePointer.deallocate()
             let fragmentEnd = glyphRange.location + glyphRange.length
 
-            if !previousRowEndedInNewline {
+            if glyphRange.location > 0 {
                 keptLayers.append(
                     markerLayer("\u{21A9}", startOfRow: fragment)
                 )
             }
-
-            // Map the fragment's glyph span back to characters to see
-            // how the row ends.
-            let firstChar = mappedCharIndex(ofGlyph: glyphRange.location, in: string, layoutManager: layoutManager)
-            let endChar = fragmentEnd >= totalGlyphs
-                ? string.length
-                : mappedCharIndex(ofGlyph: fragmentEnd, in: string, layoutManager: layoutManager)
-            let rowEndsInNewline = endChar > firstChar && string.character(at: endChar - 1) == 0x0A
-            if rowEndsInNewline {
-                // The paragraph mark sits after the row's last drawn
-                // glyph, not at the row edge: a full-width line and a
-                // half-empty one both read correctly. The newline glyph
-                // itself spans the whole remaining row, so the anchor
-                // is the glyph before it; a row holding only the
-                // newline anchors at the row start.
-                let lastTextGlyph = fragmentEnd - 2
-                let anchorX: CGFloat
-                if lastTextGlyph >= glyphRange.location {
-                    anchorX = layoutManager.boundingRect(
-                        forGlyphRange: NSRange(location: lastTextGlyph, length: 1),
-                        in: container
-                    ).maxX
-                } else {
-                    anchorX = 0
-                }
-                keptLayers.append(
-                    paragraphMarker("\u{00B6}", afterLastGlyphAt: anchorX, in: fragment)
-                )
-            }
-            previousRowEndedInNewline = rowEndsInNewline
             glyph = fragmentEnd
+        }
+
+        // A trailing newline's empty caret row has no glyph range.
+        if string.last?.isNewline == true,
+           layoutManager.extraLineFragmentTextContainer === container,
+           layoutManager.extraLineFragmentRect.height > 0 {
+            keptLayers.append(
+                markerLayer("\u{21A9}", startOfRow: layoutManager.extraLineFragmentRect)
+            )
         }
 
         markerLayers.forEach {
@@ -332,22 +300,6 @@ final class ComposerNSTextView: NSTextView {
         keptLayers.forEach {
             if $0.superlayer == nil { layer?.addSublayer($0) }
         }
-    }
-
-    /// Glyph index back to character index, linear from a cached start:
-    /// glyph ranges are monotonically increasing, so the walk never
-    /// restarts per fragment.
-    private func mappedCharIndex(ofGlyph target: Int, in string: NSString, layoutManager: NSLayoutManager) -> Int {
-        var char = 0
-        while char < string.length {
-            let glyphRange = layoutManager.glyphRange(
-                forCharacterRange: NSRange(location: char, length: 1),
-                actualCharacterRange: nil
-            )
-            if glyphRange.length > 0 && glyphRange.location >= target { return char }
-            char += 1
-        }
-        return string.length
     }
 
     private func markerLayer(_ symbol: String, startOfRow fragment: CGRect) -> CATextLayer {
@@ -363,20 +315,6 @@ final class ComposerNSTextView: NSTextView {
             height: fragment.height
         )
         layer.alignmentMode = .right
-        return layer
-    }
-
-    private func paragraphMarker(_ symbol: String, afterLastGlyphAt lastGlyphMaxX: CGFloat, in fragment: CGRect) -> CATextLayer {
-        let layer = markerLayerBase()
-        layer.string = symbol
-        let origin = textContainerOrigin
-        layer.frame = CGRect(
-            x: origin.x + lastGlyphMaxX + 2,
-            y: origin.y + fragment.minY,
-            width: markerWidth,
-            height: fragment.height
-        )
-        layer.alignmentMode = .left
         return layer
     }
 

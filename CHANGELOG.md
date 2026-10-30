@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Editing the last prompt is a visible state now: an orange notice strip sits above the input naming what sending does (runs the prompt again and replaces the replies that followed it), the send arrow tints orange, and a Cancel button drops the edit without resending. Before, pressing Edit silently pasted the prompt into the input with no hint that the thread had been truncated
 
 ### Fixed
+- Chat input shows return arrows in the left gutter for line breaks instead of paragraph marks at the end of lines
 - Markdown emphasis now distinguishes `*italic*`, `**bold**`, and nested styles without leftover markers or missing surrounding text. Inline code keeps its literal asterisks
 - Assistant replies no longer appear blank in the chat scroll view. The native text view now reports its measured height to SwiftUI, so the bubble does not collapse and clip the reply
 - Chat no longer freezes on incomplete markdown while a reply streams. Literal punctuation and unfinished markers now consume input instead of trapping the renderer in a loop on the main thread
