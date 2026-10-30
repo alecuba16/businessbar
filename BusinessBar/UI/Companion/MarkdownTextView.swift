@@ -472,8 +472,9 @@ enum MarkdownAttributedStringLoader {
                 remaining = after
                 continue
             }
-            // plain run up to the next marker
-            let next = nextMarkerIndex(remaining)
+            // Incomplete streaming markup stays literal and must consume input.
+            let marker = nextMarkerIndex(remaining)
+            let next = marker == remaining.startIndex ? remaining.index(after: marker) : marker
             let run = remaining[..<next]
             appendPlain(String(run), into: attributed, extraAttributes: extraAttributes)
             remaining = remaining[next...]

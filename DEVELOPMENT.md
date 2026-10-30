@@ -57,6 +57,10 @@ is also Xcode-only. Under CLT, `make test` fails to compile the suite:
 swiftc cannot resolve the XCTest module at build time, so the tests never
 launch at all.
 
+The chat markdown regression check runs with CLT alone:
+`bash scripts/test-chat-markdown.sh`. It compiles the production renderer
+directly and checks incomplete streamed markup under a 10-second watchdog.
+
 ### Building the Project
 
 #### Option 1: Using Make (Recommended)
