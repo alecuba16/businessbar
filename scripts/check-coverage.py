@@ -2,6 +2,7 @@
 """Gate actual whole-app coverage, including zero-hit production files."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -31,9 +32,30 @@ def production_paths(repo):
         for path in result.stdout.decode().split("\0")
         if path.endswith(".swift")
     }
+    for root in (repo / "BusinessBar", repo / "BusinessBarCore"):
+        paths.update(path.relative_to(repo).as_posix() for path in root.rglob("*.swift") if path.is_file())
     if not paths:
-        raise CoverageError("No tracked production Swift sources found")
+        raise CoverageError("No production Swift sources found")
     return paths
+
+
+def validate_run_manifest(manifest, repo, allow_diagnostic=False):
+    complete = (
+        manifest.get("diagnostic_only") is False
+        and manifest.get("built") is True
+        and manifest.get("selection") == "all"
+        and manifest.get("isolation_only") is False
+        and manifest.get("suite") == "all"
+    )
+    if not complete and not allow_diagnostic:
+        raise CoverageError("Diagnostic or incomplete runner output cannot satisfy the coverage gate")
+    fingerprints = manifest.get("source_sha256")
+    sources = production_paths(repo)
+    if not isinstance(fingerprints, dict) or set(fingerprints) != sources:
+        raise CoverageError("Runner fingerprints do not match the complete production source inventory")
+    for path, expected in fingerprints.items():
+        if hashlib.sha256((repo / path).read_bytes()).hexdigest() != expected:
+            raise CoverageError("Production source changed during test execution: " + path)
 
 
 def relative_source(filename, repo):
@@ -52,6 +74,8 @@ def llvm_files(export, repo, sources):
         for file in entry.get("files", []):
             name = relative_source(file["filename"], repo)
             if name not in sources:
+                if name and name.startswith(("BusinessBar/", "BusinessBarCore/")) and name.endswith(".swift"):
+                    raise CoverageError(f"Production mapping missing from source inventory: {name}")
                 continue
             if name in files:
                 raise CoverageError(f"Duplicate production mapping for {name}")
@@ -109,6 +133,8 @@ def assess(export, lcov, repo, sources):
             rows.append({"path": name, "mapping": "declaration-only", "llvm_lines": None, "unique_lines": None})
             continue
         lines = summary["lines"]
+        if not 0 <= lines["covered"] <= lines["count"]:
+            raise CoverageError(f"Invalid line totals for {name}")
         if lines["count"] and not entries:
             raise CoverageError(f"Empty LCOV executable-line mapping: {name}")
         rows.append({
@@ -138,10 +164,12 @@ def export_coverage(binary, profile, output):
         ("coverage.lcov", ["--format=lcov"]),
     ):
         with (output / name).open("w") as handle:
-            subprocess.run(
+            result = subprocess.run(
                 ["xcrun", "llvm-cov", "export", str(binary), f"-instr-profile={profile}", *arguments],
-                check=True, stdout=handle,
+                check=True, stdout=handle, stderr=subprocess.PIPE, text=True,
             )
+            if result.stderr.strip():
+                raise CoverageError("llvm-cov emitted diagnostics: " + result.stderr.strip())
     return json.loads((output / "coverage.json").read_text()), (output / "coverage.lcov").read_text()
 
 
@@ -161,10 +189,10 @@ def main():
         (args.output_dir / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
         print(f"Production inventory: {result['production_source_count']} sources, {result['instrumented_source_count']} instrumented")
         for name, metric in result["metrics"].items():
-            print(f"{name}: {metric['covered']}/{metric['count']} ({metric['percent']:.2f}%), required >{MINIMUM_PERCENT}%")
+            print(f"{name}: {metric['covered']}/{metric['count']} ({metric['percent']:.4f}%), required >{MINIMUM_PERCENT}%")
         print("PASS: whole-app coverage gate" if result["passed"] else "FAIL: whole-app coverage gate")
         return 0 if result["passed"] or args.report_only else 1
-    except (CoverageError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    except (CoverageError, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
 

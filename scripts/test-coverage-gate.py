@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Negative controls for the whole-production coverage gate."""
 
+import hashlib
 import importlib.util
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 
 SPEC = importlib.util.spec_from_file_location("coverage_gate", Path(__file__).with_name("check-coverage.py"))
@@ -106,6 +110,86 @@ class CoverageGateTests(unittest.TestCase):
         for entry in ["DA:0,1", "DA:1,-1"]:
             with self.assertRaises(GATE.CoverageError):
                 GATE.lcov_lines("SF:" + str(self.repo / self.source) + "\n" + entry, self.repo, {self.source})
+
+    def test_untracked_production_sources_are_not_omitted(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "BusinessBar").mkdir()
+            (repo / "Tests").mkdir()
+            (repo / "BusinessBar/Untracked.swift").write_text("func uncovered() {}\n")
+            (repo / ".gitignore").write_text("BusinessBar/Ignored.swift\n")
+            (repo / "BusinessBar/Ignored.swift").write_text("func alsoUncovered() {}\n")
+            (repo / "Tests/Fixture.swift").write_text("func fixture() {}\n")
+            self.assertEqual(GATE.production_paths(repo), {"BusinessBar/Untracked.swift", "BusinessBar/Ignored.swift"})
+
+    def test_source_inventory_cannot_be_empty(self):
+        with mock.patch.object(GATE.subprocess, "run", return_value=mock.Mock(stdout=b"")):
+            with self.assertRaisesRegex(GATE.CoverageError, "No production Swift"):
+                GATE.production_paths(self.repo)
+
+    def test_mismatched_profile_warning_fails_closed(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            with mock.patch.object(GATE.subprocess, "run", return_value=mock.Mock(stderr="warning: functions have mismatched data")):
+                with self.assertRaisesRegex(GATE.CoverageError, "mismatched data"):
+                    GATE.export_coverage(Path("app"), Path("profile"), Path(directory))
+
+    def manifest(self, repo):
+        source = repo / self.source
+        source.parent.mkdir(parents=True)
+        source.write_text("func production() {}\n")
+        return {
+            "diagnostic_only": False, "built": True, "selection": "all",
+            "isolation_only": False, "suite": "all",
+            "source_sha256": {self.source: hashlib.sha256(source.read_bytes()).hexdigest()},
+        }
+
+    def test_complete_current_manifest_passes(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            repo = Path(directory)
+            manifest = self.manifest(repo)
+            with mock.patch.object(GATE, "production_paths", return_value={self.source}):
+                GATE.validate_run_manifest(manifest, repo)
+
+    def test_missing_provenance_fields_fail_closed(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            repo = Path(directory)
+            manifest = self.manifest(repo)
+            for key in ["diagnostic_only", "built", "selection", "isolation_only", "suite"]:
+                incomplete = {name: value for name, value in manifest.items() if name != key}
+                with self.assertRaisesRegex(GATE.CoverageError, "incomplete"):
+                    GATE.validate_run_manifest(incomplete, repo)
+
+    def test_diagnostic_run_never_satisfies_gate(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            repo = Path(directory)
+            manifest = self.manifest(repo)
+            manifest.update(built=False, diagnostic_only=True)
+            with mock.patch.object(GATE, "production_paths", return_value={self.source}):
+                with self.assertRaisesRegex(GATE.CoverageError, "Diagnostic"):
+                    GATE.validate_run_manifest(manifest, repo)
+                GATE.validate_run_manifest(manifest, repo, allow_diagnostic=True)
+
+    def test_partial_or_new_source_fingerprints_are_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            repo = Path(directory)
+            manifest = self.manifest(repo)
+            with mock.patch.object(GATE, "production_paths", return_value={self.source, "BusinessBar/New.swift"}):
+                with self.assertRaisesRegex(GATE.CoverageError, "complete production"):
+                    GATE.validate_run_manifest(manifest, repo)
+
+    def test_changed_sources_invalidate_profile_provenance(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            repo = Path(directory)
+            manifest = self.manifest(repo)
+            (repo / self.source).write_text("func changedProduction() {}\n")
+            with mock.patch.object(GATE, "production_paths", return_value={self.source}):
+                with self.assertRaisesRegex(GATE.CoverageError, "source changed"):
+                    GATE.validate_run_manifest(manifest, repo)
+
+    def test_uninventoried_production_mapping_is_rejected(self):
+        with self.assertRaisesRegex(GATE.CoverageError, "missing from source inventory"):
+            GATE.assess(self.export(sources=[self.source, "BusinessBar/Hidden.swift"]), self.lcov(), self.repo, {self.source})
 
 
 if __name__ == "__main__":
