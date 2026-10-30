@@ -11,6 +11,16 @@ private enum MarkdownTextLayout {
     static let blockSpacing: CGFloat = 6
 }
 
+// MARK: - MarkdownTextLinkPolicy
+
+/// Schemes a chat message may open; anything else (file, ssh, custom
+/// handlers) coming from model output stays inert. Shared by the
+/// attributed-string loader, the hosting view's click gate, and the
+/// SwiftUI open-chat-link helper.
+enum MarkdownTextLinkPolicy {
+    static let schemes: Set<String> = ["http", "https", "mailto", "tel"]
+}
+
 // MARK: - MarkdownAttributedStringLoader
 
 /// Parses a markdown reply into one NSAttributedString so the chat can
@@ -167,7 +177,7 @@ enum MarkdownAttributedStringLoader {
 
     private static func lineHasFenceEnd(_ line: String, open: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        let openChar = open.hasPrefix("~~~") ? "~" : "`"
+        let openChar: Character = open.first == "~" ? "~" : "`"
         guard trimmed.hasPrefix(String(repeating: openChar, count: 3)) else { return false }
         return trimmed.allSatisfy { $0 == openChar }
     }
@@ -604,7 +614,7 @@ enum MarkdownAttributedStringLoader {
         var attrs = extraAttributes ?? baseAttributes()
         if let resolved = URL(string: url, relativeTo: baseURL),
            let scheme = resolved.scheme?.lowercased(),
-           allowedLinkSchemes.contains(scheme) {
+           MarkdownTextLinkPolicy.schemes.contains(scheme) {
             attrs[.link] = resolved
             attrs[.foregroundColor] = NSColor.linkColor
         } else {

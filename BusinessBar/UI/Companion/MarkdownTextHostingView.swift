@@ -29,14 +29,11 @@ struct MarkdownTextHostingView: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = []
-        textView.linkTarget = self
-        context.coordinator.textView = textView
         apply(markdown, to: textView)
         return textView
     }
 
     func updateNSView(_ textView: MarkdownTextView, context: Context) {
-        context.coordinator.textView = textView
         if textView.markdownTag != markdown {
             apply(markdown, to: textView)
         }
@@ -57,17 +54,13 @@ struct MarkdownTextHostingView: NSViewRepresentable {
 /// NSTextView subclass routing link clicks through the scheme gate.
 final class MarkdownTextView: NSTextView {
     var markdownTag: String = ""
-    var linkTarget: MarkdownTextHostingView?
 
-    override func clicked(on link: Any) {
-        guard let url = link as? URL else {
-            super.clicked(on: link)
-            return
-        }
+    override func clicked(onLink link: Any, at charIndex: Int) {
         // Same gate as the rest of the chat: only these schemes open,
         // everything else a model emits stays inert.
-        guard let scheme = url.scheme?.lowercased(),
-              allowedLinkSchemes.contains(scheme) else { return }
+        guard let url = link as? URL,
+              let scheme = url.scheme?.lowercased(),
+              MarkdownTextLinkPolicy.schemes.contains(scheme) else { return }
         NSWorkspace.shared.open(url)
     }
 }

@@ -1348,13 +1348,9 @@ private struct StreamingDots: View {
 
 // MARK: - MarkdownContent
 
-/// Schemes a chat message may open; anything else (file, ssh, custom
-/// handlers) coming from model output stays inert.
-private let allowedLinkSchemes: Set<String> = ["http", "https", "mailto", "tel"]
-
 private func openChatLink(_ url: URL) {
     guard let scheme = url.scheme?.lowercased(),
-          allowedLinkSchemes.contains(scheme) else { return }
+          MarkdownTextLinkPolicy.schemes.contains(scheme) else { return }
     NSWorkspace.shared.open(url)
 }
 

@@ -185,9 +185,12 @@ public final class OpenAICompatClient: LLMClient, @unchecked Sendable {
 
                         if !pendingToolCalls.isEmpty {
                             guard let toolHandler, toolRounds < maxToolRounds else {
+                                let requested = pendingToolCalls
+                                    .map { "'\($0.name)'" }
+                                    .joined(separator: ", ")
                                 let message = toolRounds >= maxToolRounds
-                                    ? "Tool round limit reached before the model produced a final answer."
-                                    : "The model requested a tool but no tool handler is available."
+                                    ? "Tool round limit reached before the model produced a final answer. The model requested: \(requested)."
+                                    : "The model requested a tool (\(requested)) but no tool handler is available. Enable the Command Runner in Preferences > Companion or pick a backend that supports tools."
                                 continuation.yield(.failed(message))
                                 continuation.finish()
                                 return

@@ -911,14 +911,18 @@ enum CompanionConfigService {
 
     /// Schemas offered on the chat panel: search plus command tools when
     /// the user enabled them. ACP agents manage their own tools, so command
-    /// schemas never join an ACP client. The rewrite flow never gets command
-    /// tools: it passes no per-call handler, so an advertised run_command
-    /// would have nothing behind it.
+    /// schemas never join an ACP client. Local MLX is excluded too: the
+    /// panel handler refuses run_command there (mlx-lsp echoes arguments
+    /// back), so advertising it only invites calls that find no handler.
+    /// The rewrite flow never gets command tools: it passes no per-call
+    /// handler, so an advertised run_command would have nothing behind it.
     static func chatToolSchemas() -> [[String: Any]] {
         var schemas = searchTools()
         // Command schemas need the OpenAI path's per-call handler; agents
         // negotiate their own tools.
-        if commandToolsEnabled(), selectedACPProvider() == nil {
+        if commandToolsEnabled(),
+            selectedACPProvider() == nil,
+            selectedModel()?.provider.kind != .localMLX {
             schemas.append(contentsOf: CommandToolCatalog.toolSchemas())
         }
         return schemas
