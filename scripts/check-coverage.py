@@ -67,7 +67,7 @@ def validate_binary(manifest, binary):
         raise CoverageError("Application binary changed after test execution")
 
 
-def xctest_profiles(record, product_directory, started_ns):
+def xctest_profiles(record, product_directory, started_ns, preexisting=()):
     pid = record.get("pid")
     pattern = Path(record.get("profile_pattern", ""))
     if record.get("schema") != 1 or type(pid) is not int or pid <= 0 or "%p" not in pattern.name:
@@ -85,6 +85,8 @@ def xctest_profiles(record, product_directory, started_ns):
     ]
     if not profiles:
         raise CoverageError("No profiles from the recorded XCTest process")
+    if set(profiles).intersection(Path(path).resolve() for path in preexisting):
+        raise CoverageError("XCTest profile already existed before this run")
     return profiles
 
 
@@ -250,9 +252,16 @@ def main():
             validate_binary(manifest, args.binary)
         elif not args.report_only:
             raise CoverageError("An enforcing run requires its complete runner manifest")
+        profile_sha256 = hashlib.sha256(args.profile.read_bytes()).hexdigest()
         export, lcov, baseline = export_coverage(args.binary.resolve(), args.profile.resolve(), args.output_dir)
+        if manifest is not None:
+            validate_binary(manifest, args.binary)
+        if hashlib.sha256(args.profile.read_bytes()).hexdigest() != profile_sha256:
+            raise CoverageError("Coverage profile changed during export")
         result = assess(export, lcov, repo, sources, baseline)
         result = apply_provenance(result, diagnostic=args.report_only or manifest is None)
+        result["profile_sha256"] = profile_sha256
+        result["app_binary_sha256"] = manifest.get("app_binary_sha256") if manifest else None
         (args.output_dir / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
         print(f"Production inventory: {result['production_source_count']} sources, {result['instrumented_source_count']} instrumented")
         for name, metric in result["metrics"].items():

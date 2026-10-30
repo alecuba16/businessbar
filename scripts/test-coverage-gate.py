@@ -186,6 +186,8 @@ class CoverageGateTests(unittest.TestCase):
             (profiles / "xctest123_0.43.profraw").write_bytes(b"unrelated process")
             record = {"schema": 1, "pid": 42, "profile_pattern": str(profiles / "xctest%m.%p.profraw")}
             self.assertEqual(GATE.xctest_profiles(record, product, 0), [owned])
+            with self.assertRaisesRegex(GATE.CoverageError, "already existed"):
+                GATE.xctest_profiles(record, product, 0, [str(owned)])
             with self.assertRaisesRegex(GATE.CoverageError, "No profiles"):
                 GATE.xctest_profiles(record, product, owned.stat().st_mtime_ns + 1)
             record["profile_pattern"] = str(product / "other" / "xctest%m.%p.profraw")
