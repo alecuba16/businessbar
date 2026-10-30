@@ -8,6 +8,7 @@ trap 'rm -rf "$build_dir"' EXIT
 
 swiftc \
     "$repo_root/BusinessBar/UI/Companion/MarkdownTextView.swift" \
+    "$repo_root/BusinessBar/UI/Companion/MarkdownTextHostingView.swift" \
     "$repo_root/Tests/MarkdownRendering/main.swift" \
     -o "$build_dir/markdown-tests"
-"$build_dir/markdown-tests"
+"$build_dir/markdown-tests" "$@"

@@ -59,7 +59,12 @@ launch at all.
 
 The chat markdown regression check runs with CLT alone:
 `bash scripts/test-chat-markdown.sh`. It compiles the production renderer
-directly and checks incomplete streamed markup under a 10-second watchdog.
+and native hosting view directly, then checks incomplete streamed markup,
+paragraph sizing, select-all and main-run-loop progress under a 10-second watchdog.
+Optional `--stream-chunks /path/to/recorded-stream.json` replays captured
+client deltas. The JSON contains `chunks` (an ordered string array),
+`fullText` (their joined text) and `terminal` ("finished"). This replay
+does not call a model or modify the app's chat history or preferences.
 
 ### Building the Project
 
