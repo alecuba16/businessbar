@@ -8,9 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 - Chat copy affordances: every finished assistant answer gets a Copy button (flips to a checkmark for a moment so the click visibly landed), and right-clicking any message offers Copy Reply plus Copy Conversation, which copies the whole thread with You:/Assistant: speaker prefixes and the in-flight answer included. Native drag selection keeps working per paragraph
+- Editing the last prompt is a visible state now: an orange notice strip sits above the input naming what sending does (runs the prompt again and replaces the replies that followed it), the send arrow tints orange, and a Cancel button drops the edit without resending. Before, pressing Edit silently pasted the prompt into the input with no hint that the thread had been truncated
 
 ### Fixed
-- Selecting text in the chat no longer stops at the first paragraph: MarkdownUI renders each markdown block as its own SwiftUI Text view and macOS text selection never crosses separate Text views, so a drag could not reach past a single paragraph. Native paragraph-level selection still applies where a single Text spans the content (user prompts, the thinking block, code blocks); whole-message and whole-chat copy go through the new buttons and context menu
+- Text selection in the chat spans whole replies now: assistant answers render through a native text document (one NSTextView per message) instead of the SwiftUI markdown stack, which emitted one Text per markdown block and macOS selection never crosses Text views, so a drag died at every paragraph boundary. Markdown coverage keeps headings, emphasis, strikethrough, inline code, fenced code blocks (monospace, no syntax highlighting), bullet and numbered lists, quotes, and links with the same scheme gate (http, https, mailto, tel). Remote inline images render as [image: alt] placeholders and the raw markdown stays one Copy button away
 
 ## [1.5.0] - 2026-10-29
 ### Added

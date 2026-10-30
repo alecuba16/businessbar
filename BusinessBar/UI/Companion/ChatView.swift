@@ -1,5 +1,4 @@
 import BusinessBarCore
-import MarkdownUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -38,6 +37,11 @@ struct ChatView: View {
     /// Measured height of the composer text, so the box grows with the
     /// content up to the layout cap.
     @State private var composerContentHeight: CGFloat = 26
+    /// True between pulling the last prompt back for editing and the
+    /// resend/cancel. Drives the notice strip above the composer and the
+    /// accent tint on the send path, so the replace-consequence of
+    /// sending is visible before it happens.
+    @State private var isEditingLastPrompt = false
 
     /// Age buckets offered in the cleanup menu.
     private let cleanupAgeChoices = [7, 30, 90]
@@ -364,6 +368,7 @@ struct ChatView: View {
         return { [self] in
             if let prompt = store.editLastUserPrompt() {
                 draft = prompt
+                isEditingLastPrompt = true
                 composerFocusRequest += 1
             }
         }
@@ -707,6 +712,9 @@ struct ChatView: View {
 
     private var inputBar: some View {
         VStack(spacing: 6) {
+            if isEditingLastPrompt {
+                editingNotice
+            }
             if !pendingImages.isEmpty {
                 attachmentStrip
             }
@@ -800,16 +808,39 @@ struct ChatView: View {
                     } label: {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.title3)
+                            .foregroundStyle(isEditingLastPrompt ? Color.orange : Color.primary)
                     }
                     .buttonStyle(.plain)
                     .disabled(draft.isEmpty && pendingImages.isEmpty)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .help("Send (Cmd+Return)")
+                    .help(isEditingLastPrompt ? "Resend edited prompt (replaces the replies after it)" : "Send (Cmd+Return)")
                 }
             }
             .padding(10)
             .background(.bar)
         }
+    }
+
+    /// Notice shown while the last prompt sits in the composer for
+    /// editing. Names the consequence (sending replaces the replies
+    /// after it) and offers the way out, because the truncation already
+    /// happened when the prompt was pulled back.
+    private var editingNotice: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "pencil.and.list.clipboard")
+                .font(.caption)
+            Text("Editing your last prompt. Sending runs it again and replaces the replies that followed it.")
+                .font(.caption)
+            Spacer(minLength: 0)
+            Button("Cancel") {
+                isEditingLastPrompt = false
+                draft = ""
+            }
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(Color.orange.opacity(0.12))
     }
 
     /// Opens Preferences on the Companion tab, used by the empty-state
@@ -1011,6 +1042,7 @@ struct ChatView: View {
         guard !text.isEmpty || !images.isEmpty, !store.isStreaming, !submitting else { return }
         draft = ""
         pendingImages = []
+        isEditingLastPrompt = false
         // Cover the warm-up window (server start, first model load) with
         // visible progress; the stream takes over the label once it starts.
         submitting = true
@@ -1326,67 +1358,21 @@ private func openChatLink(_ url: URL) {
     NSWorkspace.shared.open(url)
 }
 
-/// Renders one message: assistant messages parse as markdown, user
-/// prompts stay verbatim.
+/// Renders one message: assistant messages parse as markdown into a
+/// single NSTextView document (selection spans every paragraph), user
+/// prompts stay verbatim in a plain SwiftUI Text.
 private struct MarkdownContent: View {
     let text: String
     let role: ChatMessage.Role
 
-    private var theme: MarkdownUI.Theme {
-        MarkdownThemeFactory.chatTheme
-    }
-
     var body: some View {
         if role == .assistant {
-            Markdown(text)
-                .markdownTheme(theme)
-                .environment(\.openURL, OpenURLAction { url in
-                    openChatLink(url)
-                    return .handled
-                })
-                .textSelection(.enabled)
+            MarkdownTextHostingView(markdown: text)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(text)
                 .textSelection(.enabled)
         }
-    }
-}
-
-// MARK: - Markdown theme
-
-enum MarkdownThemeFactory {
-    /// Chat-tuned theme derived from the built-in basic theme: smaller
-    /// heading scales and tighter heading margins fit the narrow panel.
-    static var chatTheme: MarkdownUI.Theme {
-        Theme.basic
-            .heading1 { configuration in
-                configuration.label
-                    .markdownMargin(top: .rem(0.6), bottom: .rem(0.3))
-                    .markdownTextStyle {
-                        FontWeight(.semibold)
-                        FontSize(.em(1.35))
-                    }
-            }
-            .heading2 { configuration in
-                configuration.label
-                    .markdownMargin(top: .rem(0.5), bottom: .rem(0.25))
-                    .markdownTextStyle {
-                        FontWeight(.semibold)
-                        FontSize(.em(1.18))
-                    }
-            }
-            .heading3 { configuration in
-                configuration.label
-                    .markdownMargin(top: .rem(0.4), bottom: .rem(0.2))
-                    .markdownTextStyle {
-                        FontWeight(.semibold)
-                        FontSize(.em(1.05))
-                    }
-            }
-            .code {
-                FontFamilyVariant(.monospaced)
-                FontSize(.em(0.9))
-            }
     }
 }
 
