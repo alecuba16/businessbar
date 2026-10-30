@@ -26,7 +26,8 @@ struct MarkdownTextHostingView: NSViewRepresentable {
             width: 0,
             height: CGFloat.greatestFiniteMagnitude
         )
-        textView.isVerticallyResizable = true
+        // SwiftUI owns the measured frame. Native autosizing can shift it and clip the first rows.
+        textView.isVerticallyResizable = false
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = []
         apply(markdown, to: textView)

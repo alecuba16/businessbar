@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Assistant replies render top-level Markdown tables as native rows and columns, with header emphasis, column alignment and wrapped cell text in the same selectable reply document
 - Chat copy affordances: every finished assistant answer gets a Copy button (flips to a checkmark for a moment so the click visibly landed), and right-clicking any message offers Copy Reply plus Copy Conversation, which copies the whole thread with You:/Assistant: speaker prefixes and the in-flight answer included. Native drag selection keeps working per paragraph
 - Editing the last prompt is a visible state now: an orange notice strip sits above the input naming what sending does (runs the prompt again and replaces the replies that followed it), the send arrow tints orange, and a Cancel button drops the edit without resending. Before, pressing Edit silently pasted the prompt into the input with no hint that the thread had been truncated
 

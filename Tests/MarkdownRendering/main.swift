@@ -146,6 +146,99 @@ for key in [NSAttributedString.Key.link, .attachment, .imageURL] {
 }
 expectText("Before `**literal**` after\n\n```\n*still literal*\n```", "Before **literal** after\n\n*still literal*\n")
 
+func require(_ condition: @autoclosure () -> Bool, _ message: String) {
+    guard condition() else {
+        fputs("FAIL: \(message)\n", stderr)
+        exit(1)
+    }
+    checks += 1
+}
+
+struct TableCell {
+    let range: NSRange
+    let block: NSTextTableBlock
+    let style: NSParagraphStyle
+    let text: String
+}
+
+func tableCells(_ rendered: NSAttributedString) -> [TableCell] {
+    let string = rendered.string as NSString
+    var cells: [TableCell] = []
+    var offset = 0
+    while offset < string.length {
+        let range = string.paragraphRange(for: NSRange(location: offset, length: 0))
+        if let style = rendered.attribute(.paragraphStyle, at: offset, effectiveRange: nil) as? NSParagraphStyle,
+           let block = style.textBlocks.last as? NSTextTableBlock {
+            cells.append(TableCell(range: range, block: block, style: style, text: string.substring(with: range)))
+        }
+        offset = NSMaxRange(range)
+    }
+    return cells
+}
+
+let tableReply = "Before table.\n\n| Left | Right | Center |\n| :--- | ---: | :---: |\n| alpha | beta | gamma |\n| delta | epsilon | zeta |\n\nAfter table."
+let tableRendered = MarkdownAttributedStringLoader.attributedString(for: tableReply)
+let basicCells = tableCells(tableRendered)
+require(basicCells.count == 9, "top-level table must have nine native cells, got \(basicCells.count)")
+for (index, cell) in basicCells.enumerated() {
+    require(cell.block.startingRow == index / 3 && cell.block.startingColumn == index % 3,
+            "native table coordinates differ at cell \(index)")
+    require(cell.text.hasSuffix("\n"), "table cell \(index) lacks its styled newline")
+    let newlineStyle = tableRendered.attribute(.paragraphStyle, at: NSMaxRange(cell.range) - 1, effectiveRange: nil) as? NSParagraphStyle
+    require(newlineStyle?.textBlocks.last === cell.block, "cell newline lost its native block")
+    require(cell.style.alignment == [NSTextAlignment.left, .right, .center][index % 3], "table alignment differs at cell \(index)")
+    require(cell.block.table === basicCells[0].block.table, "cells do not share one native table")
+}
+for prose in ["Before table.", "After table."] {
+    let range = (tableRendered.string as NSString).range(of: prose)
+    require(range.location != NSNotFound, "surrounding prose disappeared")
+    let style = tableRendered.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+    require(style?.textBlocks.isEmpty != false, "surrounding prose inherited table paragraph style")
+}
+
+let styledTable = "| *Italic* | `code` | [*safe*](https://example.com) |\n| --- | --- | --- |\n| [bad](javascript:alert(1)) | ![alt](https://example.com/a.png) | **body** |"
+let styledCells = tableCells(MarkdownAttributedStringLoader.attributedString(for: styledTable))
+require(styledCells.count == 6, "styled table lost cells")
+for span in ["Italic", "code", "safe"] {
+    expectAttribute(styledTable, span: span, key: .font) {
+        guard let font = $0 as? NSFont else { return false }
+        return NSFontManager.shared.traits(of: font).contains(.boldFontMask)
+    }
+}
+expectAttribute(styledTable, span: "Italic", key: .obliqueness) { (($0 as? NSNumber)?.doubleValue ?? 0) != 0 }
+expectAttribute(styledTable, span: "safe", key: .obliqueness) { (($0 as? NSNumber)?.doubleValue ?? 0) != 0 }
+expectAttribute(styledTable, span: "code", key: .font) { ($0 as? NSFont)?.isFixedPitch == true }
+expectAttribute(styledTable, span: "safe", key: .link) { ($0 as? URL)?.absoluteString == "https://example.com" }
+expectAttribute(styledTable, span: "bad", key: .link) { $0 == nil }
+for key in [NSAttributedString.Key.link, .attachment, .imageURL] {
+    expectAttribute(styledTable, span: "[image: alt]", key: key) { $0 == nil }
+}
+require(MarkdownAttributedStringLoader.attributedString(for: styledTable).string.contains("bad (javascript:alert(1))"), "rejected table link lost readable target")
+
+for (markdown, expected) in [
+    ("| A | B |\n| --- | --- |\n| a\\|b | `c\\|d` |", ["A\n", "B\n", "a|b\n", "c|d\n"]),
+    ("A | B\n--- | ---\nx | y", ["A\n", "B\n", "x\n", "y\n"]),
+    ("| A | B |\n| --- | --- |\n| one |\n| two | three | ignored |\n| | |", ["A\n", "B\n", "one\n", "\n", "two\n", "three\n", "\n", "\n"])
+] {
+    let rendered = MarkdownAttributedStringLoader.attributedString(for: markdown)
+    let cells = tableCells(rendered)
+    require(cells.map(\.text) == expected, "escaped, padded, truncated or empty cells differ: \(cells.map(\.text))")
+    for (index, cell) in cells.enumerated() {
+        require(cell.block.startingRow == index / 2 && cell.block.startingColumn == index % 2, "edge-case cell coordinate differs")
+        let style = rendered.attribute(.paragraphStyle, at: NSMaxRange(cell.range) - 1, effectiveRange: nil) as? NSParagraphStyle
+        require(cell.text.hasSuffix("\n") && style?.textBlocks.last === cell.block, "edge-case cell lost styled newline")
+    }
+}
+for markdown in ["| | |\n| --- | --- |", "| A | B |\n| --- | --- |"] {
+    let cells = tableCells(MarkdownAttributedStringLoader.attributedString(for: markdown))
+    require(cells.count == 2 && cells.allSatisfy { $0.text.hasSuffix("\n") }, "header-only table lost native cells")
+}
+for markdown in ["| A | B |\n| -x- | --- |", "| A | B |\n| --- |", "| A | B |\n| :", "```\n| A | B |\n| --- | --- |\n| x | y |\n```"] {
+    let rendered = MarkdownAttributedStringLoader.attributedString(for: markdown)
+    require(tableCells(rendered).isEmpty, "invalid delimiter or fenced code became a native table")
+    require(rendered.string.contains("| A | B |"), "non-table source is no longer readable")
+}
+
 let streamedReplies = [
     "Hello! A *partial emphasis*, **bold**, ~~strike~~ and `code`.",
     "A [link](https://example.com) and ![image](https://example.com/a.png).",
@@ -201,6 +294,26 @@ struct MarkdownBubbleFixture: View {
 }
 
 let hostingView = NSHostingView(rootView: MarkdownBubbleFixture(markdown: ""))
+let coldMarkdown = "## Cold heading\n\nBefore table.\n\n| A | B |\n| --- | --- |\n| one | two |\n\nAfter table."
+let coldHostingView = NSHostingView(rootView: MarkdownBubbleFixture(markdown: coldMarkdown))
+let coldWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 600), styleMask: .borderless, backing: .buffered, defer: false)
+coldWindow.isReleasedWhenClosed = false
+coldWindow.contentView = coldHostingView
+coldHostingView.layoutSubtreeIfNeeded()
+RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+coldHostingView.layoutSubtreeIfNeeded()
+if let text = findTextView(in: coldHostingView), let wrapper = text.superview,
+   let layout = text.layoutManager, let container = text.textContainer {
+    layout.ensureLayout(for: container)
+    let glyphs = layout.usedRect(for: container).offsetBy(dx: text.textContainerOrigin.x, dy: text.textContainerOrigin.y)
+    let allocation = text.convert(wrapper.bounds, from: wrapper)
+    require(allocation.insetBy(dx: -0.5, dy: -0.5).contains(glyphs), "cold nonempty native host clips glyphs: frame \(text.frame), allocation \(allocation), glyphs \(glyphs)")
+    require(abs(text.frame.minY - wrapper.bounds.minY) <= 0.5, "cold native text view is displaced from its wrapper origin")
+    require(tableCells(text.attributedString()).count == 4, "cold nonempty host lost native table cells")
+} else {
+    require(false, "cold nonempty native host has no text layout")
+}
+coldWindow.close()
 let window = NSWindow(
     contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
     styleMask: .borderless,
@@ -284,19 +397,75 @@ if let textView = findTextView(in: hostingView) {
 }
 
 let wrappedReply = String(repeating: "Wrapped reply text. ", count: 12) + "\n\nLast paragraph!"
+func glyphBounds(_ range: NSRange, in textView: MarkdownTextView) -> NSRect {
+    guard let layout = textView.layoutManager, let container = textView.textContainer else {
+        require(false, "table has no native glyph layout")
+        return .zero
+    }
+    layout.ensureLayout(for: container)
+    let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+    return layout.boundingRect(forGlyphRange: glyphs, in: container)
+}
+
+func verifyNativeTable(_ textView: MarkdownTextView) {
+    guard let storage = textView.textStorage else {
+        require(false, "table native storage is absent")
+        return
+    }
+    let cells = tableCells(storage)
+    require(cells.count == 9, "integrated native table lost rows or cells")
+    let bounds = cells.map { glyphBounds($0.range, in: textView) }
+    for (index, rect) in bounds.enumerated() {
+        require(rect.width > 0 && rect.height > 0, "cell \(index) has no visible glyph allocation")
+    }
+    for row in 0..<3 {
+        let first = bounds[row * 3]
+        let middle = bounds[row * 3 + 1]
+        let last = bounds[row * 3 + 2]
+        require(first.maxX <= middle.minX + 1 && middle.maxX <= last.minX + 1,
+                "table row \(row) does not visibly occupy separate columns: \(first), \(middle), \(last)")
+    }
+    let after = (storage.string as NSString).range(of: "After table.")
+    require(after.location != NSNotFound, "integrated table lost following prose")
+    require(glyphBounds(after, in: textView).minY >= bounds.map(\.maxY).max()! - 1,
+            "following prose overlaps the native table")
+    textView.selectAll(nil)
+    require(textView.selectedRange() == NSRange(location: 0, length: storage.length),
+            "select-all excludes table or prose")
+}
+
+let narrowTable = "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| `https://example.com/" + String(repeating: "unbreakable", count: 12) + "` | two | three | four | five | six |\n\nFollowing narrow table."
+let tablePrefixes = [
+    "| A | B |", "| A | B |\n|", "| A | B |\n| --- |",
+    "| A | B |\n| --- | ---", "| A | B |\n| --- | --- |\n|",
+    "| A | B |\n| --- | --- |\n| body", "| A | B |\n| --- | --- |\n| body | `partial",
+    "| A | B |\n| --- | --- |\n| body | complete |"
+]
 for appearance in [NSAppearance.Name.aqua, .darkAqua] {
     window.appearance = NSAppearance(named: appearance)
     var heights: [CGFloat] = []
+    var tableHeights: [CGFloat] = []
     for width: CGFloat in [300, 480, 900] {
         window.setContentSize(NSSize(width: width, height: 900))
         let textView = renderNative(wrappedReply, expected: wrappedReply + "\n")
         heights.append(textView.frame.height)
+        verifyNativeTable(renderNative(tableReply, expected: tableRendered.string))
+        let narrow = renderNative(narrowTable)
+        let narrowCells = tableCells(narrow.attributedString())
+        require(narrowCells.count == 12, "many-column table lost native cells")
+        tableHeights.append(narrow.frame.height)
+        for cell in narrowCells {
+            let rect = glyphBounds(cell.range, in: narrow)
+            require(rect.minX >= -0.5 && rect.maxX <= (narrow.textContainer?.containerSize.width ?? 0) + 0.5,
+                    "narrow table cell glyphs escape container: \(rect)")
+        }
     }
     guard heights[0] > heights[2] else {
         fputs("FAIL: chat reply height did not follow narrower wrapping widths: \(heights)\n", stderr)
         exit(1)
     }
     checks += 1
+    require(tableHeights[0] > tableHeights[2], "long unbreakable table code does not wrap on resize: \(tableHeights)")
     let shortReply = renderNative("Short!", expected: "Short!\n")
     let shortHeight = shortReply.frame.height
     guard shortHeight < heights[2] else {
@@ -305,6 +474,15 @@ for appearance in [NSAppearance.Name.aqua, .darkAqua] {
     }
     checks += 1
     renderNative("", expected: "")
+    verifyNativeTable(renderNative(tableReply, expected: tableRendered.string))
+    renderNative("", expected: "")
+    for prefix in tablePrefixes {
+        let streamed = renderNative(prefix)
+        require(streamed.string.contains("A") && streamed.string.contains("B"), "streaming table prefix lost readable header")
+        if prefix.contains("body") {
+            require(streamed.string.contains("body"), "streaming table prefix lost body text")
+        }
+    }
     let restored = renderNative(wrappedReply, expected: wrappedReply + "\n")
     guard restored.frame.height > shortHeight else {
         fputs("FAIL: chat reply height did not grow after an empty update\n", stderr)

@@ -32,7 +32,7 @@ enum MarkdownTextLinkPolicy {
 /// Rendering covers the shapes models actually produce in chat: headings,
 /// paragraphs with inline styles (bold, italic, strikethrough, inline
 /// code, links), bullet and numbered lists, nested quotes, fenced code
-/// blocks, and thematic breaks. Images stay unparsed as their alt text
+/// blocks, top-level tables, and thematic breaks. Images stay unparsed as their alt text
 /// since assistant replies rarely embed them; the raw markdown remains
 /// one Copy button away.
 enum MarkdownAttributedStringLoader {
@@ -45,7 +45,14 @@ enum MarkdownAttributedStringLoader {
         case codeBlock(language: String?, content: String, openFence: String?)
         case quote(lines: [String])
         case list(items: [String])
+        case table(Table)
         case thematicBreak
+    }
+
+    private struct Table {
+        let columns: [PresentationIntent.TableColumn]
+        let rows: [[AttributedString]]
+        let source: String
     }
 
     private struct ListContext {
@@ -57,7 +64,7 @@ enum MarkdownAttributedStringLoader {
 
     /// One attributed string for the whole reply.
     static func attributedString(for markdown: String, baseURL: URL? = nil) -> NSAttributedString {
-        let blocks = parseBlocks(markdown)
+        let blocks = parseBlocks(markdown, baseURL: baseURL)
         let attributed = NSMutableAttributedString()
         var listContext = ListContext()
         for (index, block) in blocks.enumerated() {
@@ -69,7 +76,7 @@ enum MarkdownAttributedStringLoader {
 
     // MARK: Parsing
 
-    private static func parseBlocks(_ markdown: String) -> [Block] {
+    private static func parseBlocks(_ markdown: String, baseURL: URL?) -> [Block] {
         var blocks: [Block] = []
         var paragraphLines: [String] = []
         var quoteLines: [String] = []
@@ -99,8 +106,11 @@ enum MarkdownAttributedStringLoader {
             flushList()
         }
 
-        for rawLine in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(rawLine)
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var lineIndex = 0
+        while lineIndex < lines.count {
+            let line = lines[lineIndex]
+            defer { lineIndex += 1 }
             if let open = fence {
                 if lineHasFenceEnd(line, open: open) {
                     blocks.append(.codeBlock(
@@ -121,6 +131,12 @@ enum MarkdownAttributedStringLoader {
                 fence = line
                 fenceInfo = Self.fenceLanguage(line)
                 fenceLines = []
+                continue
+            }
+            if let (table, nextLine) = parseTable(in: lines, at: lineIndex, baseURL: baseURL) {
+                flushAll()
+                blocks.append(.table(table))
+                lineIndex = nextLine - 1
                 continue
             }
             if isThematicBreak(line) {
@@ -168,6 +184,69 @@ enum MarkdownAttributedStringLoader {
             flushAll()
         }
         return blocks
+    }
+
+    private static func parseTable(in lines: [String], at index: Int, baseURL: URL?) -> (Table, Int)? {
+        guard index + 1 < lines.count else { return nil }
+        let header = lines[index]
+        let delimiter = lines[index + 1]
+        guard header.contains("|") || delimiter.contains("|"),
+              delimiter.contains("-"),
+              delimiter.allSatisfy({ $0 == "|" || $0 == ":" || $0 == "-" || $0 == " " || $0 == "\t" }) else {
+            return nil
+        }
+        // A body cell exposes table metadata even when every header cell is empty.
+        guard let validation = try? AttributedString(
+            markdown: header + "\n" + delimiter + "\ncell",
+            options: .init(interpretedSyntax: .full)
+        ) else { return nil }
+        let columns = validation.runs.lazy.compactMap { run in
+            run.presentationIntent?.components.compactMap { component -> [PresentationIntent.TableColumn]? in
+                if case .table(let columns) = component.kind { return columns }
+                return nil
+            }.first
+        }.first
+        guard let columns, !columns.isEmpty else { return nil }
+
+        var end = index + 2
+        while end < lines.count {
+            let line = lines[end]
+            if line.trimmingCharacters(in: .whitespaces).isEmpty
+                || line.hasPrefix("```") || line.hasPrefix("~~~")
+                || isThematicBreak(line) || parseHeading(line) != nil
+                || isQuoteLine(line) || isListLine(line) {
+                break
+            }
+            end += 1
+        }
+        let source = lines[index..<end].joined(separator: "\n")
+        guard let parsed = try? AttributedString(
+            markdown: source,
+            options: .init(interpretedSyntax: .full, appliesSourcePositionAttributes: true),
+            baseURL: baseURL
+        ) else { return nil }
+        var rows = Array(
+            repeating: Array(repeating: AttributedString(), count: columns.count),
+            count: end - index - 1
+        )
+        for run in parsed.runs {
+            guard let components = run.presentationIntent?.components else { return nil }
+            var row: Int?
+            var column: Int?
+            for component in components {
+                switch component.kind {
+                case .tableHeaderRow: row = 0
+                case .tableRow(let rowIndex): row = rowIndex
+                case .tableCell(let columnIndex): column = columnIndex
+                default: break
+                }
+            }
+            guard let row, let column, rows.indices.contains(row), columns.indices.contains(column) else {
+                return nil
+            }
+            rows[row][column].append(AttributedString(parsed[run.range]))
+        }
+        return (Table(columns: columns, rows: rows, source: source), end)
     }
 
     private static func fenceLanguage(_ fenceLine: String) -> String? {
@@ -245,6 +324,8 @@ enum MarkdownAttributedStringLoader {
         case .list(let items):
             appendList(items: items, into: attributed, baseURL: baseURL, listContext: &listContext)
             appendBlockSpacing(attributed)
+        case .table(let table):
+            appendTable(table, into: attributed, baseURL: baseURL)
         case .thematicBreak:
             appendThematicBreak(into: attributed)
             appendBlockSpacing(attributed)
@@ -417,6 +498,42 @@ enum MarkdownAttributedStringLoader {
         attributed.append(NSAttributedString(string: "―――", attributes: attrs))
     }
 
+    private static func appendTable(_ contents: Table, into attributed: NSMutableAttributedString, baseURL: URL?) {
+        let table = NSTextTable()
+        table.numberOfColumns = contents.columns.count
+        table.layoutAlgorithm = .fixedLayoutAlgorithm
+        table.collapsesBorders = true
+        table.hidesEmptyCells = false
+        table.setContentWidth(100, type: .percentageValueType)
+        for (rowIndex, row) in contents.rows.enumerated() {
+            for (columnIndex, content) in row.enumerated() {
+                let cell = NSTextTableBlock(
+                    table: table, startingRow: rowIndex, rowSpan: 1,
+                    startingColumn: columnIndex, columnSpan: 1
+                )
+                cell.setContentWidth(100 / CGFloat(table.numberOfColumns), type: .percentageValueType)
+                cell.setWidth(4, type: .absoluteValueType, for: .padding)
+                cell.setWidth(0.5, type: .absoluteValueType, for: .border)
+                cell.setBorderColor(.separatorColor)
+                if rowIndex == 0 { cell.backgroundColor = .controlBackgroundColor }
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.textBlocks = [cell]
+                paragraph.lineBreakMode = .byWordWrapping
+                switch contents.columns[columnIndex].alignment {
+                case .left: paragraph.alignment = .left
+                case .center: paragraph.alignment = .center
+                case .right: paragraph.alignment = .right
+                @unknown default: paragraph.alignment = .left
+                }
+                var attrs = baseAttributes()
+                attrs[.paragraphStyle] = paragraph
+                if rowIndex == 0 { attrs[.font] = NSFont.boldSystemFont(ofSize: 13) }
+                appendParsedInline(content, source: contents.source, into: attributed, baseURL: baseURL, extraAttributes: attrs)
+                attributed.append(NSAttributedString(string: "\n", attributes: attrs))
+            }
+        }
+    }
+
     // MARK: Inline rendering
 
     private static func appendInline(
@@ -433,13 +550,24 @@ enum MarkdownAttributedStringLoader {
             appendPlain(text, into: attributed, extraAttributes: extraAttributes)
             return
         }
+        appendParsedInline(parsed, source: text, into: attributed, baseURL: baseURL, extraAttributes: extraAttributes)
+    }
 
+    private static func appendParsedInline(
+        _ parsed: AttributedString,
+        source: String,
+        into attributed: NSMutableAttributedString,
+        baseURL: URL?,
+        extraAttributes: [NSAttributedString.Key: Any]? = nil
+    ) {
         let inline = NSMutableAttributedString(string: "")
         for run in parsed.runs {
             var attrs = extraAttributes ?? baseAttributes()
             let intent = run.inlinePresentationIntent ?? []
             if intent.contains(.code) {
-                attrs[.font] = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+                let font = attrs[.font] as? NSFont ?? NSFont.systemFont(ofSize: 13)
+                let weight: NSFont.Weight = NSFontManager.shared.traits(of: font).contains(.boldFontMask) ? .bold : .regular
+                attrs[.font] = NSFont.monospacedSystemFont(ofSize: 12, weight: weight)
                 attrs[.backgroundColor] = NSColor.controlBackgroundColor
             }
             if intent.contains(.stronglyEmphasized) {
@@ -461,10 +589,10 @@ enum MarkdownAttributedStringLoader {
                 inline.append(NSAttributedString(string: placeholder, attributes: attrs))
             } else if run.link != nil,
                       let position = run.markdownSourcePosition,
-                      let range = Range(position, in: text),
-                      String(text[range]) != text {
+                      let range = Range(position, in: source),
+                      String(source[range]) != source {
                 // Foundation strips label markup but omits its nested style intents.
-                appendInline(String(text[range]), into: inline, baseURL: baseURL, extraAttributes: attrs)
+                appendInline(String(source[range]), into: inline, baseURL: baseURL, extraAttributes: attrs)
             } else {
                 inline.append(NSAttributedString(string: content, attributes: attrs))
             }
