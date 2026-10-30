@@ -32,8 +32,19 @@ class CoverageGateTests(unittest.TestCase):
             "end_of_record",
         ])
 
+    def assess_export(self, export, lcov, repo, sources, baseline=None):
+        if baseline is None:
+            records = []
+            for entry in export.get("data", []):
+                for file in entry.get("files", []):
+                    if GATE.relative_source(file["filename"], repo) not in sources:
+                        continue
+                    records += ["SF:" + file["filename"], *(f"DA:{line},0" for line in range(1, file["summary"]["lines"]["count"] + 1)), "end_of_record"]
+            baseline = "\n".join(records)
+        return GATE.assess(export, lcov, repo, sources, baseline)
+
     def assess(self, covered=91, unique_covered=None, sources=None):
-        return GATE.assess(
+        return self.assess_export(
             self.export(covered), self.lcov(covered if unique_covered is None else unique_covered),
             self.repo, sources or {self.source},
         )
@@ -58,18 +69,19 @@ class CoverageGateTests(unittest.TestCase):
 
     def test_entry_point_is_not_silently_excluded(self):
         with self.assertRaises(GATE.CoverageError):
-            GATE.assess({"data": []}, "", self.repo, {self.source})
+            self.assess_export({"data": []}, "", self.repo, {self.source})
 
     def test_declaration_only_file_is_listed_not_counted_as_covered(self):
         declaration = "BusinessBarCore/Core/Meeting/EventStoreProtocol.swift"
-        result = self.assess(sources={self.source, declaration})
+        with mock.patch.object(GATE, "declaration_only_paths", return_value={declaration}):
+            result = self.assess(sources={self.source, declaration})
         self.assertEqual(result["production_source_count"], 2)
         self.assertEqual(result["instrumented_source_count"], 1)
         self.assertIsNone(next(row for row in result["files"] if row["path"] == declaration)["llvm_lines"])
 
     def test_declaration_with_mapping_is_counted(self):
         source = "BusinessBarCore/Constants.swift"
-        result = GATE.assess(self.export(sources=[source]), self.lcov(source=source), self.repo, {source})
+        result = self.assess_export(self.export(sources=[source]), self.lcov(source=source), self.repo, {source})
         self.assertEqual(result["instrumented_source_count"], 1)
 
     def test_unique_line_gate_is_independent(self):
@@ -80,26 +92,26 @@ class CoverageGateTests(unittest.TestCase):
 
     def test_duplicate_lcov_records_cannot_inflate_denominator(self):
         text = self.lcov(0) + "\n" + self.lcov(91)
-        result = GATE.assess(self.export(), text, self.repo, {self.source})
+        result = self.assess_export(self.export(), text, self.repo, {self.source})
         self.assertEqual(result["metrics"]["unique_lines"]["count"], 100)
         self.assertEqual(result["metrics"]["unique_lines"]["covered"], 91)
 
     def test_duplicate_summary_is_rejected(self):
         with self.assertRaisesRegex(GATE.CoverageError, "Duplicate"):
-            GATE.assess(self.export(sources=[self.source, self.source]), self.lcov(), self.repo, {self.source})
+            self.assess_export(self.export(sources=[self.source, self.source]), self.lcov(), self.repo, {self.source})
 
     def test_dependencies_do_not_enter_production_denominator(self):
         export = self.export(sources=[self.source, ".build/checkouts/Dependency/Source.swift"])
-        result = GATE.assess(export, self.lcov(), self.repo, {self.source})
+        result = self.assess_export(export, self.lcov(), self.repo, {self.source})
         self.assertEqual(result["instrumented_source_count"], 1)
 
     def test_missing_lcov_is_rejected(self):
         with self.assertRaisesRegex(GATE.CoverageError, "Missing LCOV"):
-            GATE.assess(self.export(), "", self.repo, {self.source})
+            self.assess_export(self.export(), "", self.repo, {self.source})
 
     def test_empty_lcov_is_rejected(self):
         with self.assertRaisesRegex(GATE.CoverageError, "Empty LCOV"):
-            GATE.assess(self.export(), "SF:" + str(self.repo / self.source), self.repo, {self.source})
+            self.assess_export(self.export(), "SF:" + str(self.repo / self.source), self.repo, {self.source})
 
     def test_invalid_totals_are_rejected(self):
         for covered, count in [(1, 0), (-1, 10), (11, 10)]:
@@ -133,6 +145,81 @@ class CoverageGateTests(unittest.TestCase):
             with mock.patch.object(GATE.subprocess, "run", return_value=mock.Mock(stderr="warning: functions have mismatched data")):
                 with self.assertRaisesRegex(GATE.CoverageError, "mismatched data"):
                     GATE.export_coverage(Path("app"), Path("profile"), Path(directory))
+
+    def test_truncated_lcov_record_is_rejected(self):
+        with self.assertRaisesRegex(GATE.CoverageError, "Incomplete LCOV"):
+            self.assess_export(self.export(), self.lcov(1, count=1), self.repo, {self.source})
+
+    def test_compiler_line_baseline_must_cover_production(self):
+        with self.assertRaisesRegex(GATE.CoverageError, "Compiler line baseline"):
+            self.assess_export(self.export(), self.lcov(), self.repo, {self.source}, baseline="")
+
+    def test_changed_unmapped_declaration_is_not_exempt(self):
+        source = "BusinessBarCore/Constants.swift"
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            repo = Path(directory)
+            path = repo / source
+            path.parent.mkdir(parents=True)
+            path.write_text("let fixture = 1\n")
+            approved = {source: hashlib.sha256(path.read_bytes()).hexdigest()}
+            with mock.patch.object(GATE, "DECLARATION_ONLY", approved):
+                self.assertEqual(GATE.declaration_only_paths(repo, {source}), {source})
+                path.write_text("func newlyExecutable() {}\n")
+                with self.assertRaisesRegex(GATE.CoverageError, "declaration-only source changed"):
+                    GATE.declaration_only_paths(repo, {source})
+
+    def test_diagnostic_counters_cannot_report_gate_success(self):
+        metrics = self.assess()
+        result = GATE.apply_provenance(metrics, diagnostic=True)
+        self.assertTrue(result["metrics_passed"])
+        self.assertTrue(result["diagnostic_only"])
+        self.assertFalse(result["passed"])
+        self.assertTrue(GATE.apply_provenance(metrics, diagnostic=False)["passed"])
+
+    def test_xctest_profiles_use_exact_recorded_process(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            product = Path(directory)
+            profiles = product / "codecov"
+            profiles.mkdir()
+            owned = profiles / "xctest123_0.42.profraw"
+            owned.write_bytes(b"owned fixture")
+            (profiles / "xctest123_0.43.profraw").write_bytes(b"unrelated process")
+            record = {"schema": 1, "pid": 42, "profile_pattern": str(profiles / "xctest%m.%p.profraw")}
+            self.assertEqual(GATE.xctest_profiles(record, product, 0), [owned])
+            with self.assertRaisesRegex(GATE.CoverageError, "No profiles"):
+                GATE.xctest_profiles(record, product, owned.stat().st_mtime_ns + 1)
+            record["profile_pattern"] = str(product / "other" / "xctest%m.%p.profraw")
+            with self.assertRaisesRegex(GATE.CoverageError, "outside"):
+                GATE.xctest_profiles(record, product, 0)
+
+    def test_xctest_record_requires_process_specific_pattern(self):
+        for record in [{}, {"schema": 1, "pid": -1, "profile_pattern": "/fixture/codecov/%p.profraw"}, {"schema": 1, "pid": 42, "profile_pattern": "/fixture/codecov/default.profraw"}]:
+            with self.assertRaisesRegex(GATE.CoverageError, "Invalid XCTest"):
+                GATE.xctest_profiles(record, Path("/fixture"), 0)
+
+    def test_matching_application_binary_passes(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            binary = Path(directory) / "BusinessBar"
+            binary.write_bytes(b"tested application fixture")
+            manifest = {"app_binary": str(binary), "app_binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+            GATE.validate_binary(manifest, binary)
+
+    def test_different_application_binary_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            binary = Path(directory) / "BusinessBar"
+            binary.write_bytes(b"tested application fixture")
+            manifest = {"app_binary": str(Path(directory) / "other"), "app_binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+            with self.assertRaisesRegex(GATE.CoverageError, "does not match"):
+                GATE.validate_binary(manifest, binary)
+
+    def test_relinked_application_binary_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="businessbar-coverage-gate-") as directory:
+            binary = Path(directory) / "BusinessBar"
+            binary.write_bytes(b"tested application fixture")
+            manifest = {"app_binary": str(binary), "app_binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+            binary.write_bytes(b"different application fixture")
+            with self.assertRaisesRegex(GATE.CoverageError, "changed after"):
+                GATE.validate_binary(manifest, binary)
 
     def manifest(self, repo):
         source = repo / self.source
@@ -189,7 +276,7 @@ class CoverageGateTests(unittest.TestCase):
 
     def test_uninventoried_production_mapping_is_rejected(self):
         with self.assertRaisesRegex(GATE.CoverageError, "missing from source inventory"):
-            GATE.assess(self.export(sources=[self.source, "BusinessBar/Hidden.swift"]), self.lcov(), self.repo, {self.source})
+            self.assess_export(self.export(sources=[self.source, "BusinessBar/Hidden.swift"]), self.lcov(), self.repo, {self.source})
 
 
 if __name__ == "__main__":
