@@ -156,7 +156,10 @@ private final class FixtureStreamClient: LLMClient, @unchecked Sendable {
         return AsyncThrowingStream { continuation in
             Task {
                 for event in events {
-                    try? await Task.sleep(nanoseconds: 15_000_000)
+                    // 150ms between events: keeps isStreaming observable
+                    // across a settle cycle while the stream still finishes
+                    // well inside every waitFor ceiling.
+                    try? await Task.sleep(nanoseconds: 150_000_000)
                     continuation.yield(event)
                 }
                 continuation.finish()
@@ -196,7 +199,9 @@ enum AppChatStreamScenarios {
 
         try view.setText("Stream me a fixture answer", context)
         try view.pressHelp("Send (Cmd+Return)", context)
-        try context.expect(fixture.store.isStreaming, "Stream starts busy")
+        // send() hops through a MainActor Task before store.send sets
+        // isStreaming, so the busy state can only be observed async.
+        try await waitFor(context, "stream starts busy") { fixture.store.isStreaming }
         try await waitFor(context, "stream finishes") { fixture.store.isStreaming == false && fixture.store.messages.count == 2 }
         try context.expect(view.text.contains("Hello world"), "Answer rendered after the stream")
         try context.expect(fixture.store.errorMessage == nil, "Success stream leaves no error")
@@ -222,7 +227,10 @@ enum AppChatStreamScenarios {
 
         client = FixtureStreamClient([.finished(fullText: "recovered answer")])
         try view.press("Retry", context)
-        try await waitFor(context, "retry completes") { fixture.store.errorMessage == nil && fixture.store.messages.count == 4 }
+        // retryLast drops the trailing prompt from the failed attempt and
+        // re-sends it, so a completed retry ends with prompt + answer (2),
+        // not the failed attempt's prompt plus a new pair (4).
+        try await waitFor(context, "retry completes") { fixture.store.errorMessage == nil && fixture.store.messages.count == 2 }
         try context.expect(view.text.contains("recovered answer"), "Retry answer rendered")
         try context.equal(fixture.store.messages.last?.content, "recovered answer", "Retry message appended")
     }
