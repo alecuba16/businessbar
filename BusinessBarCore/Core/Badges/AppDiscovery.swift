@@ -2,6 +2,15 @@ import AppKit
 import Foundation
 
 public final class AppDiscovery {
+    public static func apps(at paths: [String]) -> [MonitoredApp] {
+        paths.compactMap { path -> MonitoredApp? in
+            guard let bundle = Bundle(path: path), let identifier = bundle.bundleIdentifier else { return nil }
+            let name = bundle.infoDictionary?["CFBundleDisplayName"] as? String
+                ?? bundle.infoDictionary?["CFBundleName"] as? String
+                ?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+            return MonitoredApp(bundleIdentifier: identifier, displayName: name, iconPath: path)
+        }.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
+    }
 
     /// Discovers all installed `.app` bundles via `NSMetadataQuery`.
     /// The query **must** run on the main thread (it needs a RunLoop); we
@@ -34,7 +43,7 @@ public final class AppDiscovery {
                     query.disableUpdates()
                     query.stop()
 
-                    var apps: [MonitoredApp] = []
+                    var paths: [String] = []
 
                     for i in 0 ..< query.resultCount {
                         guard
@@ -42,27 +51,10 @@ public final class AppDiscovery {
                             let path = item.value(forAttribute: NSMetadataItemPathKey) as? String
                         else { continue }
 
-                        guard let bundle = Bundle(path: path),
-                              let bundleID = bundle.bundleIdentifier
-                        else { continue }
-
-                        // Prefer CFBundleDisplayName, fall back to CFBundleName, then
-                        // the last path component without extension.
-                        let displayName: String =
-                            bundle.infoDictionary?["CFBundleDisplayName"] as? String
-                            ?? bundle.infoDictionary?["CFBundleName"] as? String
-                            ?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
-
-                        let app = MonitoredApp(
-                            bundleIdentifier: bundleID,
-                            displayName: displayName,
-                            iconPath: path   // MonitoredApp.icon resolves via NSWorkspace
-                        )
-                        apps.append(app)
+                        paths.append(path)
                     }
 
-                    let sorted = apps.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
-                    continuation.resume(returning: sorted)
+                    continuation.resume(returning: apps(at: paths))
                 }
 
                 query.start()

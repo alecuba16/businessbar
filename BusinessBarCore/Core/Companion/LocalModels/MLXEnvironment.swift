@@ -1,6 +1,46 @@
 import Darwin
 import Foundation
 
+public struct MLXProcessDriver {
+    public var run: (Process) throws -> Void
+    public var isRunning: (Process) -> Bool
+    public var terminate: (Process) -> Void
+    public var forceKill: (Process) -> Void
+    public var identifier: (Process) -> pid_t
+    public var registerForQuit: (Process) -> Void
+    public var terminationStatus: (Process) -> Int32
+
+    public init(
+        run: @escaping (Process) throws -> Void,
+        isRunning: @escaping (Process) -> Bool,
+        terminate: @escaping (Process) -> Void,
+        forceKill: @escaping (Process) -> Void,
+        identifier: @escaping (Process) -> pid_t,
+        registerForQuit: @escaping (Process) -> Void,
+        terminationStatus: @escaping (Process) -> Int32
+    ) {
+        self.run = run
+        self.isRunning = isRunning
+        self.terminate = terminate
+        self.forceKill = forceKill
+        self.identifier = identifier
+        self.registerForQuit = registerForQuit
+        self.terminationStatus = terminationStatus
+    }
+
+    static func live(registerForQuit: @escaping (Process) -> Void) -> Self {
+        Self(
+            run: { try $0.run() },
+            isRunning: { $0.isRunning },
+            terminate: { $0.terminate() },
+            forceKill: { kill($0.processIdentifier, SIGKILL) },
+            identifier: { $0.processIdentifier },
+            registerForQuit: registerForQuit,
+            terminationStatus: { $0.terminationStatus }
+        )
+    }
+}
+
 // MARK: - MLXEnvironment
 
 /// Locates uv/uvx and resolves the python that runs `mlx_lm.server`.
@@ -43,13 +83,18 @@ public enum MLXEnvironment {
     /// Text models run on mlx-lm; vision models on mlx-vlm.
     public static func resolveServerPython(
         for kind: MLXModelCatalog.Kind = .text,
-        timeout: TimeInterval = 120
+        timeout: TimeInterval = 120,
+        driver: MLXProcessDriver? = nil,
+        uvPath: (() -> String?)? = nil,
+        now: () -> Date = Date.init,
+        wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) throws -> String {
+        let driver = driver ?? .live(registerForQuit: { _ in })
         let cacheKey = kind.rawValue
         if let cached = cachedPythons[cacheKey], FileManager.default.fileExists(atPath: cached) {
             return cached
         }
-        guard let uv = locateUV() else {
+        guard let uv = (uvPath ?? locateUV)() else {
             throw EnvironmentError.uvNotFound
         }
         let package = kind == .textAndImages ? "mlx-vlm" : "mlx-lm"
@@ -72,22 +117,23 @@ public enum MLXEnvironment {
         process.standardOutput = pipe
         process.standardError = Pipe()
 
-        try process.run()
+        try driver.run(process)
         if #available(macOS 13.0, *) {
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.05)
+            let deadline = now().addingTimeInterval(timeout)
+            while driver.isRunning(process) && now() < deadline {
+                wait(0.05)
             }
-            if process.isRunning {
-                process.terminate()
+            if driver.isRunning(process) {
+                driver.terminate(process)
                 throw EnvironmentError.resolveFailed("\(package) setup timed out")
             }
         } else {
             process.waitUntilExit()
         }
-        guard process.terminationStatus == 0 else {
+        let exitCode = driver.terminationStatus(process)
+        guard exitCode == 0 else {
             throw EnvironmentError.resolveFailed(
-                "\(package) setup failed (exit \(process.terminationStatus))"
+                "\(package) setup failed (exit \(exitCode))"
             )
         }
 

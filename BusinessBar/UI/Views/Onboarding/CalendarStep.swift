@@ -5,12 +5,30 @@ import SwiftUI
 struct CalendarSelectionStep: View {
     let onBack: () -> Void
     let onFinish: () -> Void
+    private let fetchCalendars: () async throws -> [MBCalendar]
+    private let persistSelection: ([String]) -> Void
 
     @AppStorage(Constants.Defaults.calendarProvider) private var calendarProvider = CalendarProvider.eventKit.rawValue
 
     @State private var calendars: [MBCalendar] = []
     @State private var selectedCalendarIDs: Set<String> = []
     @State private var isLoading = true
+
+    init(
+        onBack: @escaping () -> Void,
+        onFinish: @escaping () -> Void,
+        fetchCalendars: @escaping () async throws -> [MBCalendar] = { try await EKEventStoreAdapter().fetchCalendars() },
+        persistSelection: @escaping ([String]) -> Void = { ids in
+            if let data = try? JSONEncoder().encode(ids) {
+                UserDefaults.standard.set(data, forKey: Constants.Defaults.selectedCalendars)
+            }
+        }
+    ) {
+        self.onBack = onBack
+        self.onFinish = onFinish
+        self.fetchCalendars = fetchCalendars
+        self.persistSelection = persistSelection
+    }
 
     private var usesMacCalendar: Bool {
         calendarProvider == CalendarProvider.eventKit.rawValue
@@ -105,9 +123,8 @@ struct CalendarSelectionStep: View {
     }
     
     private func loadCalendars() async {
-        let adapter = EKEventStoreAdapter()
         do {
-            calendars = try await adapter.fetchCalendars()
+            calendars = try await fetchCalendars()
             selectedCalendarIDs = Set(calendars.map { $0.id })
             isLoading = false
         } catch {
@@ -117,9 +134,6 @@ struct CalendarSelectionStep: View {
     }
     
     private func saveSelection() {
-        let calendarIDs = Array(selectedCalendarIDs)
-        if let data = try? JSONEncoder().encode(calendarIDs) {
-            UserDefaults.standard.set(data, forKey: Constants.Defaults.selectedCalendars)
-        }
+        persistSelection(Array(selectedCalendarIDs))
     }
 }

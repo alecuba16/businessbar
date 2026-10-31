@@ -6,7 +6,8 @@ import Foundation
 import os.log
 
 struct NoSleepTab: View {
-    @State private var accessibilityGranted = AXIsProcessTrusted()
+    @State private var accessibilityGranted: Bool
+    private let accessibilityStatus: () -> Bool
     @State private var isResettingPermission = false
 
     @AppStorage(Constants.Defaults.featureNoSleep)            private var featureNoSleepEnabled = true
@@ -17,6 +18,11 @@ struct NoSleepTab: View {
     @AppStorage(Constants.Defaults.noSleepSimulateActivity)    private var simulateActivity  = false
     @AppStorage(Constants.Defaults.activityCheckInterval)       private var checkInterval     = Constants.DefaultValues.activityCheckInterval
     @AppStorage(Constants.Defaults.activityIdleMultiplier)      private var idleMultiplier    = Constants.DefaultValues.activityIdleMultiplier
+
+    init(accessibilityStatus: @escaping () -> Bool = { AXIsProcessTrusted() }) {
+        self.accessibilityStatus = accessibilityStatus
+        _accessibilityGranted = State(initialValue: accessibilityStatus())
+    }
 
     var body: some View {
         Form {
@@ -169,7 +175,7 @@ struct NoSleepTab: View {
     }
 
     private func refreshAccessibilityStatus() {
-        accessibilityGranted = AXIsProcessTrusted()
+        accessibilityGranted = accessibilityStatus()
         if !accessibilityGranted {
             AppLogger.warning("Accessibility permission not granted — disabling activity simulation", category: "Permissions")
             simulateActivity = false

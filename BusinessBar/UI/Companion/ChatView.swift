@@ -1,5 +1,4 @@
 import BusinessBarCore
-import MarkdownUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -38,6 +37,11 @@ struct ChatView: View {
     /// Measured height of the composer text, so the box grows with the
     /// content up to the layout cap.
     @State private var composerContentHeight: CGFloat = 26
+    /// True between pulling the last prompt back for editing and the
+    /// resend/cancel. Drives the notice strip above the composer and the
+    /// accent tint on the send path, so the replace-consequence of
+    /// sending is visible before it happens.
+    @State private var isEditingLastPrompt = false
 
     /// Age buckets offered in the cleanup menu.
     private let cleanupAgeChoices = [7, 30, 90]
@@ -364,6 +368,7 @@ struct ChatView: View {
         return { [self] in
             if let prompt = store.editLastUserPrompt() {
                 draft = prompt
+                isEditingLastPrompt = true
                 composerFocusRequest += 1
             }
         }
@@ -380,7 +385,8 @@ struct ChatView: View {
                     ForEach(store.messages) { message in
                         MessageBubble(
                             message: message,
-                            onEditPrompt: editCallback(for: message)
+                            onEditPrompt: editCallback(for: message),
+                            chatMenuActions: chatMenuActions
                         )
                         .id(message.id)
                     }
@@ -397,7 +403,8 @@ struct ChatView: View {
                                 thinking: streaming
                             ),
                             isStreaming: true,
-                            streamingThinkingOnly: true
+                            streamingThinkingOnly: true,
+                            chatMenuActions: chatMenuActions
                         )
                         .id("streaming")
                     } else if let streaming = store.streamingText {
@@ -407,7 +414,8 @@ struct ChatView: View {
                                 content: streaming,
                                 thinking: store.streamingThinking
                             ),
-                            isStreaming: true
+                            isStreaming: true,
+                            chatMenuActions: chatMenuActions
                         )
                         .id("streaming")
                     }
@@ -704,6 +712,9 @@ struct ChatView: View {
 
     private var inputBar: some View {
         VStack(spacing: 6) {
+            if isEditingLastPrompt {
+                editingNotice
+            }
             if !pendingImages.isEmpty {
                 attachmentStrip
             }
@@ -797,16 +808,39 @@ struct ChatView: View {
                     } label: {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.title3)
+                            .foregroundStyle(isEditingLastPrompt ? Color.orange : Color.primary)
                     }
                     .buttonStyle(.plain)
                     .disabled(draft.isEmpty && pendingImages.isEmpty)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .help("Send (Cmd+Return)")
+                    .help(isEditingLastPrompt ? "Resend edited prompt (replaces the replies after it)" : "Send (Cmd+Return)")
                 }
             }
             .padding(10)
             .background(.bar)
         }
+    }
+
+    /// Notice shown while the last prompt sits in the composer for
+    /// editing. Names the consequence (sending replaces the replies
+    /// after it) and offers the way out, because the truncation already
+    /// happened when the prompt was pulled back.
+    private var editingNotice: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "pencil.and.list.clipboard")
+                .font(.caption)
+            Text("Editing your last prompt. Sending runs it again and replaces the replies that followed it.")
+                .font(.caption)
+            Spacer(minLength: 0)
+            Button("Cancel") {
+                isEditingLastPrompt = false
+                draft = ""
+            }
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(Color.orange.opacity(0.12))
     }
 
     /// Opens Preferences on the Companion tab, used by the empty-state
@@ -823,6 +857,30 @@ struct ChatView: View {
     /// command would "succeed" with nonsense output).
     private var sendHandlerIsCommandAware: Bool {
         commandToolsEnabledNow
+    }
+
+    /// Actions injected into every bubble's context menu. Built per render
+    /// so Copy Conversation snapshots the thread at click time, not at
+    /// render time.
+    private var chatMenuActions: ChatMenuActions {
+        ChatMenuActions(copyConversation: copyConversation)
+    }
+
+    /// Whole-thread copy. One block per message, speaker-prefixed, thinking
+    /// excluded; the in-flight stream rides along so a mid-generation copy
+    /// is not silently missing the latest answer.
+    private func copyConversation() {
+        var blocks = store.messages
+            .filter { !$0.content.isEmpty }
+            .map { message -> String in
+                "\(message.role == .user ? "You" : "Assistant"): \(message.content)"
+            }
+        if let streaming = store.streamingText, !streaming.isEmpty {
+            blocks.append("Assistant: \(streaming)")
+        }
+        guard !blocks.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(blocks.joined(separator: "\n\n"), forType: .string)
     }
 
     /// Hover text for the command permission row, shared by the label and
@@ -984,6 +1042,7 @@ struct ChatView: View {
         guard !text.isEmpty || !images.isEmpty, !store.isStreaming, !submitting else { return }
         draft = ""
         pendingImages = []
+        isEditingLastPrompt = false
         // Cover the warm-up window (server start, first model load) with
         // visible progress; the stream takes over the label once it starts.
         submitting = true
@@ -1064,6 +1123,15 @@ private struct NewSessionShortcutAnchor: View {
     }
 }
 
+// MARK: - ChatMenuActions
+
+/// Chat-wide actions offered on every message's context menu. Kept as a
+/// value so bubbles stay decoupled from the store; the chat view injects
+/// closures that read live state.
+struct ChatMenuActions {
+    let copyConversation: () -> Void
+}
+
 // MARK: - MessageBubble
 
 struct MessageBubble: View {
@@ -1075,6 +1143,10 @@ struct MessageBubble: View {
     /// Edit affordance for the latest user prompt. Non-nil only on the
     /// last user message while nothing streams; nil everywhere else.
     var onEditPrompt: (() -> Void)? = nil
+    /// Chat-wide actions for the context menu. SwiftUI text selection stops
+    /// at each paragraph (every markdown block is its own Text view), so the
+    /// menu carries the whole-conversation copy the native path cannot.
+    var chatMenuActions: ChatMenuActions? = nil
 
     /// Whether the user toggled the thinking block themselves; their choice
     /// wins over the automatic open-while-reasoning behavior.
@@ -1139,6 +1211,10 @@ struct MessageBubble: View {
                             )
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+
+                    if message.role == .assistant, !message.content.isEmpty, !isStreaming {
+                        CopyReplyButton(text: message.content)
+                    }
                 }
 
                 if isStreaming && message.content.isEmpty && !showsThinkingRow {
@@ -1156,9 +1232,54 @@ struct MessageBubble: View {
                     .help("Edit this prompt and resend it with the updated text")
                 }
             }
+            .contextMenu {
+                // Right-clicking the text itself still opens the native
+                // selection menu (Copy, Look Up); this menu covers the rest
+                // of the bubble and adds the actions the native path cannot
+                // offer.
+                if message.role == .assistant, !message.content.isEmpty, !isStreaming {
+                    Button("Copy Reply") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(message.content, forType: .string)
+                    }
+                    Divider()
+                }
+                if let chatMenuActions {
+                    Button("Copy Conversation", action: chatMenuActions.copyConversation)
+                }
+            }
 
             if message.role == .assistant { Spacer(minLength: 40) }
         }
+    }
+}
+
+// MARK: - CopyReplyButton
+
+/// Copy affordance shown under each finished assistant answer. Flips to a
+/// checkmark for a moment so the click visibly landed on the clipboard.
+private struct CopyReplyButton: View {
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                copied = false
+            }
+        } label: {
+            Label(
+                copied ? "Copied" : "Copy",
+                systemImage: copied ? "checkmark" : "doc.on.doc"
+            )
+            .font(.caption)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Copy this reply")
     }
 }
 
@@ -1227,77 +1348,27 @@ private struct StreamingDots: View {
 
 // MARK: - MarkdownContent
 
-/// Schemes a chat message may open; anything else (file, ssh, custom
-/// handlers) coming from model output stays inert.
-private let allowedLinkSchemes: Set<String> = ["http", "https", "mailto", "tel"]
-
 private func openChatLink(_ url: URL) {
     guard let scheme = url.scheme?.lowercased(),
-          allowedLinkSchemes.contains(scheme) else { return }
+          MarkdownTextLinkPolicy.schemes.contains(scheme) else { return }
     NSWorkspace.shared.open(url)
 }
 
-/// Renders one message: assistant messages parse as markdown, user
-/// prompts stay verbatim.
+/// Renders one message: assistant messages parse as markdown into a
+/// single NSTextView document (selection spans every paragraph), user
+/// prompts stay verbatim in a plain SwiftUI Text.
 private struct MarkdownContent: View {
     let text: String
     let role: ChatMessage.Role
 
-    private var theme: MarkdownUI.Theme {
-        MarkdownThemeFactory.chatTheme
-    }
-
     var body: some View {
         if role == .assistant {
-            Markdown(text)
-                .markdownTheme(theme)
-                .environment(\.openURL, OpenURLAction { url in
-                    openChatLink(url)
-                    return .handled
-                })
-                .textSelection(.enabled)
+            MarkdownTextHostingView(markdown: text)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(text)
                 .textSelection(.enabled)
         }
-    }
-}
-
-// MARK: - Markdown theme
-
-enum MarkdownThemeFactory {
-    /// Chat-tuned theme derived from the built-in basic theme: smaller
-    /// heading scales and tighter heading margins fit the narrow panel.
-    static var chatTheme: MarkdownUI.Theme {
-        Theme.basic
-            .heading1 { configuration in
-                configuration.label
-                    .markdownMargin(top: .rem(0.6), bottom: .rem(0.3))
-                    .markdownTextStyle {
-                        FontWeight(.semibold)
-                        FontSize(.em(1.35))
-                    }
-            }
-            .heading2 { configuration in
-                configuration.label
-                    .markdownMargin(top: .rem(0.5), bottom: .rem(0.25))
-                    .markdownTextStyle {
-                        FontWeight(.semibold)
-                        FontSize(.em(1.18))
-                    }
-            }
-            .heading3 { configuration in
-                configuration.label
-                    .markdownMargin(top: .rem(0.4), bottom: .rem(0.2))
-                    .markdownTextStyle {
-                        FontWeight(.semibold)
-                        FontSize(.em(1.05))
-                    }
-            }
-            .code {
-                FontFamilyVariant(.monospaced)
-                FontSize(.em(0.9))
-            }
     }
 }
 

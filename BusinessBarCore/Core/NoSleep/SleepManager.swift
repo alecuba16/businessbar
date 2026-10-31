@@ -48,7 +48,20 @@ final class SleepManager {
 
     // MARK: - Lifecycle
 
-    init() {
+    private let workspace: NotificationCenter
+    private let create: (SleepMode) -> (IOReturn, IOPMAssertionID)
+    private let release: (IOPMAssertionID) -> IOReturn
+
+    init(workspace: NotificationCenter = NSWorkspace.shared.notificationCenter,
+         create: @escaping (SleepMode) -> (IOReturn, IOPMAssertionID) = { mode in
+             var id: IOPMAssertionID = 0
+             let result = IOPMAssertionCreateWithDescription(mode.assertionType, "BusinessBar NoSleep" as CFString, "Preventing sleep via BusinessBar" as CFString, "Preventing sleep via BusinessBar" as CFString, nil, 0, nil, &id)
+             return (result, id)
+         },
+         release: @escaping (IOPMAssertionID) -> IOReturn = { IOPMAssertionRelease($0) }) {
+        self.workspace = workspace
+        self.create = create
+        self.release = release
         setupSessionObservers()
     }
 
@@ -76,19 +89,8 @@ final class SleepManager {
     // MARK: - IOKit assertion management
 
     private func createAssertion() {
-        let assertionName    = "BusinessBar NoSleep" as CFString
-        let assertionDetails = "Preventing sleep via BusinessBar" as CFString
-
-        let result = IOPMAssertionCreateWithDescription(
-            mode.assertionType,
-            assertionName,
-            assertionDetails,
-            assertionDetails,
-            nil,
-            0,           // no timeout: assertion lives until IOPMAssertionRelease is called
-            nil,
-            &assertionID
-        )
+        let (result, id) = create(mode)
+        assertionID = id
 
         if result == kIOReturnSuccess {
             isAssertionActive = true
@@ -101,7 +103,7 @@ final class SleepManager {
     private func releaseAssertion() {
         guard assertionID != 0 else { return }
 
-        let result = IOPMAssertionRelease(assertionID)
+        let result = release(assertionID)
         if result == kIOReturnSuccess {
             Self.logger.info("Sleep assertion released (ID: \(self.assertionID))")
         } else {
@@ -114,7 +116,7 @@ final class SleepManager {
     // MARK: - Fast-user-switch session handling
 
     private func setupSessionObservers() {
-        let workspace = NSWorkspace.shared.notificationCenter
+        let workspace = self.workspace
 
         workspace.addObserver(
             self,
@@ -131,7 +133,7 @@ final class SleepManager {
     }
 
     private func removeSessionObservers() {
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        workspace.removeObserver(self)
     }
 
     @objc private func sessionDidResignActive(_ notification: Notification) {

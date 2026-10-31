@@ -7,29 +7,42 @@ import Foundation
 
 @MainActor
 final class GCEventStoreAdapter: EventStoreProtocol {
-    private let auth: GoogleAuth
+    struct Dependencies {
+        var isAuthenticated: () -> Bool
+        var signIn: () async throws -> Void
+        var request: (URL) async throws -> Data
+    }
+    private let dependencies: Dependencies
 
-    init(auth: GoogleAuth) {
-        self.auth = auth
+    convenience init(auth: GoogleAuth) {
+        self.init(dependencies: Dependencies(
+            isAuthenticated: { auth.isAuthenticated },
+            signIn: { try await auth.signIn() },
+            request: { try await auth.performRequest(url: $0) }
+        ))
+    }
+
+    init(dependencies: Dependencies) {
+        self.dependencies = dependencies
     }
 
     // MARK: - EventStoreProtocol
 
     func requestAccess() async throws -> Bool {
-        guard !auth.isAuthenticated else { return true }
-        try await auth.signIn()
-        return auth.isAuthenticated
+        guard !dependencies.isAuthenticated() else { return true }
+        try await dependencies.signIn()
+        return dependencies.isAuthenticated()
     }
 
     func fetchCalendars() async throws -> [MBCalendar] {
-        guard auth.isAuthenticated else { return [] }
+        guard dependencies.isAuthenticated() else { return [] }
         let url = URL(string: "https://www.googleapis.com/calendar/v3/users/me/calendarList")!
-        let data = try await auth.performRequest(url: url)
+        let data = try await dependencies.request(url)
         return try parseCalendarList(data)
     }
 
     func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] {
-        guard auth.isAuthenticated else { return [] }
+        guard dependencies.isAuthenticated() else { return [] }
         var allEvents: [CalendarEvent] = []
         for calendarID in calendars {
             let events = try await fetchEventsForCalendar(calendarID: calendarID, from: startDate, to: endDate)
@@ -60,7 +73,7 @@ final class GCEventStoreAdapter: EventStoreProtocol {
         ]
 
         guard let url = components.url else { return [] }
-        let data = try await auth.performRequest(url: url)
+        let data = try await dependencies.request(url)
 
         // We need the calendar object for each event. Fetch it from the list.
         let calendarObjects = try await fetchCalendars()

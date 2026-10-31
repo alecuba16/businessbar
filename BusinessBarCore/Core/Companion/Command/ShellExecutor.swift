@@ -11,7 +11,8 @@ public final class OutputRingBuffer: @unchecked Sendable {
     private var head = Data()
     private var tail = Data()
     private var total = 0
-    private var lastActivity = Date()
+    private var lastActivity: Date
+    private let now: @Sendable () -> Date
 
     public let headCap: Int
     public let tailCap: Int
@@ -19,16 +20,22 @@ public final class OutputRingBuffer: @unchecked Sendable {
     /// `yes` flood cannot wedge the app.
     public let killCeiling: Int
 
-    public init(headCap: Int = 2_048, tailCap: Int = 30_720, killCeiling: Int = 5_242_880) {
+    public convenience init(headCap: Int = 2_048, tailCap: Int = 30_720, killCeiling: Int = 5_242_880) {
+        self.init(headCap: headCap, tailCap: tailCap, killCeiling: killCeiling, now: { Date() })
+    }
+
+    init(headCap: Int, tailCap: Int, killCeiling: Int, now: @escaping @Sendable () -> Date) {
         self.headCap = headCap
         self.tailCap = tailCap
         self.killCeiling = killCeiling
+        self.now = now
+        self.lastActivity = now()
     }
 
     public func append(_ data: Data) {
         lock.lock()
         total += data.count
-        lastActivity = Date()
+        lastActivity = now()
         if head.count < headCap {
             head.append(data.subdata(in: 0..<min(data.count, headCap - head.count)))
         }
@@ -49,7 +56,7 @@ public final class OutputRingBuffer: @unchecked Sendable {
     public var idleInterval: TimeInterval {
         lock.lock()
         defer { lock.unlock() }
-        return Date().timeIntervalSince(lastActivity)
+        return now().timeIntervalSince(lastActivity)
     }
 
     /// Captured text: head, an elision marker when bytes were dropped, tail.

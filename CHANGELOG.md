@@ -5,6 +5,21 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- Assistant replies render top-level Markdown tables as native rows and columns, with header emphasis, column alignment and wrapped cell text in the same selectable reply document
+- Chat copy affordances: every finished assistant answer gets a Copy button (flips to a checkmark for a moment so the click visibly landed), and right-clicking any message offers Copy Reply plus Copy Conversation, which copies the whole thread with You:/Assistant: speaker prefixes and the in-flight answer included. Native drag selection keeps working per paragraph
+- Editing the last prompt is a visible state now: an orange notice strip sits above the input naming what sending does (runs the prompt again and replaces the replies that followed it), the send arrow tints orange, and a Cancel button drops the edit without resending. Before, pressing Edit silently pasted the prompt into the input with no hint that the thread had been truncated
+
+### Fixed
+- Chat input shows left-gutter arrows only on automatically wrapped continuation rows, not manual line breaks. Paragraph marks stay hidden
+- Markdown emphasis now distinguishes `*italic*`, `**bold**`, and nested styles without leftover markers or missing surrounding text. Inline code keeps its literal asterisks
+- Assistant replies no longer appear blank in the chat scroll view. The native text view now reports its measured height to SwiftUI, so the bubble does not collapse and clip the reply
+- Chat no longer freezes on incomplete markdown while a reply streams. Literal punctuation and unfinished markers now consume input instead of trapping the renderer in a loop on the main thread
+- Text selection in the chat spans whole replies now: assistant answers render through a native text document (one NSTextView per message) instead of the SwiftUI markdown stack, which emitted one Text per markdown block and macOS selection never crosses Text views, so a drag died at every paragraph boundary. Markdown coverage keeps headings, emphasis, strikethrough, inline code, fenced code blocks (monospace, no syntax highlighting), bullet and numbered lists, quotes, and links with the same scheme gate (http, https, mailto, tel). Remote inline images render as [image: alt] placeholders and the raw markdown stays one Copy button away
+- The no-tool-handler and round-limit errors name the requested tools, so a failed request points at the actual culprit instead of a generic refusal
+- run_command is no longer advertised to local MLX models: the panel refuses to execute those (mlx-lsp echoes arguments back), so the model kept calling a tool that could only fail with the no-handler error
+
 ## [1.5.0] - 2026-10-29
 ### Added
 - Insert after selection (new line): a fourth template action that starts the rewrite on the line below the selection instead of gluing onto its last line. A selection that already ends in a newline is not doubled, so no blank line appears. Falls back to the overlay like the other direct-write actions when in-place insertion is not possible

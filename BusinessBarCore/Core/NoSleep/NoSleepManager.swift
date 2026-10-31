@@ -22,16 +22,24 @@ public final class NoSleepManager: ObservableObject {
     public var timeRemaining: TimeInterval {
         guard isActive else { return 0 }
         if endTime == .distantFuture { return .infinity }
-        return max(0, endTime.timeIntervalSinceNow)
+        return max(0, endTime.timeIntervalSince(now()))
     }
 
-    private let sleepManager        = SleepManager()
-    private let activitySimulator   = ActivitySimulator()
+    private let defaults: UserDefaults
+    private let notifications: NotificationCenter
+    private let workspace: NotificationCenter
+    private let trust: () -> Bool
+    private let now: () -> Date
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Timer
+    private let activateSleep: (SleepMode) -> Void
+    private let deactivateSleep: () -> Void
+    private let startActivity: () -> Void
+    private let stopActivity: () -> Void
     private var durationTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
-    private var lastFeatureState: Bool = UserDefaults.standard.bool(forKey: Constants.Defaults.featureNoSleep)
+    private var lastFeatureState: Bool
     private var isFeatureEnabled: Bool {
-        if let value = UserDefaults.standard.object(forKey: Constants.Defaults.featureNoSleep) as? Bool {
+        if let value = defaults.object(forKey: Constants.Defaults.featureNoSleep) as? Bool {
             return value
         }
         return true
@@ -39,7 +47,33 @@ public final class NoSleepManager: ObservableObject {
 
     // MARK: - Lifecycle
 
-    public init() {
+    public init(defaults: UserDefaults = .standard,
+                notifications: NotificationCenter = .default,
+                workspace: NotificationCenter = NSWorkspace.shared.notificationCenter,
+                trust: @escaping () -> Bool = { AXIsProcessTrusted() },
+                now: @escaping () -> Date = Date.init,
+                schedule: @escaping (TimeInterval, @escaping () -> Void) -> Timer = { interval, action in
+                    Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { _ in action() }
+                },
+                activateSleep: ((SleepMode) -> Void)? = nil,
+                deactivateSleep: (() -> Void)? = nil,
+                startActivity: (() -> Void)? = nil,
+                stopActivity: (() -> Void)? = nil) {
+        precondition((activateSleep == nil) == (deactivateSleep == nil), "activateSleep and deactivateSleep must be supplied together")
+        precondition((startActivity == nil) == (stopActivity == nil), "startActivity and stopActivity must be supplied together")
+        self.defaults = defaults
+        self.notifications = notifications
+        self.workspace = workspace
+        self.trust = trust
+        self.now = now
+        self.schedule = schedule
+        let sleep = activateSleep == nil || deactivateSleep == nil ? SleepManager(workspace: workspace) : nil
+        self.activateSleep = activateSleep ?? { sleep?.activate(mode: $0) }
+        self.deactivateSleep = deactivateSleep ?? { sleep?.deactivate() }
+        let activity = startActivity == nil || stopActivity == nil ? ActivitySimulator(defaults: defaults) : nil
+        self.startActivity = startActivity ?? { activity?.startSimulation() }
+        self.stopActivity = stopActivity ?? { activity?.stopSimulation() }
+        self.lastFeatureState = defaults.object(forKey: Constants.Defaults.featureNoSleep) as? Bool ?? true
         loadSettings()
         setupSleepObserver()
         setupSimulateActivityObserver()
@@ -47,10 +81,12 @@ public final class NoSleepManager: ObservableObject {
     }
 
     deinit {
-        // Schedule cleanup on the main actor; we can't call @MainActor methods synchronously from deinit
-        let sm = sleepManager
+        durationTimer?.invalidate()
+        let cleanup = deactivateSleep
+        let stop = stopActivity
         Task { @MainActor in
-            sm.deactivate()
+            cleanup()
+            stop()
         }
     }
 
@@ -65,11 +101,12 @@ public final class NoSleepManager: ObservableObject {
             self.mode = mode
         }
 
+        stopTimers()
         isActive = true
-        sleepManager.activate(mode: self.mode)
+        activateSleep(self.mode)
 
         if let duration {
-            endTime = Date().addingTimeInterval(duration)
+            endTime = now().addingTimeInterval(duration)
             startDurationTimer(duration: duration)
             Self.logger.info("Activated — mode: \(self.mode.rawValue), duration: \(Int(duration))s")
         } else {
@@ -87,8 +124,8 @@ public final class NoSleepManager: ObservableObject {
         isActive = false
         endTime = .distantPast
         stopTimers()
-        sleepManager.deactivate()
-        activitySimulator.stopSimulation()
+        deactivateSleep()
+        stopActivity()
     }
 
     public func toggle() {
@@ -100,7 +137,7 @@ public final class NoSleepManager: ObservableObject {
             deactivate()
         } else {
             // Use the configured default duration. 0 = infinite (nil).
-            let defaultMinutes = UserDefaults.standard.integer(forKey: Constants.Defaults.noSleepDefaultDuration)
+            let defaultMinutes = defaults.integer(forKey: Constants.Defaults.noSleepDefaultDuration)
             let duration: TimeInterval? = defaultMinutes > 0 ? TimeInterval(defaultMinutes) * 60 : nil
             activate(duration: duration, mode: mode)
         }
@@ -110,7 +147,7 @@ public final class NoSleepManager: ObservableObject {
 
     private func startDurationTimer(duration: TimeInterval) {
         durationTimer?.invalidate()
-        durationTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
+        durationTimer = schedule(duration) { [weak self] in
             Task { @MainActor [weak self] in
                 self?.deactivate()
             }
@@ -128,7 +165,7 @@ public final class NoSleepManager: ObservableObject {
     /// Uses `Task { @MainActor in }` so the call properly hops to this actor; without it
     /// the Combine sink closure is non-isolated and the @MainActor method is silently dropped.
     private func setupSimulateActivityObserver() {
-        NotificationCenter.default
+        notifications
             .publisher(for: .noSleepSimulateActivityChanged)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -139,7 +176,7 @@ public final class NoSleepManager: ObservableObject {
     }
 
     private func setupFeatureObserver() {
-        NotificationCenter.default
+        notifications
             .publisher(for: .businessBarPreferencesDidChange)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -160,30 +197,30 @@ public final class NoSleepManager: ObservableObject {
     /// Internal so `NoSleepTab` can call it directly via onChange (most reliable path).
     public func applySimulateActivityPreference() {
         guard isFeatureEnabled else {
-            activitySimulator.stopSimulation()
+            stopActivity()
             return
         }
-        let shouldSimulate = UserDefaults.standard.bool(forKey: Constants.Defaults.noSleepSimulateActivity)
+        let shouldSimulate = defaults.bool(forKey: Constants.Defaults.noSleepSimulateActivity)
         Self.logger.info("applySimulateActivityPreference — isActive: \(self.isActive), shouldSimulate: \(shouldSimulate)")
         guard isActive else { return }
         if shouldSimulate {
-            guard AXIsProcessTrusted() else {
+            guard trust() else {
                 Self.logger.warning("simulate activity skipped — accessibility permission missing")
-                activitySimulator.stopSimulation()
+                stopActivity()
                 return
             }
             // Always stop first so a changed check interval takes effect immediately.
-            activitySimulator.stopSimulation()
-            activitySimulator.startSimulation()
+            stopActivity()
+            startActivity()
         } else {
-            activitySimulator.stopSimulation()
+            stopActivity()
         }
     }
 
     // MARK: - Sleep detection
 
     private func setupSleepObserver() {
-        NSWorkspace.shared.notificationCenter
+        workspace
             .publisher(for: NSWorkspace.willSleepNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -192,8 +229,8 @@ public final class NoSleepManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    private func handleSystemWillSleep() {
-        let shouldDeactivate = UserDefaults.standard.bool(
+    func handleSystemWillSleep() {
+        let shouldDeactivate = defaults.bool(
             forKey: Constants.Defaults.noSleepDeactivateOnSleep
         )
         guard shouldDeactivate && isActive else { return }
@@ -204,7 +241,7 @@ public final class NoSleepManager: ObservableObject {
     // MARK: - Persistence
 
     private func loadSettings() {
-        if let modeString = UserDefaults.standard.string(forKey: Constants.Defaults.noSleepSleepMode),
+        if let modeString = defaults.string(forKey: Constants.Defaults.noSleepSleepMode),
            let savedMode = SleepMode(rawValue: modeString) {
             mode = savedMode
         }

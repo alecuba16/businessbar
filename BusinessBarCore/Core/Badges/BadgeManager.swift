@@ -4,6 +4,14 @@ import Combine
 import Foundation
 import os.log
 
+public protocol BadgeMonitoring: AnyObject {
+    var onBadgeUpdate: ((String, Int) -> Void)? { get set }
+    func startMonitoring(apps: [MonitoredApp])
+    func stopMonitoring()
+    func updateAppElements(for apps: [MonitoredApp])
+    func restartPollTimer()
+}
+
 @MainActor
 public final class BadgeManager: ObservableObject {
     @Published public private(set) var monitoredApps: [MonitoredApp] = []
@@ -13,21 +21,42 @@ public final class BadgeManager: ObservableObject {
 
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "Badge")
 
-    private let badgeMonitor = BadgeMonitor()
+    private let badgeMonitor: any BadgeMonitoring
+    private let defaults: UserDefaults
+    private let notifications: NotificationCenter
+    private let trust: () -> Bool
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Timer
+    private let requestPermission: () -> Void
+    private let openSettings: (URL) -> Void
     private var cancellables = Set<AnyCancellable>()
     /// Timer that polls AX trust status until permission is granted, then
     /// auto-starts monitoring and stops itself.
     private var axPermissionTimer: Timer?
     private var lastFeatureState: Bool
 
-    public init() {
-        self.lastFeatureState = Self.badgeFeatureEnabled()
+    public init(defaults: UserDefaults = .standard,
+                notifications: NotificationCenter = .default,
+                trust: @escaping () -> Bool = { AXIsProcessTrusted() },
+                monitor: (any BadgeMonitoring)? = nil,
+                schedule: @escaping (TimeInterval, @escaping () -> Void) -> Timer = { interval, action in
+                    Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in action() }
+                },
+                requestPermission: (() -> Void)? = nil,
+                openSettings: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
+        self.defaults = defaults
+        self.notifications = notifications
+        self.trust = trust
+        self.badgeMonitor = monitor ?? BadgeMonitor(defaults: defaults, trust: trust)
+        self.schedule = schedule
+        self.requestPermission = requestPermission ?? { BadgeMonitor.requestAccessibilityPermission() }
+        self.openSettings = openSettings
+        self.lastFeatureState = defaults.object(forKey: Constants.Defaults.featureBadges) as? Bool ?? true
         loadMonitoredApps()
         setupBadgeMonitor()
         setupPreferencesObserver()
-        isAccessibilityGranted = AXIsProcessTrusted()
+        isAccessibilityGranted = trust()
         Self.logger.info("init — AX trusted: \(self.isAccessibilityGranted), loaded \(self.monitoredApps.count) app(s): \(self.monitoredApps.map { $0.bundleIdentifier })")
-        guard Self.badgeFeatureEnabled() else {
+        guard badgeFeatureEnabled() else {
             badgeMonitor.stopMonitoring()
             return
         }
@@ -37,6 +66,11 @@ public final class BadgeManager: ObservableObject {
             Self.logger.info("init — AX permission not granted, starting permission polling")
             startPermissionPolling()
         }
+    }
+
+    deinit {
+        axPermissionTimer?.invalidate()
+        badgeMonitor.stopMonitoring()
     }
 
     // MARK: - Public API
@@ -49,7 +83,7 @@ public final class BadgeManager: ObservableObject {
         Self.logger.info("addApp — \(app.bundleIdentifier) (\(app.displayName))")
         monitoredApps.append(app)
         saveMonitoredApps()
-        if Self.badgeFeatureEnabled() {
+        if badgeFeatureEnabled() {
             updateMonitoring()
         }
     }
@@ -59,7 +93,7 @@ public final class BadgeManager: ObservableObject {
         monitoredApps.removeAll { $0.bundleIdentifier == bundleIdentifier }
         badges.removeValue(forKey: bundleIdentifier)
         saveMonitoredApps()
-        if Self.badgeFeatureEnabled() {
+        if badgeFeatureEnabled() {
             updateMonitoring()
         }
     }
@@ -67,14 +101,14 @@ public final class BadgeManager: ObservableObject {
     /// Open System Settings to the Accessibility privacy pane.
     public func openAccessibilitySettings() {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-        NSWorkspace.shared.open(url)
+        openSettings(url)
     }
 
     /// Prompt the user for AX access (shows the system dialog on older macOS;
     /// on macOS 14+ opens System Settings automatically).
     public func requestAccessibilityPermission() {
-        BadgeMonitor.requestAccessibilityPermission()
-        if Self.badgeFeatureEnabled() {
+        requestPermission()
+        if badgeFeatureEnabled() {
             startPermissionPolling()   // begin checking in case they grant it
         }
     }
@@ -92,8 +126,8 @@ public final class BadgeManager: ObservableObject {
     private func startPermissionPolling() {
         guard axPermissionTimer == nil else { return }
         // Don't waste CPU polling for a permission that won't be used.
-        guard Self.badgeFeatureEnabled() else { return }
-        axPermissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        guard badgeFeatureEnabled() else { return }
+        axPermissionTimer = schedule(2.0) { [weak self] in
             Task { @MainActor [weak self] in
                 self?.checkAccessibilityPermission()
             }
@@ -105,11 +139,11 @@ public final class BadgeManager: ObservableObject {
         axPermissionTimer = nil
     }
 
-    private func checkAccessibilityPermission() {
-        let trusted = AXIsProcessTrusted()
+    func checkAccessibilityPermission() {
+        let trusted = trust()
         let wasGranted = isAccessibilityGranted
         isAccessibilityGranted = trusted
-        guard Self.badgeFeatureEnabled() else {
+        guard badgeFeatureEnabled() else {
             // Feature was disabled while we were polling — stop the timer
             // so we don't keep waking up every 2 s for nothing.
             stopPermissionPolling()
@@ -132,7 +166,7 @@ public final class BadgeManager: ObservableObject {
         }
     }
 
-    private func updateBadge(for bundleID: String, count: Int) {
+    func updateBadge(for bundleID: String, count: Int) {
         let previous = badges[bundleID] ?? 0
         if count != previous {
             Self.logger.debug("badge changed — \(bundleID): \(previous) → \(count)")
@@ -163,11 +197,11 @@ public final class BadgeManager: ObservableObject {
     // MARK: - Preferences observer
 
     private func setupPreferencesObserver() {
-        NotificationCenter.default.publisher(for: .businessBarPreferencesDidChange)
+        notifications.publisher(for: .businessBarPreferencesDidChange)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    let enabled = Self.badgeFeatureEnabled()
+                    let enabled = self.badgeFeatureEnabled()
                     if enabled != self.lastFeatureState {
                         self.lastFeatureState = enabled
                     }
@@ -190,8 +224,8 @@ public final class BadgeManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    nonisolated private static func badgeFeatureEnabled() -> Bool {
-        if let value = UserDefaults.standard.object(forKey: Constants.Defaults.featureBadges) as? Bool {
+    private func badgeFeatureEnabled() -> Bool {
+        if let value = defaults.object(forKey: Constants.Defaults.featureBadges) as? Bool {
             return value
         }
         return true
@@ -200,7 +234,7 @@ public final class BadgeManager: ObservableObject {
     // MARK: - Persistence
 
     private func loadMonitoredApps() {
-        guard let data = UserDefaults.standard.data(forKey: Constants.Defaults.monitoredApps),
+        guard let data = defaults.data(forKey: Constants.Defaults.monitoredApps),
               let apps = try? JSONDecoder().decode([MonitoredApp].self, from: data) else {
             return
         }
@@ -209,6 +243,6 @@ public final class BadgeManager: ObservableObject {
 
     private func saveMonitoredApps() {
         guard let data = try? JSONEncoder().encode(monitoredApps) else { return }
-        UserDefaults.standard.set(data, forKey: Constants.Defaults.monitoredApps)
+        defaults.set(data, forKey: Constants.Defaults.monitoredApps)
     }
 }

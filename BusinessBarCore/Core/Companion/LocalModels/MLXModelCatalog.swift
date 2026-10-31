@@ -137,8 +137,8 @@ public enum MLXModelCatalog {
         ),
     ]
 
-    public static func entry(id: String) -> Entry? {
-        entries.first { $0.id == id } ?? customEntries.first { $0.id == id }
+    public static func entry(id: String, defaults: UserDefaults = .standard) -> Entry? {
+        entries.first { $0.id == id } ?? customEntries(defaults: defaults).first { $0.id == id }
     }
 
     // MARK: Custom entries
@@ -147,16 +147,20 @@ public enum MLXModelCatalog {
     /// Stored in UserDefaults as a JSON array; sizes and kind come from
     /// the repo check at add time.
     public static var customEntries: [Entry] {
-        get {
-            guard let data = UserDefaults.standard.data(forKey: customEntriesKey),
-                  let decoded = try? JSONDecoder().decode([Entry].self, from: data)
-            else { return [] }
-            return decoded
-        }
-        set {
-            guard let data = try? JSONEncoder().encode(newValue) else { return }
-            UserDefaults.standard.set(data, forKey: customEntriesKey)
-        }
+        get { customEntries(defaults: .standard) }
+        set { setCustomEntries(newValue, defaults: .standard) }
+    }
+
+    public static func customEntries(defaults: UserDefaults) -> [Entry] {
+        guard let data = defaults.data(forKey: customEntriesKey),
+              let decoded = try? JSONDecoder().decode([Entry].self, from: data)
+        else { return [] }
+        return decoded
+    }
+
+    public static func setCustomEntries(_ entries: [Entry], defaults: UserDefaults) {
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        defaults.set(data, forKey: customEntriesKey)
     }
 
     private static let customEntriesKey = "companionMLXCustomEntries"
@@ -164,21 +168,21 @@ public enum MLXModelCatalog {
     /// Adds a custom entry unless the repo id already exists. Returns the
     /// final entry list.
     @discardableResult
-    public static func addCustomEntry(_ entry: Entry) -> [Entry] {
-        var current = customEntries
+    public static func addCustomEntry(_ entry: Entry, defaults: UserDefaults = .standard) -> [Entry] {
+        var current = customEntries(defaults: defaults)
         guard !current.contains(where: { $0.id == entry.id }) else { return current }
         current.append(entry)
-        customEntries = current
+        setCustomEntries(current, defaults: defaults)
         return current
     }
 
     /// Removes a custom entry by repo id. Curated entries cannot be
     /// removed through this path. Also clears the active model when it
     /// pointed at the removed repo.
-    public static func removeCustomEntry(id: String) {
-        customEntries = customEntries.filter { $0.id != id }
-        if MLXServerConfig.activeModelID() == id {
-            MLXServerConfig.setActiveModelID(nil)
+    public static func removeCustomEntry(id: String, defaults: UserDefaults = .standard) {
+        setCustomEntries(customEntries(defaults: defaults).filter { $0.id != id }, defaults: defaults)
+        if MLXServerConfig.activeModelID(defaults: defaults) == id {
+            MLXServerConfig.setActiveModelID(nil, defaults: defaults)
         }
     }
 
@@ -186,18 +190,18 @@ public enum MLXModelCatalog {
     /// discovered from the downloaded snapshot (or the Check flow for
     /// custom repos) and kept in the store, so a template fix upstream
     /// reaches users without an app update.
-    public static func reasoningCapability(id modelID: String) -> MLXReasoningCapability {
-        if let entry = entry(id: modelID), let reasoning = entry.reasoning {
+    public static func reasoningCapability(id modelID: String, defaults: UserDefaults = .standard, home: String = NSHomeDirectory()) -> MLXReasoningCapability {
+        if let entry = entry(id: modelID, defaults: defaults), let reasoning = entry.reasoning {
             return reasoning
         }
-        if let override = reasoningOverrides[modelID] {
+        if let override = reasoningOverrides(defaults: defaults)[modelID] {
             return override
         }
-        if isDownloaded(modelID: modelID) {
+        if isDownloaded(modelID: modelID, home: home) {
             // Probe once, then remember: rows and pickers call this every
             // render, the snapshot read must not run each time.
-            let capability = MLXReasoningInspector.capabilityFromSnapshot(modelID: modelID)
-            setReasoningCapability(id: modelID, capability)
+            let capability = MLXReasoningInspector.capabilityFromSnapshot(modelID: modelID, home: home)
+            setReasoningCapability(id: modelID, capability, defaults: defaults)
             return capability
         }
         return .none
@@ -208,10 +212,11 @@ public enum MLXModelCatalog {
     /// compile-time and cannot be edited in place).
     public static func setReasoningCapability(
         id modelID: String,
-        _ capability: MLXReasoningCapability
+        _ capability: MLXReasoningCapability,
+        defaults: UserDefaults = .standard
     ) {
-        if let index = customEntries.firstIndex(where: { $0.id == modelID }) {
-            var updated = customEntries
+        if let index = customEntries(defaults: defaults).firstIndex(where: { $0.id == modelID }) {
+            var updated = customEntries(defaults: defaults)
             let old = updated[index]
             updated[index] = Entry(
                 id: old.id,
@@ -221,28 +226,23 @@ public enum MLXModelCatalog {
                 kind: old.kind,
                 reasoning: capability
             )
-            customEntries = updated
+            setCustomEntries(updated, defaults: defaults)
         } else {
-            var overrides = reasoningOverrides
+            var overrides = reasoningOverrides(defaults: defaults)
             overrides[modelID] = capability
-            reasoningOverrides = overrides
+            if let data = try? JSONEncoder().encode(overrides) {
+                defaults.set(data, forKey: reasoningOverridesKey)
+            }
         }
     }
 
     private static let reasoningOverridesKey = "companionMLXReasoningOverrides"
 
-    private static var reasoningOverrides: [String: MLXReasoningCapability] {
-        get {
-            guard let data = UserDefaults.standard.data(forKey: reasoningOverridesKey),
-                  let decoded = try? JSONDecoder()
-                      .decode([String: MLXReasoningCapability].self, from: data)
-            else { return [:] }
-            return decoded
-        }
-        set {
-            guard let data = try? JSONEncoder().encode(newValue) else { return }
-            UserDefaults.standard.set(data, forKey: reasoningOverridesKey)
-        }
+    private static func reasoningOverrides(defaults: UserDefaults) -> [String: MLXReasoningCapability] {
+        guard let data = defaults.data(forKey: reasoningOverridesKey),
+              let decoded = try? JSONDecoder().decode([String: MLXReasoningCapability].self, from: data)
+        else { return [:] }
+        return decoded
     }
 
     /// True when the repo id belongs to the curated list.

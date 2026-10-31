@@ -73,9 +73,30 @@ final class CommandToolController: ObservableObject {
     /// self: optional stored properties default to nil before phase 1 ends.
     private var registry: BackgroundCommandRegistry!
 
-    init() {
+    struct Presentation {
+        var chooseWorkspace: () -> URL?
+        var notify: (UNNotificationRequest) -> Void
+
+        static var live: Presentation {
+            Presentation(chooseWorkspace: {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                panel.canCreateDirectories = false
+                panel.message = "Commands will only run inside this folder."
+                panel.prompt = "Choose Workspace"
+                guard panel.runModal() == .OK else { return nil }
+                return panel.url
+            }, notify: { UNUserNotificationCenter.current().add($0) })
+        }
+    }
+
+    private let presentation: Presentation
+
+    init(registry: BackgroundCommandRegistry? = nil, presentation: Presentation? = nil) {
+        self.presentation = presentation ?? .live
         sessionPermissionMode = CompanionConfigService.commandPermissionMode()
-        registry = BackgroundCommandRegistry(
+        self.registry = registry ?? BackgroundCommandRegistry(
             onExit: { [weak self] result in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -457,13 +478,7 @@ final class CommandToolController: ObservableObject {
     // MARK: - Workspace picker
 
     func pickWorkspace() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = false
-        panel.message = "Commands will only run inside this folder."
-        panel.prompt = "Choose Workspace"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let url = presentation.chooseWorkspace() else { return }
         workspaceRoot = url.path
     }
 
@@ -471,13 +486,15 @@ final class CommandToolController: ObservableObject {
 
     /// Registers the command-completion category. Call once when the tool
     /// is first enabled, alongside the authorization request.
-    static func registerNotificationCategory() {
+    static func registerNotificationCategory(
+        register: (Set<UNNotificationCategory>) -> Void = { UNUserNotificationCenter.current().setNotificationCategories($0) }
+    ) {
         let category = UNNotificationCategory(
             identifier: "companion.backgroundCommand",
             actions: [],
             intentIdentifiers: []
         )
-        UNUserNotificationCenter.current().setNotificationCategories([category])
+        register([category])
     }
 
     func postCompletionNotification(command: String, exitCode: Int32) {
@@ -491,6 +508,6 @@ final class CommandToolController: ObservableObject {
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request)
+        presentation.notify(request)
     }
 }

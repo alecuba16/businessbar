@@ -11,12 +11,15 @@ jobs:
     # xcode-27 image: macOS 27 + Xcode 27 (Swift 6.4), matching the toolchain
     # this repo targets. The plugin helper is a no-op under full Xcode.
     runs-on: xcode-27
-
+    timeout-minutes: 30
     steps:
     - name: Checkout
       uses: actions/checkout@v4
       with:
         fetch-depth: 0  # full history for git describe in snapshot versioning
+
+    - name: Set coverage output directory
+      run: echo "COVERAGE_OUTPUT=$RUNNER_TEMP/businessbar-coverage-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
 
     - name: Select Xcode
       uses: maxim-lobanov/setup-xcode@v1
@@ -26,16 +29,36 @@ jobs:
     - name: Cache SPM packages
       uses: actions/cache@v4
       with:
-        path: .build
-        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        path: |
+          .build/artifacts
+          .build/checkouts
+          .build/repositories
+        key: ${{ runner.os }}-spm-inputs-${{ hashFiles('**/Package.resolved') }}
         restore-keys: |
-          ${{ runner.os }}-spm-
+          ${{ runner.os }}-spm-inputs-
 
     - name: Resolve dependencies
       run: swift package resolve
 
-    - name: Run tests
-      run: swift test
+    - name: Test full application and enforce coverage
+      run: bash scripts/test-coverage.sh --with-xctest --output-dir "$COVERAGE_OUTPUT"
+
+    - name: Upload coverage evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: whole-application-coverage
+        path: |
+          ${{ env.COVERAGE_OUTPUT }}/summary.json
+          ${{ env.COVERAGE_OUTPUT }}/coverage.json
+          ${{ env.COVERAGE_OUTPUT }}/coverage.lcov
+          ${{ env.COVERAGE_OUTPUT }}/profiles.json
+          ${{ env.COVERAGE_OUTPUT }}/run/manifest.json
+          ${{ env.COVERAGE_OUTPUT }}/compiler-lines.lcov
+          ${{ env.COVERAGE_OUTPUT }}/evidence/
+          ${{ env.COVERAGE_OUTPUT }}/run/run.*/logs/
+        if-no-files-found: warn
+        retention-days: 7
 
     - name: Build (release)
       # Plugin helper is a no-op under full Xcode (CI has it), but keeps

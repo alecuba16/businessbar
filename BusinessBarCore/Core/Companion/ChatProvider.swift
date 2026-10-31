@@ -248,10 +248,14 @@ public final class ChatProviderStore: @unchecked Sendable {
 
     /// Replaces the stored set.
     public func save(_ providers: [ChatProvider]) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         if let data = try? JSONEncoder().encode(providers) {
             defaults.set(data, forKey: key)
         }
+        lock.unlock()
+        // Observers re-read through load(), which takes the same lock, so
+        // the notification must leave the critical section first: posting
+        // under the lock deadlocks any same-thread subscriber.
         NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
     }
 
