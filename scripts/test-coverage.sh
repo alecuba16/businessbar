@@ -168,4 +168,4 @@ python3 scripts/check-coverage.py \
     --binary "$(cat "$output/app-binary.txt")" \
     --profile "$output/merged.profdata" \
     --run-manifest "$output/run/manifest.json" \
-    --output-dir "$output" "${gate_flags[@]}"
+    --output-dir "$output" ${gate_flags[@]+"${gate_flags[@]}"}
