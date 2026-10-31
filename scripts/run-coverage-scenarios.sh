@@ -248,6 +248,23 @@ if [[ "$isolation_only" != yes ]]; then
         (( ${#scenarios[@]} > 0 )) || fail 'no coverage scenario sources found'
         compile_binary scenarios -parse-as-library "$runner" "${scenarios[@]}"
         run_binary scenarios
+        # Suite-loss guard. Measured failure mode (run12, run13, reproduced
+        # standalone): the scenarios process can exit 0 mid-suite with no
+        # FAIL line (the async main job stops resuming and the Swift
+        # async-main drain queue calls exit(0)). Without this guard every
+        # remaining suite's coverage silently disappears while the run
+        # still reports success. The three markers below are printed only
+        # after the corresponding suite completed; any mid-suite death
+        # removes at least one of them.
+        scenarios_log="$run_dir/logs/scenarios-run.log"
+        grep -q '^PASS: core behavior scenarios$' "$scenarios_log" \
+            || fail 'scenarios process lost the core suite (silent mid-suite exit; see scenarios-run.log)'
+        if [[ "${BUSINESSBAR_COVERAGE_SUITE:-all}" == all ]]; then
+            grep -q '^PASS: app behavior scenarios$' "$scenarios_log" \
+                || fail 'scenarios process lost the app suite (silent mid-suite exit; see scenarios-run.log)'
+        fi
+        grep -qE '^PASS: [0-9]+ coverage scenario checks$' "$scenarios_log" \
+            || fail 'scenarios process exited before the final runner marker (silent mid-suite exit; see scenarios-run.log)'
     fi
     if [[ "$selection" != scenarios ]]; then
         compile_binary markdown -D BUSINESSBAR_COVERAGE_NATIVE "$runner" "$repo_root/Tests/MarkdownRendering/main.swift"
