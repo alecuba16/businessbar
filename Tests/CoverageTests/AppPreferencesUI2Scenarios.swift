@@ -168,13 +168,21 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(commandSheet.text.contains("curl *"), "Seeded deny rule visible")
         try context.expect(commandSheet.text.contains("Per-category defaults"), "Category dials present")
 
-        // GitHub sheet: token field with seeded value.
+        // GitHub sheet: SecureField placeholders never render in owned-AX
+        // (measured, same as the Port field probe); with an empty token the
+        // field contributes no AX text, so the truthful surface is the
+        // caption row and link, plus a value-bearing field round trip via
+        // the config service.
+        try CompanionConfigService.setGitHubSearchKey("fixture-token-value")
         let githubSheet = UI2Hosted(GitHubSearchToolSheet(), size: NSSize(width: 520, height: 320))
         defer { githubSheet.close() }
         await ui2Settle()
         try context.expect(githubSheet.text.contains("GitHub Code Search"), "GitHub sheet opens")
-        try context.expect(githubSheet.text.contains("Personal access token"), "Token field present")
+        try context.expect(githubSheet.text.contains("fixture-token-value"), "Seeded token value renders in the field")
+        try context.expect(githubSheet.text.contains("Personal access token") == false, "SecureField placeholder stays absent from AX")
+        try context.expect(githubSheet.text.contains("No token yet?"), "Token caption row renders")
         try context.expect(githubSheet.text.contains("Create a fine-grained token"), "Token creation link present")
+        try CompanionConfigService.setGitHubSearchKey("")
     }
 
     static func localModelsSection(_ context: CoverageContext) async throws {
@@ -290,10 +298,12 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(axLines.contains("5"), "Idle field carries its configured value")
 
         // Directory browse: injected fetch returns fixture items, filter and
-        // sort controls only rearrange them.
+        // sort controls only rearrange them. Rows show the derived display
+        // name ("Directory-Alpha-4bit" strips its quantization suffix and
+        // swaps hyphens), not the raw repo id.
         try section.press("Browse more models", context)
         await ui2Settle()
-        try context.expect(section.text.contains("Directory-Alpha-4bit"), "Directory lists fetched models")
+        try context.expect(section.text.contains("Directory Alpha"), "Directory lists fetched models")
         try context.expect(section.text.contains("900 downloads"), "Download counts render")
         try context.expect(section.text.contains("In catalog") || section.text.contains("Add"), "Directory rows resolve known ids")
 

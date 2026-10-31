@@ -227,8 +227,16 @@ enum AppPreferencesUI1Scenarios {
         defaults.set(false, forKey: Constants.Defaults.loggingEnabled)
         await settle()
         try context.expect(tab.text.contains("None"), "Disabled logging shows no energy impact")
+        // energyImpactLabel guards on loggingEnabled before the level, so
+        // the level-driven labels need logging back on; with it on, debug
+        // reads High and warning reads Very Low through the same row.
+        defaults.set(true, forKey: Constants.Defaults.loggingEnabled)
         defaults.set(LogLevel.debug.rawValue, forKey: Constants.Defaults.logLevelRaw)
         await settle()
         try context.expect(tab.text.contains("High"), "Debug level shows the high energy label")
+        try context.expect(tab.text.contains("None") == false, "Enabled logging drops the None label")
+        defaults.set(LogLevel.warning.rawValue, forKey: Constants.Defaults.logLevelRaw)
+        await settle()
+        try context.expect(tab.text.contains("Very Low"), "Warning level shows the very low energy label")
     }
 }

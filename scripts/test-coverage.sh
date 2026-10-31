@@ -104,7 +104,7 @@ trap preserve_evidence EXIT
 
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-coverage-gate.py
 export BUSINESSBAR_COVERAGE_SUITE=all
-bash scripts/run-coverage-scenarios.sh --output-dir "$output/run" "${runner_flags[@]}"
+bash scripts/run-coverage-scenarios.sh --output-dir "$output/run" ${runner_flags[@]+"${runner_flags[@]}"}
 
 if $with_xctest; then
     mkdir -p "$output/xctest/home" "$output/xctest/tmp" "$output/xctest/profiles"

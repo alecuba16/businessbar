@@ -652,7 +652,10 @@ enum AppViewScenarios {
         deniedDefaults.set(false, forKey: Constants.Defaults.featureBadges)
         await settle()
         try context.expect(deniedHost.control("Add App")?.isAccessibilityEnabled() == false, "Disabled badge feature disables Add App")
-        try context.equal(monitor.starts, 0, "No monitoring started from preferences fixtures")
+        // The granted manager started monitoring once at init (feature on,
+        // trusted); the denied manager polls permission instead, and the
+        // feature-off flip only stops, so the whole scenario lands on one.
+        try context.equal(monitor.starts, 1, "Only the granted manager starts monitoring")
     }
 
     private static func makeEvent(id: String, title: String, location: String?, url: URL?) -> CalendarEvent {

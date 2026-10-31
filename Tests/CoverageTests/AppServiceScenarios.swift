@@ -752,14 +752,18 @@ private extension AppServiceScenarios {
             delegate.showPreferences(initialTab: .general)
             delegate.showPreferences()
             try context.equal(effects.preferencesCreations, 2, "Failed window can retry, successful window retained")
+            // initializeManagers reads the stored provider from the
+            // process-standard suite (not the injected fixture defaults), so
+            // the fallback branch needs google seeded in standard; the
+            // private rewrite write lands in the injected defaults. The
+            // static GoogleAuthConfig.isConfigured is false in this harness,
+            // so the provider itself is EventKit either way, and the injected
+            // closure only gates the stored-key rewrite.
+            let standard = UserDefaults.standard
+            let previousStandardProvider = standard.string(forKey: Constants.Defaults.calendarProvider)
+            defer { standard.set(previousStandardProvider, forKey: Constants.Defaults.calendarProvider) }
+            standard.set(CalendarProvider.google.rawValue, forKey: Constants.Defaults.calendarProvider)
             delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
-            // GoogleAuthConfig.isConfigured is a process-static over
-            // CredentialLoader's cached bundle lookup, so the injected
-            // googleConfigured() closure cannot flip the provider branch
-            // itself; it only gates the private fallback write. Without
-            // bundled credentials both fixtures take the real EventKit
-            // provider; the stored key survives when the injected closure
-            // claims configuration and is rewritten only when it does not.
             try context.equal(effects.providers.last, .eventKit, "Unconfigured Google credentials fall back to EventKit")
             try context.equal(
                 fixture.defaults.string(forKey: Constants.Defaults.calendarProvider),

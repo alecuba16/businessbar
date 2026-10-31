@@ -104,8 +104,16 @@ enum AppCrashAcpScenarios {
         try await transport.start(onMessage: { _ in }, onClose: {})
         try context.expect(transport.processIdentifier != nil, "Restart stays on the same process")
 
+        // stop() terminates the process but never clears the started flag,
+        // so processIdentifier keeps the dead pid; termination is observed
+        // through the close callback instead.
+        let closedBefore = closed
         await transport.stop()
-        try context.expect(transport.processIdentifier == nil, "Stopped transport reports no pid")
+        try context.expect(transport.processIdentifier != nil, "Stopped transport keeps its terminated pid")
+        for _ in 0..<50 where closed == closedBefore {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try context.expect(closed > closedBefore, "Stop closes the transport")
     }
 
     private final class ReceivedMessages: @unchecked Sendable {

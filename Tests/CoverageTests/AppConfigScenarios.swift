@@ -168,23 +168,26 @@ enum AppConfigScenarios {
         Config.chatProviderStore = localStore
         defer { Config.defaults = previousMlxDefaults }
         try context.expect(Config.upsertLocalMLXProvider() == nil, "No active MLX model yields no provider")
-        let catalog = MLXModelCatalog.entry(id: "mlx-community/Llama-3.2-1B-Instruct-4bit", defaults: localDefaults)
-        try context.expect(catalog != nil, "Fixture catalog resolves a known MLX model")
-        if let entry = catalog {
-            MLXServerConfig.setActiveModelID(entry.id, defaults: localDefaults)
-            guard let first = Config.upsertLocalMLXProvider() else {
-                throw CoverageContext.Failure(description: "Upserting the local MLX provider failed")
-            }
-            try context.equal(first.name, "Local (MLX)", "Upserted provider keeps its display name")
-            try context.expect(first.isLocalMLX == true, "Upserted provider flagged local")
-            try context.equal(first.models.count, 1, "Upserted provider carries its model")
-            guard let updated = Config.upsertLocalMLXProvider() else {
-                throw CoverageContext.Failure(description: "Second upsert failed")
-            }
-            try context.equal(updated.id, first.id, "Repeated upsert preserves provider identity")
-            let stored = localStore.load()
-            try context.expect(stored.contains { $0.kind == .localMLX }, "Local provider persisted through upsert")
+        // upsertLocalMLXProvider reads the active-model id from the
+        // process-standard suite (its MLX calls take no injected defaults);
+        // the fixture id is in the curated catalog, so seeding the single
+        // standard key with snapshot/restore is enough to drive the upsert.
+        let standard = UserDefaults.standard
+        let previousActiveModel = standard.string(forKey: "companionMLXActiveModel")
+        defer { standard.set(previousActiveModel, forKey: "companionMLXActiveModel") }
+        MLXServerConfig.setActiveModelID("mlx-community/Llama-3.2-1B-Instruct-4bit")
+        guard let first = Config.upsertLocalMLXProvider() else {
+            throw CoverageContext.Failure(description: "Upserting the local MLX provider failed")
         }
+        try context.equal(first.name, "Local (MLX)", "Upserted provider keeps its display name")
+        try context.expect(first.isLocalMLX == true, "Upserted provider flagged local")
+        try context.equal(first.models.count, 1, "Upserted provider carries its model")
+        guard let updated = Config.upsertLocalMLXProvider() else {
+            throw CoverageContext.Failure(description: "Second upsert failed")
+        }
+        try context.equal(updated.id, first.id, "Repeated upsert preserves provider identity")
+        let stored = localStore.load()
+        try context.expect(stored.contains { $0.kind == .localMLX }, "Local provider persisted through upsert")
     }
 
     private static func fetchModels(_ context: CoverageContext) async throws {
