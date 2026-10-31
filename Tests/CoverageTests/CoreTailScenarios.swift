@@ -105,15 +105,20 @@ enum CoreTailScenarios {
     }
 
     /// portIsAvailable is the pre-spawn guard; a held listener must read
-    /// false and a fresh ephemeral port must read true.
+    /// false. A bound-but-closed socket leaves its ephemeral port free, so
+    /// the availability check runs on a released port (a still-bound socket
+    /// blocks the guard's own bind, measured in run11).
     private static func mlxPortProbe(_ c: CoverageContext) throws {
         let held = try ListenerSocket()
         defer { held.close() }
         try c.expect(MLXEnvironment.portIsAvailable(held.port) == false, "Held port reads unavailable")
 
+        // Borrow an ephemeral port, release it, then check the guard sees
+        // it free. A closed socket leaves the port bindable again.
         let probe = try FreePort()
-        defer { probe.close() }
-        try c.expect(MLXEnvironment.portIsAvailable(probe.port), "Free port reads available")
+        let releasedPort = probe.port
+        probe.close()
+        try c.expect(MLXEnvironment.portIsAvailable(releasedPort), "Released port reads available")
     }
 
     /// The shared store runs the private convenience init; killAtQuit then
@@ -197,7 +202,11 @@ enum CoreTailScenarios {
         transport.release()
         let firstEvents = try await first.value
         let secondEvents = try await second.value
-        try c.expect(firstEvents.isEmpty && secondEvents.isEmpty, "Both waiters observe the released transport")
+        // The released spawn unwinds through the send error: both streams
+        // surface a failure event and finish instead of parking on the
+        // handshake.
+        try c.expect(firstEvents.contains { $0.hasPrefix("failed:") }, "First stream observes the transport failure")
+        try c.expect(secondEvents.contains { $0.hasPrefix("failed:") }, "Parked second stream surfaces the spawn failure too")
         _ = client
     }
 
@@ -208,16 +217,24 @@ enum CoreTailScenarios {
         try c.expect(ScrapedSearchProvider.parseRSS(data: Data("no items here".utf8)) == nil, "RSS parse of empty page yields nil")
 
         var mapper = ACPUpdateMapper()
-        _ = mapper.events(forUpdate: [
+        let linkDeltas = mapper.events(forUpdate: [
             "update": [
                 "sessionUpdate": "agent_thought_chunk",
                 "content": [["type": "resource_link", "uri": "https://example.invalid/doc", "title": "Doc"]]
             ]
         ])
+        // Thought-chunk links accumulate into the thinking stream, not the
+        // message text: the terminal finished event carries only
+        // accumulatedText (measured in the run11 probe).
+        try c.equal(
+            linkDeltas.map(Self.label).joined(),
+            "thinking:[Doc](https://example.invalid/doc)",
+            "Thought resource links emit a thinking delta"
+        )
         try c.equal(
             Self.label(mapper.terminalEvent(stopReason: "end_turn")),
-            "finished:[Doc](https://example.invalid/doc)",
-            "Thought resource links accumulate into the finished text"
+            "finished:",
+            "Thought links stay out of the finished text"
         )
         try c.equal(Self.label(mapper.terminalEvent(stopReason: "cancelled")), "cancelled", "Cancelled stop reason maps")
 
@@ -246,7 +263,9 @@ enum CoreTailScenarios {
     }
 
     private static func wait(_ c: CoverageContext, _ message: String, until condition: () async -> Bool) async throws {
-        for _ in 0..<200 {
+        // 15s ceiling: /bin/cat pipe echoes can lag several seconds when a
+        // pipeline build loads the machine (measured flake at 4s).
+        for _ in 0..<750 {
             if await condition() { return }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -341,8 +360,12 @@ private final class FreePort {
     func close() { Darwin.close(fd) }
 }
 
-/// Transport whose start hands back control but never answers, so the
-/// concurrent-spawn path parks the second caller on a waiter continuation.
+/// Transport whose start hands back control only when released, then fails
+/// every send: the concurrent-spawn path parks the second caller on the
+/// spawn waiter, and the released first spawn unwinds through the send
+/// error instead of parking the handshake forever (measured in run11: a
+/// no-op send leaves the initialize continuation suspended and hangs the
+/// suite until the watchdog).
 private final class HangingACPTransport: ACPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var startCount = 0
@@ -361,7 +384,9 @@ private final class HangingACPTransport: ACPTransport, @unchecked Sendable {
         _ = semaphore.wait(timeout: .now() + 30)
     }
 
-    func send(_ line: String) async throws {}
+    func send(_ line: String) async throws {
+        throw CoverageContext.Failure(description: "fixture transport refuses sends")
+    }
 
     func stop() async {
         lock.lock()
