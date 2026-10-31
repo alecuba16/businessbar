@@ -895,6 +895,16 @@ enum AppPreferencesUI2Scenarios {
         await ui2Settle()
         await ui2Settle()
         try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Granted request persists the enabled state")
+        // Grant Permission press with a granted-answering store: exercises
+        // the granted body of requestCalendarAccess (log, loadCalendars,
+        // loadSelectedCalendars, flag persist), which the toggle flow alone
+        // never reaches because canEnableCalendarFeature short-circuits the
+        // request when the auth status already reads granted.
+        try grantedTab.press("Grant Permission", context)
+        await ui2Settle()
+        await ui2Settle()
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Grant press keeps the feature enabled")
+        try context.expect(grantedTab.text.contains("Requesting…") == false, "Request flag clears after the granted round trip")
         // loadCalendars guards on the feature flag, so the onAppear load
         // early-returned while the flag was still off. The app's own reload
         // trigger (activation, same as the PermissionsStep flow) drives
