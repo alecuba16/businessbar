@@ -58,17 +58,26 @@ final class PreferencesWindowController: NSWindowController {
 // MARK: - PreferencesView
 
 struct PreferencesView: View {
+    struct TabContent {
+        var general: () -> GeneralTab = { GeneralTab() }
+        var calendars: (MeetingManager, GoogleAuth) -> CalendarsTab = { CalendarsTab(meetingManager: $0, googleAuth: $1) }
+        var noSleep: () -> NoSleepTab = { NoSleepTab() }
+        var companion: () -> CompanionTab = { CompanionTab() }
+    }
+
     @ObservedObject var badgeManager: BadgeManager
     @ObservedObject var meetingManager: MeetingManager
     @ObservedObject var googleAuth: GoogleAuth
     /// Tab selected at window creation; cross-window callers (the chat
     /// panel's setup hint) pass the section that explains what to do.
     @State private var selectedTab: PreferenceTab
+    private let tabContent: TabContent
 
-    init(badgeManager: BadgeManager, meetingManager: MeetingManager, googleAuth: GoogleAuth, initialTab: PreferenceTab? = nil) {
+    init(badgeManager: BadgeManager, meetingManager: MeetingManager, googleAuth: GoogleAuth, initialTab: PreferenceTab? = nil, tabContent: TabContent = TabContent()) {
         self.badgeManager = badgeManager
         self.meetingManager = meetingManager
         self.googleAuth = googleAuth
+        self.tabContent = tabContent
         _selectedTab = State(initialValue: initialTab ?? .general)
     }
 
@@ -103,12 +112,12 @@ struct PreferencesView: View {
                 .frame(minWidth: 180)
             } detail: {
                 switch selectedTab {
-                case .general:     GeneralTab()
-                case .calendars:   CalendarsTab(meetingManager: meetingManager, googleAuth: googleAuth)
+                case .general:     tabContent.general()
+                case .calendars:   tabContent.calendars(meetingManager, googleAuth)
                 case .badges:      BadgesTab(badgeManager: badgeManager)
-                case .noSleep:     NoSleepTab()
+                case .noSleep:     tabContent.noSleep()
                 case .appearance:  AppearanceTab()
-                case .companion:   CompanionTab()
+                case .companion:   tabContent.companion()
                 }
             }
             .frame(minWidth: 800, minHeight: 600)

@@ -18,7 +18,8 @@ enum MenuBuilder {
         onToggleCompanionChat: @escaping () -> Void,
         showEvents: Bool,
         showNoSleep: Bool,
-        showCompanion: Bool
+        showCompanion: Bool,
+        defaults: UserDefaults = .standard
     ) -> NSMenu {
         let menu = NSMenu()
         
@@ -28,7 +29,7 @@ enum MenuBuilder {
                 loadingItem.isEnabled = false
                 menu.addItem(loadingItem)
             } else {
-                addEventSection(to: menu, events: events, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
+                addEventSection(to: menu, events: events, defaults: defaults, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
             }
         } else {
             let disabledItem = NSMenuItem(title: "Calendar integration disabled", action: nil, keyEquivalent: "")
@@ -82,7 +83,7 @@ enum MenuBuilder {
     }
     
     @MainActor
-    private static func addEventSection(to menu: NSMenu, events: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void) {
+    private static func addEventSection(to menu: NSMenu, events: [CalendarEvent], defaults: UserDefaults, onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void) {
         let calendar = Calendar.current
         let now = Date()
         let startOfToday = calendar.startOfDay(for: now)
@@ -101,7 +102,7 @@ enum MenuBuilder {
             }
         }
         
-        let showTomorrow = UserDefaults.standard.bool(forKey: Constants.Defaults.showTomorrowEvents)
+        let showTomorrow = defaults.bool(forKey: Constants.Defaults.showTomorrowEvents)
         if showTomorrow && !tomorrowEvents.isEmpty {
             menu.addItem(NSMenuItem.separator())
             

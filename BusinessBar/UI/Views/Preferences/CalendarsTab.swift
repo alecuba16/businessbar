@@ -10,7 +10,22 @@ struct CalendarsTab: View {
     @ObservedObject var googleAuth: GoogleAuth
 
     @State private var selectedCalendarIDs: Set<String> = []
-    @State private var calendarAuthStatus: EKAuthorizationStatus = EKEventStore.authorizationStatus(for: .event)
+    @State private var calendarAuthStatus: EKAuthorizationStatus
+    private let calendarAuthorization: () -> EKAuthorizationStatus
+    private let notificationAuthorization: (@escaping (Bool) -> Void) -> Void
+    private let openSettingsURL: (URL) -> Void
+    private let resetTCCPermission: (_ service: String, _ completion: @escaping (Int) -> Void) -> Void
+    private let notificationCenterAuthorizationStatus: (@escaping (UNAuthorizationStatus) -> Void) -> Void
+    private let notificationCenterRequestAuthorization: (@escaping (Bool) -> Void) -> Void
+    /// Seamed Google credential configuration: the coverage binary runs
+    /// without bundled credentials.json, so the real check is false there
+    /// and the Google sign-in branch stays unreachable without it.
+    private let googleConfigured: () -> Bool
+    /// Seamed runtime-bundle flag: the coverage fixture runs as a bare
+    /// executable, so the real check is false there and the notification
+    /// request switch stays unreachable without it.
+    private let isRuntimeBundlePresent: Bool
+    private let defaults: UserDefaults
     @State private var notificationsAuthorized = false
     @State private var isRequestingAccess = false
     @State private var isResettingCalendarPermission = false
@@ -30,6 +45,62 @@ struct CalendarsTab: View {
         didSet { notifyPreferencesChanged() }
     }
 
+    init(
+        meetingManager: MeetingManager,
+        googleAuth: GoogleAuth,
+        defaults: UserDefaults = .standard,
+        calendarAuthorization: @escaping () -> EKAuthorizationStatus = { EKEventStore.authorizationStatus(for: .event) },
+        notificationAuthorization: @escaping (@escaping (Bool) -> Void) -> Void = { receive in
+            guard RuntimeBundle.isPresent else { receive(false); return }
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                let granted = [.authorized, .provisional].contains(settings.authorizationStatus)
+                Task { @MainActor in receive(granted) }
+            }
+        },
+        openSettingsURL: @escaping (URL) -> Void = { url in
+            NSWorkspace.shared.open(url)
+        },
+        resetTCCPermission: @escaping (_ service: String, _ completion: @escaping (Int) -> Void) -> Void = { service, completion in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", service, Constants.bundleIdentifier]
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try task.run()
+                    task.waitUntilExit()
+                    completion(Int(task.terminationStatus))
+                } catch {
+                    completion(-1)
+                }
+            }
+        },
+        notificationCenterAuthorizationStatus: @escaping (@escaping (UNAuthorizationStatus) -> Void) -> Void = { receive in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                receive(settings.authorizationStatus)
+            }
+        },
+        notificationCenterRequestAuthorization: @escaping (@escaping (Bool) -> Void) -> Void = { receive in
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                receive(granted)
+            }
+        },
+        isRuntimeBundlePresent: Bool = RuntimeBundle.isPresent,
+        googleConfigured: @escaping () -> Bool = { GoogleAuthConfig.isConfigured }
+    ) {
+        self.meetingManager = meetingManager
+        self.googleAuth = googleAuth
+        self.defaults = defaults
+        self.calendarAuthorization = calendarAuthorization
+        self.notificationAuthorization = notificationAuthorization
+        self.openSettingsURL = openSettingsURL
+        self.resetTCCPermission = resetTCCPermission
+        self.notificationCenterAuthorizationStatus = notificationCenterAuthorizationStatus
+        self.notificationCenterRequestAuthorization = notificationCenterRequestAuthorization
+        self.isRuntimeBundlePresent = isRuntimeBundlePresent
+        self.googleConfigured = googleConfigured
+        _calendarAuthStatus = State(initialValue: calendarAuthorization())
+    }
+
     private var hasMacCalendarPermission: Bool {
         calendarAuthStatus == .fullAccess
     }
@@ -38,7 +109,7 @@ struct CalendarsTab: View {
         if calendarProvider == CalendarProvider.eventKit.rawValue {
             return hasMacCalendarPermission
         }
-        return GoogleAuthConfig.isConfigured && googleAuth.isAuthenticated
+        return googleConfigured() && googleAuth.isAuthenticated
     }
 
     private var canEditCalendarConfig: Bool {
@@ -90,7 +161,7 @@ struct CalendarsTab: View {
                         .buttonStyle(.bordered)
                     }
                 } else {
-                    if !GoogleAuthConfig.isConfigured {
+                    if !googleConfigured() {
                         Text("Google OAuth is not configured. Configure credentials in GoogleAuth.swift.")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -256,7 +327,7 @@ struct CalendarsTab: View {
     }
 
     private func refreshAuthStatus() {
-        calendarAuthStatus = EKEventStore.authorizationStatus(for: .event)
+        calendarAuthStatus = calendarAuthorization()
         if hasMacCalendarPermission {
             if meetingManager.calendars.isEmpty {
                 Task { await meetingManager.loadCalendars() }
@@ -264,22 +335,10 @@ struct CalendarsTab: View {
             loadSelectedCalendars()
         }
 
-        // UNUserNotificationCenter.current() requires a valid bundle proxy.
-        // Guard against crashes when running as a raw SPM binary.
-        guard Bundle.main.bundleIdentifier != nil else {
-            AppLogger.warning("No bundle identifier — skipping notification permission check (running outside .app bundle?)", category: "Permissions")
-            notificationsAuthorized = false
-            meetingNotificationsEnabled = false
-            return
-        }
-
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            Task { @MainActor in
-                notificationsAuthorized = isNotificationStatusGranted(settings.authorizationStatus)
-                if !notificationsAuthorized {
-                    meetingNotificationsEnabled = false
-                }
-                AppLogger.info("Notification auth status: \(settings.authorizationStatus.rawValue) — granted: \(notificationsAuthorized)", category: "Permissions")
+        notificationAuthorization { granted in
+            notificationsAuthorized = granted
+            if !granted {
+                meetingNotificationsEnabled = false
             }
         }
     }
@@ -320,13 +379,13 @@ struct CalendarsTab: View {
 
     private func openCalendarPrivacySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
-            NSWorkspace.shared.open(url)
+            openSettingsURL(url)
         }
     }
 
     private func openNotificationSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
-            NSWorkspace.shared.open(url)
+            openSettingsURL(url)
         }
     }
 
@@ -359,13 +418,13 @@ struct CalendarsTab: View {
     }
 
     private func requestNotificationAccess() {
-        guard Bundle.main.bundleIdentifier != nil else {
-            AppLogger.warning("Cannot request notification access — no bundle identifier (running outside .app bundle?)", category: "Permissions")
+        guard isRuntimeBundlePresent else {
+            AppLogger.warning("Cannot request notification access — no app bundle (running outside .app bundle?)", category: "Permissions")
             return
         }
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            switch settings.authorizationStatus {
-            case .authorized, .provisional, .ephemeral:
+        notificationCenterAuthorizationStatus { [openNotificationSettings] status in
+            switch status {
+            case .authorized, .provisional:
                 Task { @MainActor in
                     notificationsAuthorized = true
                     meetingNotificationsEnabled = true
@@ -373,7 +432,7 @@ struct CalendarsTab: View {
                     AppLogger.info("Notification access already granted", category: "Permissions")
                 }
             case .notDetermined:
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                notificationCenterRequestAuthorization { [notifyPreferencesChanged] granted in
                     Task { @MainActor in
                         notificationsAuthorized = granted
                         meetingNotificationsEnabled = granted
@@ -392,7 +451,7 @@ struct CalendarsTab: View {
                 Task { @MainActor in
                     notificationsAuthorized = false
                     meetingNotificationsEnabled = false
-                    AppLogger.warning("Unknown notification authorization status: \(settings.authorizationStatus.rawValue)", category: "Permissions")
+                    AppLogger.warning("Unknown notification authorization status: \(status.rawValue)", category: "Permissions")
                 }
             }
         }
@@ -420,20 +479,12 @@ struct CalendarsTab: View {
 
         AppLogger.info("Resetting Calendar permission via tccutil", category: "Permissions")
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            task.arguments = ["reset", "Calendar", Constants.bundleIdentifier]
-            do {
-                try task.run()
-                task.waitUntilExit()
-                AppLogger.info("Calendar permission reset completed (exit code: \(task.terminationStatus))", category: "Permissions")
-            } catch {
-                AppLogger.error("Failed to run tccutil for Calendar reset: \(error.localizedDescription)", category: "Permissions")
-            }
-            DispatchQueue.main.async {
+        resetTCCPermission("Calendar") { [notifyPreferencesChanged] exitCode in
+            Task { @MainActor in
+                AppLogger.info("Calendar permission reset completed (exit code: \(exitCode))", category: "Permissions")
                 isResettingCalendarPermission = false
                 refreshAuthStatus()
+                notifyPreferencesChanged()
             }
         }
     }
@@ -446,37 +497,18 @@ struct CalendarsTab: View {
 
         AppLogger.info("Resetting Notifications permission via tccutil", category: "Permissions")
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            task.arguments = ["reset", "Notifications", Constants.bundleIdentifier]
-            do {
-                try task.run()
-                task.waitUntilExit()
-                AppLogger.info("Notifications permission reset completed (exit code: \(task.terminationStatus))", category: "Permissions")
-            } catch {
-                AppLogger.error("Failed to run tccutil for Notifications reset: \(error.localizedDescription)", category: "Permissions")
-            }
-            DispatchQueue.main.async {
+        resetTCCPermission("Notifications") { [notifyPreferencesChanged] exitCode in
+            Task { @MainActor in
+                AppLogger.info("Notifications permission reset completed (exit code: \(exitCode))", category: "Permissions")
                 isResettingNotificationPermission = false
                 refreshAuthStatus()
+                notifyPreferencesChanged()
             }
-        }
-    }
-
-    private func isNotificationStatusGranted(_ status: UNAuthorizationStatus) -> Bool {
-        switch status {
-        case .authorized, .provisional, .ephemeral:
-            return true
-        case .notDetermined, .denied:
-            return false
-        @unknown default:
-            return false
         }
     }
 
     private func loadSelectedCalendars() {
-        guard let data = UserDefaults.standard.data(forKey: Constants.Defaults.selectedCalendars),
+        guard let data = defaults.data(forKey: Constants.Defaults.selectedCalendars),
               let ids = try? JSONDecoder().decode([String].self, from: data) else {
             selectedCalendarIDs = Set(meetingManager.calendars.map { $0.id })
             return
@@ -487,7 +519,7 @@ struct CalendarsTab: View {
     private func saveSelectedCalendars() {
         let ids = Array(selectedCalendarIDs)
         if let data = try? JSONEncoder().encode(ids) {
-            UserDefaults.standard.set(data, forKey: Constants.Defaults.selectedCalendars)
+            defaults.set(data, forKey: Constants.Defaults.selectedCalendars)
         }
     }
 

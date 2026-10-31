@@ -6,7 +6,11 @@ import Foundation
 import os.log
 
 struct NoSleepTab: View {
-    @State private var accessibilityGranted = AXIsProcessTrusted()
+    @State private var accessibilityGranted: Bool
+    private let accessibilityStatus: () -> Bool
+    private let resetTCCPermission: () throws -> Int32
+    private let requestAccessibilityPermission: @MainActor () -> Void
+    private let openSystemSettingsURL: () -> Void
     @State private var isResettingPermission = false
 
     @AppStorage(Constants.Defaults.featureNoSleep)            private var featureNoSleepEnabled = true
@@ -17,6 +21,30 @@ struct NoSleepTab: View {
     @AppStorage(Constants.Defaults.noSleepSimulateActivity)    private var simulateActivity  = false
     @AppStorage(Constants.Defaults.activityCheckInterval)       private var checkInterval     = Constants.DefaultValues.activityCheckInterval
     @AppStorage(Constants.Defaults.activityIdleMultiplier)      private var idleMultiplier    = Constants.DefaultValues.activityIdleMultiplier
+
+    init(accessibilityStatus: @escaping () -> Bool = { AXIsProcessTrusted() },
+         resetTCCPermission: @escaping () throws -> Int32 = {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        task.arguments = ["reset", "Accessibility", Constants.bundleIdentifier]
+        try task.run()
+        task.waitUntilExit()
+        return task.terminationStatus
+    },
+         requestAccessibilityPermission: @escaping @MainActor () -> Void = {
+        BadgeManager.requestAccessibilityPermission()
+    },
+         openSystemSettingsURL: @escaping () -> Void = {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }) {
+        self.accessibilityStatus = accessibilityStatus
+        self.resetTCCPermission = resetTCCPermission
+        self.requestAccessibilityPermission = requestAccessibilityPermission
+        self.openSystemSettingsURL = openSystemSettingsURL
+        _accessibilityGranted = State(initialValue: accessibilityStatus())
+    }
 
     var body: some View {
         Form {
@@ -41,14 +69,12 @@ struct NoSleepTab: View {
                 HStack(spacing: 8) {
                     Button("Grant Permission") {
                         AppLogger.info("Requesting Accessibility permission from NoSleep tab", category: "Permissions")
-                        BadgeManager.requestAccessibilityPermission()
+                        requestAccessibilityPermission()
                     }
                     .buttonStyle(.borderedProminent)
 
                     Button("Open System Settings") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                            NSWorkspace.shared.open(url)
-                        }
+                        openSystemSettingsURL()
                     }
                     .buttonStyle(.bordered)
 
@@ -169,7 +195,7 @@ struct NoSleepTab: View {
     }
 
     private func refreshAccessibilityStatus() {
-        accessibilityGranted = AXIsProcessTrusted()
+        accessibilityGranted = accessibilityStatus()
         if !accessibilityGranted {
             AppLogger.warning("Accessibility permission not granted — disabling activity simulation", category: "Permissions")
             simulateActivity = false
@@ -186,13 +212,9 @@ struct NoSleepTab: View {
         AppLogger.info("Resetting Accessibility permission via tccutil from NoSleep tab", category: "Permissions")
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            task.arguments = ["reset", "Accessibility", Constants.bundleIdentifier]
             do {
-                try task.run()
-                task.waitUntilExit()
-                AppLogger.info("Accessibility permission reset completed (exit code: \(task.terminationStatus))", category: "Permissions")
+                let code = try resetTCCPermission()
+                AppLogger.info("Accessibility permission reset completed (exit code: \(code))", category: "Permissions")
             } catch {
                 AppLogger.error("Failed to run tccutil for Accessibility reset: \(error.localizedDescription)", category: "Permissions")
             }

@@ -48,3 +48,4 @@ BusinessBar/Resources/credentials.local.json
 
 # SwiftUI macro plugins stashed from Xcode (Apple binaries, do not commit)
 Vendor/SwiftMacroPlugins/
+Vendor/*.dylib

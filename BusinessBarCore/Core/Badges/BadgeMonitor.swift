@@ -11,7 +11,7 @@ import os.log
 //
 // Internal — only BadgeManager should create and drive this type.
 
-final class BadgeMonitor {
+final class BadgeMonitor: BadgeMonitoring {
     // MARK: - Internal
 
     var onBadgeUpdate: ((String, Int) -> Void)?
@@ -33,8 +33,34 @@ final class BadgeMonitor {
 
     // MARK: - Lifecycle
 
-    init() {
-        setupDockElement()
+    private let defaults: UserDefaults
+    private let trust: () -> Bool
+    private let attribute: (AXUIElement, String) -> CFTypeRef?
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Timer
+    private let observe: ((pid_t, AXUIElement, @escaping () -> Void) -> (() -> Void))?
+    private var cancelObserver: (() -> Void)?
+
+    init(defaults: UserDefaults = .standard,
+         trust: @escaping () -> Bool = { AXIsProcessTrusted() },
+         dock: () -> (pid_t, AXUIElement?) = {
+             guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.dock" }) else { return (0, nil) }
+             return (app.processIdentifier, AXUIElementCreateApplication(app.processIdentifier))
+         },
+         attribute: @escaping (AXUIElement, String) -> CFTypeRef? = { element, name in
+             var value: CFTypeRef?
+             guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+             return value
+         },
+         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Timer = { interval, action in
+             Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in action() }
+         },
+         observe: ((pid_t, AXUIElement, @escaping () -> Void) -> (() -> Void))? = nil) {
+        self.defaults = defaults
+        self.trust = trust
+        self.attribute = attribute
+        self.schedule = schedule
+        self.observe = observe
+        (dockPID, dockElement) = dock()
     }
 
     deinit {
@@ -86,15 +112,13 @@ final class BadgeMonitor {
     /// On older versions the items may be direct children of the Application element.
     /// We handle both by checking for a bundle identifier at each level and descending
     /// one level further when the immediate child is a container (no bundle ID).
-    private func allDockItemElements() -> [AXUIElement] {
+    func allDockItemElements() -> [AXUIElement] {
         guard let dockElement else {
             Self.logger.warning("allDockItemElements — dockElement is nil (Dock not set up)")
             return []
         }
 
-        var topRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(dockElement, kAXChildrenAttribute as CFString, &topRef) == .success,
-              let topChildren = topRef as? [AXUIElement] else {
+        guard let topChildren = attribute(dockElement, kAXChildrenAttribute) as? [AXUIElement] else {
             Self.logger.warning("allDockItemElements — failed to read Dock children (AX permission revoked?)")
             return []
         }
@@ -104,9 +128,7 @@ final class BadgeMonitor {
             if getBundleIdentifier(from: child) != nil {
                 items.append(child)
             } else {
-                var nestedRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(child, kAXChildrenAttribute as CFString, &nestedRef) == .success,
-                   let grandchildren = nestedRef as? [AXUIElement] {
+                if let grandchildren = attribute(child, kAXChildrenAttribute) as? [AXUIElement] {
                     items.append(contentsOf: grandchildren)
                 }
             }
@@ -118,16 +140,6 @@ final class BadgeMonitor {
 
     // MARK: - Dock element setup
 
-    private func setupDockElement() {
-        guard let dockApp = NSWorkspace.shared.runningApplications
-            .first(where: { $0.bundleIdentifier == "com.apple.dock" }) else {
-            Self.logger.warning("setupDockElement — Dock process not found")
-            return
-        }
-        dockPID = dockApp.processIdentifier
-        dockElement = AXUIElementCreateApplication(dockPID)
-        Self.logger.info("setupDockElement — Dock PID: \(self.dockPID)")
-    }
 
     func restartPollTimer() {
         guard pollTimer != nil else { return }
@@ -137,14 +149,14 @@ final class BadgeMonitor {
     // MARK: - Poll timer
 
     private var currentPollInterval: TimeInterval {
-        let stored = UserDefaults.standard.integer(forKey: Constants.Defaults.badgePollInterval)
+        let stored = defaults.integer(forKey: Constants.Defaults.badgePollInterval)
         return TimeInterval(stored > 0 ? stored : Constants.DefaultValues.badgePollInterval)
     }
 
     private func startPollTimer() {
         stopPollTimer()
         let interval = currentPollInterval
-        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        pollTimer = schedule(interval) { [weak self] in
             self?.pollBadges()
         }
     }
@@ -154,7 +166,7 @@ final class BadgeMonitor {
         pollTimer = nil
     }
 
-    private func pollBadges() {
+    func pollBadges() {
         for (bundleID, element) in appElements {
             let badge = getBadgeValue(from: element)
             let previous = lastLoggedBadges[bundleID] ?? 0
@@ -168,6 +180,11 @@ final class BadgeMonitor {
     // MARK: - AXObserver (app launch / quit detection)
 
     private func setupAXObserver() {
+        if let observe, let dockElement {
+            cancelObserver?()
+            cancelObserver = observe(dockPID, dockElement) { [weak self] in self?.refreshDockChildren() }
+            return
+        }
         guard dockPID != 0 else {
             Self.logger.warning("setupAXObserver — skipped (dockPID is 0)")
             return
@@ -202,6 +219,8 @@ final class BadgeMonitor {
     }
 
     private func tearDownAXObserver() {
+        cancelObserver?()
+        cancelObserver = nil
         guard let observer = axObserver, let dockElement else {
             axObserver = nil
             return
@@ -218,6 +237,10 @@ final class BadgeMonitor {
 
     private func handleDockChildChange(element: AXUIElement, notification: String) {
         Self.logger.debug("handleDockChildChange — notification: \(notification)")
+        refreshDockChildren()
+    }
+
+    func refreshDockChildren() {
         let currentBundleIDs = Set(appElements.keys)
         var freshElements: [String: AXUIElement] = [:]
 
@@ -236,17 +259,13 @@ final class BadgeMonitor {
 
     private func getBundleIdentifier(from element: AXUIElement) -> String? {
         // Approach 1: AXBundleIdentifier — present on some older macOS versions.
-        var valueRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, "AXBundleIdentifier" as CFString, &valueRef) == .success,
-           let bundleID = valueRef as? String, !bundleID.isEmpty {
+        if let bundleID = attribute(element, "AXBundleIdentifier") as? String, !bundleID.isEmpty {
             return bundleID
         }
 
         // Approach 2: AXURL → Bundle.bundleIdentifier — macOS 14+ Dock items
         // expose the app bundle as a file URL instead of a bare bundle-ID string.
-        var urlRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, "AXURL" as CFString, &urlRef) == .success,
-           let nsURL = urlRef as? NSURL {
+        if let nsURL = attribute(element, "AXURL") as? NSURL {
             return Bundle(url: nsURL as URL)?.bundleIdentifier
         }
 
@@ -254,11 +273,11 @@ final class BadgeMonitor {
     }
 
     private func getBadgeValue(from element: AXUIElement) -> Int {
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, "AXStatusLabel" as CFString, &valueRef) == .success,
-              let badgeText = valueRef as? String else {
-            return 0
-        }
+        return Self.parseBadge(attribute(element, "AXStatusLabel") as? String)
+    }
+
+    static func parseBadge(_ text: String?) -> Int {
+        guard let badgeText = text else { return 0 }
         let digits = badgeText.prefix(while: { $0.isNumber })
         return Int(digits) ?? (badgeText.isEmpty ? 0 : 1)
     }
@@ -266,8 +285,7 @@ final class BadgeMonitor {
     // MARK: - Permission
 
     private func checkAccessibilityPermission() -> Bool {
-        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
-        return AXIsProcessTrustedWithOptions(options)
+        trust()
     }
 
     static func requestAccessibilityPermission() {

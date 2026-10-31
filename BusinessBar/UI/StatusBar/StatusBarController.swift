@@ -6,9 +6,67 @@ import os.log
 import SwiftUI
 
 @MainActor
+protocol StatusItemBacking: AnyObject {
+    var button: NSButton? { get }
+    var menu: NSMenu? { get set }
+    var length: CGFloat { get set }
+}
+
+@MainActor
+private final class LiveStatusItemBacking: StatusItemBacking {
+    let item: NSStatusItem
+    init(length: CGFloat) { item = NSStatusBar.system.statusItem(withLength: length) }
+    var button: NSButton? { item.button }
+    var menu: NSMenu? {
+        get { item.menu }
+        set { item.menu = newValue }
+    }
+    var length: CGFloat {
+        get { item.length }
+        set { item.length = newValue }
+    }
+}
+
+@MainActor
 final class StatusBarController: NSObject {
-    private var mainStatusItem: NSStatusItem?
-    private var badgeStatusItems: [String: NSStatusItem] = [:]
+    @MainActor
+    struct Effects {
+        var makeStatusItem: (CGFloat) -> any StatusItemBacking = { LiveStatusItemBacking(length: $0) }
+        var removeStatusItem: (any StatusItemBacking) -> Void = {
+            if let live = $0 as? LiveStatusItemBacking { NSStatusBar.system.removeStatusItem(live.item) }
+        }
+        var now: () -> Date = Date.init
+        var scheduleTimer: (TimeInterval, @escaping (Timer) -> Void) -> Timer = {
+            Timer.scheduledTimer(withTimeInterval: $0, repeats: true, block: $1)
+        }
+        var registerShortcut: (KeyboardShortcuts.Name, @escaping () -> Void) -> Void = { KeyboardShortcuts.onKeyUp(for: $0, action: $1) }
+        var getShortcut: (KeyboardShortcuts.Name) -> KeyboardShortcuts.Shortcut? = { KeyboardShortcuts.getShortcut(for: $0) }
+        var removeShortcutHandler: (KeyboardShortcuts.Name) -> Void = { KeyboardShortcuts.removeHandler(for: $0) }
+        var setShortcut: (KeyboardShortcuts.Shortcut?, KeyboardShortcuts.Name) -> Void = { KeyboardShortcuts.setShortcut($0, for: $1) }
+        var loadTemplates: () -> [PromptTemplate] = { TemplateStore().load() }
+        var runningBundleIDs: () -> Set<String> = { Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)) }
+        var resolveApplication: (String) -> URL? = { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }
+        var openApplication: (URL) -> Void = {
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            NSWorkspace.shared.openApplication(at: $0, configuration: configuration)
+        }
+        var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+        var togglePanel: () -> Void = { CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeChatClient() }) }
+        var makeClient: (UUID?) -> LLMClient? = { CompanionConfigService.makeClient(forModelID: $0) }
+        var rewrite: (PromptTemplate, LLMClient) -> Void = { RewriteCoordinator.shared.startRewrite(template: $0, client: $1) }
+        var toast: (String, String, TimeInterval) -> Void = { ToastCenter.shared.show($0, icon: $1, duration: $2) }
+        var showPopover: (NSPopover, NSButton) -> Void = { $0.show(relativeTo: $1.bounds, of: $1, preferredEdge: .minY) }
+        var closePopover: (NSPopover) -> Void = { $0.close() }
+        var scheduleDismiss: (DispatchWorkItem) -> Void = { DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: $0) }
+        var quit: () -> Void = { NSApp.terminate(nil) }
+    }
+
+    private let effects: Effects
+    private let defaults: UserDefaults
+    private let notifications: NotificationCenter
+    private var mainStatusItem: (any StatusItemBacking)?
+    private var badgeStatusItems: [String: any StatusItemBacking] = [:]
 
     // MARK: - Toast
     /// Last-seen badge count per app. nil = never seen (no toast on first read).
@@ -62,19 +120,19 @@ final class StatusBarController: NSObject {
     }()
 
     private var currentEventTimeMode: EventTimeMode {
-        let rawValue = UserDefaults.standard.string(forKey: Constants.Defaults.timeFormat)
+        let rawValue = defaults.string(forKey: Constants.Defaults.timeFormat)
         return EventTimeMode(rawValue: rawValue ?? EventTimeMode.relative.rawValue) ?? .relative
     }
 
     /// Hours threshold at which relative times round to whole hours.
     /// 0 = always show exact (e.g. "1h31m"), 1 = round when >1h, 2 = round when >2h, etc.
     private var currentRoundingThreshold: Int {
-        let value = UserDefaults.standard.integer(forKey: Constants.Defaults.timeRoundingThreshold)
+        let value = defaults.integer(forKey: Constants.Defaults.timeRoundingThreshold)
         return value >= 0 ? value : 0
     }
 
     private func isFeatureEnabled(_ key: String) -> Bool {
-        if let value = UserDefaults.standard.object(forKey: key) as? Bool {
+        if let value = defaults.object(forKey: key) as? Bool {
             return value
         }
         return true
@@ -83,11 +141,14 @@ final class StatusBarController: NSObject {
     /// Width of each badge status item is derived from the selected icon size
     /// so the spacing stays consistent with the cropped icon.
     private var badgeIconDimension: CGFloat {
-        let setting = UserDefaults.standard.string(forKey: Constants.Defaults.badgeIconSize) ?? "small"
+        let setting = defaults.string(forKey: Constants.Defaults.badgeIconSize) ?? "small"
         return setting == "medium" ? 18 : 14
     }
 
-    init(meetingManager: MeetingManager, badgeManager: BadgeManager, noSleepManager: NoSleepManager, onShowPreferences: @escaping () -> Void) {
+    init(meetingManager: MeetingManager, badgeManager: BadgeManager, noSleepManager: NoSleepManager, defaults: UserDefaults = .standard, notifications: NotificationCenter = .default, effects: Effects? = nil, onShowPreferences: @escaping () -> Void) {
+        self.defaults = defaults
+        self.notifications = notifications
+        self.effects = effects ?? Effects()
         self.meetingManager = meetingManager
         self.badgeManager = badgeManager
         self.noSleepManager = noSleepManager
@@ -104,7 +165,7 @@ final class StatusBarController: NSObject {
     }
 
     private func setupMainStatusItem() {
-        mainStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        mainStatusItem = effects.makeStatusItem(NSStatusItem.variableLength)
 
         // Create a single persistent NSMenu whose contents are rebuilt by
         // NSMenuDelegate.menuWillOpen right before each display. This means the
@@ -160,7 +221,7 @@ final class StatusBarController: NSObject {
             }
             .store(in: &cancellables)
 
-        NotificationCenter.default.publisher(for: .businessBarPreferencesDidChange)
+        notifications.publisher(for: .businessBarPreferencesDidChange)
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.startMinuteRefreshTimer() // restarts/stops based on feature flag
@@ -182,7 +243,7 @@ final class StatusBarController: NSObject {
     private func startMinuteRefreshTimer() {
         stopMinuteRefreshTimer()
         guard isCalendarFeatureEnabled else { return }
-        minuteRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        minuteRefreshTimer = effects.scheduleTimer(60) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.meetingManager.recalculateNextEvent()
                 self?.updateMainStatusItem()
@@ -364,7 +425,7 @@ final class StatusBarController: NSObject {
 
     /// Truncated meeting title + countdown/remaining-time string.
     private func makeMeetingAttributedString(for event: CalendarEvent) -> NSAttributedString {
-        let titleMaxLength = UserDefaults.standard.integer(forKey: Constants.Defaults.meetingTitleMaxLength)
+        let titleMaxLength = defaults.integer(forKey: Constants.Defaults.meetingTitleMaxLength)
         let maxLength = titleMaxLength > 0 ? titleMaxLength : Constants.DefaultValues.meetingTitleMaxLength
         let title = event.title.truncated(to: maxLength)
         let timeString = formatEventTime(event)
@@ -374,7 +435,7 @@ final class StatusBarController: NSObject {
     private func formatEventTime(_ event: CalendarEvent) -> String {
         switch currentEventTimeMode {
         case .relative:
-            let now = Date()
+            let now = effects.now()
 
             if event.isHappening {
                 let minutes = Int(event.endDate.timeIntervalSince(now) / 60)
@@ -412,7 +473,7 @@ final class StatusBarController: NSObject {
     private func updateBadgeStatusItems() {
         guard isBadgeFeatureEnabled else {
             for item in badgeStatusItems.values {
-                NSStatusBar.system.removeStatusItem(item)
+                effects.removeStatusItem(item)
             }
             badgeStatusItems.removeAll()
             previousBadgeCounts.removeAll()
@@ -422,13 +483,13 @@ final class StatusBarController: NSObject {
         let monitoredApps = badgeManager.monitoredApps
         let badges        = badgeManager.badges
 
-        let hideWhenNotRunning     = UserDefaults.standard.bool(forKey: Constants.Defaults.hideIconWhenNotRunning)
-        let hideWhenNoNotification = UserDefaults.standard.bool(forKey: Constants.Defaults.hideIconWhenNoNotification)
+        let hideWhenNotRunning     = defaults.bool(forKey: Constants.Defaults.hideIconWhenNotRunning)
+        let hideWhenNoNotification = defaults.bool(forKey: Constants.Defaults.hideIconWhenNoNotification)
         let iconSize = badgeIconDimension
 
         // Only query running apps when the preference that needs it is enabled.
         let runningBundleIDs: Set<String> = hideWhenNotRunning
-            ? Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+            ? effects.runningBundleIDs()
             : []
 
         // Ensure a status item exists for every monitored app.
@@ -438,7 +499,7 @@ final class StatusBarController: NSObject {
         // Remove status items for apps no longer in the monitored list.
         for bundleID in currentBundleIDs.subtracting(monitoredBundleIDs) {
             if let item = badgeStatusItems[bundleID] {
-                NSStatusBar.system.removeStatusItem(item)
+                effects.removeStatusItem(item)
                 badgeStatusItems.removeValue(forKey: bundleID)
                 renderedBadgeImages.removeValue(forKey: bundleID)
             }
@@ -477,7 +538,7 @@ final class StatusBarController: NSObject {
         // Remove items whose app must stay hidden (recreated when it becomes visible).
         for bundleID in bundleIDsToHide {
             if let item = badgeStatusItems[bundleID] {
-                NSStatusBar.system.removeStatusItem(item)
+                effects.removeStatusItem(item)
                 badgeStatusItems.removeValue(forKey: bundleID)
             }
             renderedBadgeImages.removeValue(forKey: bundleID)
@@ -487,7 +548,7 @@ final class StatusBarController: NSObject {
         for app in monitoredApps {
             let bundleID = app.bundleIdentifier
             guard !bundleIDsToHide.contains(bundleID), badgeStatusItems[bundleID] == nil else { continue }
-            let item = NSStatusBar.system.statusItem(withLength: iconSize)
+            let item = effects.makeStatusItem(iconSize)
             badgeStatusItems[bundleID] = item
             if let button = item.button {
                 button.target = self
@@ -536,11 +597,11 @@ final class StatusBarController: NSObject {
     /// Shows a minimal NSPopover toast anchored to `button` when the badge count
     /// for an app increases. Replaces any currently visible toast and auto-dismisses
     /// after 3 seconds. No arrow (shouldHideAnchor), transient behavior.
-    private func showToast(for app: MonitoredApp, count: Int, anchoredTo button: NSStatusBarButton) {
+    private func showToast(for app: MonitoredApp, count: Int, anchoredTo button: NSButton) {
         // Cancel any pending dismiss and close the current toast.
         toastDismissTask?.cancel()
         toastDismissTask = nil
-        activeToastPopover?.close()
+        if let activeToastPopover { effects.closePopover(activeToastPopover) }
         activeToastPopover = nil
 
         // Build the SwiftUI content and compute its ideal size.
@@ -555,7 +616,7 @@ final class StatusBarController: NSObject {
         popover.contentViewController = hostingController
 
         // Anchor to the bottom edge of the badge status item (appears below the menu bar).
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        effects.showPopover(popover, button)
 
         // Detach from the status item's window so the popover isn't clipped
         // by the menu bar frame (technique from the Doll reference).
@@ -566,33 +627,31 @@ final class StatusBarController: NSObject {
         activeToastPopover = popover
 
         // Schedule auto-dismiss after 3 seconds.
+        let closePopover = effects.closePopover
         let task = DispatchWorkItem { [weak self, weak popover] in
-            popover?.close()
+            if let popover { closePopover(popover) }
             if self?.activeToastPopover === popover {
                 self?.activeToastPopover = nil
             }
         }
         toastDismissTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: task)
+        effects.scheduleDismiss(task)
     }
 
     // MARK: - Badge status item actions
 
-    @objc private func badgeStatusItemClicked(_ sender: NSStatusBarButton) {
+    @objc private func badgeStatusItemClicked(_ sender: NSButton) {
         let bundleID = badgeStatusItems.first(where: { $0.value.button == sender })?.key
 
         guard let bundleID = bundleID,
-              let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
+              let appURL = effects.resolveApplication(bundleID) else { return }
 
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-
-        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
+        effects.openApplication(appURL)
     }
 
     private func joinMeeting(_ event: CalendarEvent) {
         guard let url = event.meetingLink else { return }
-        NSWorkspace.shared.open(url)
+        effects.openURL(url)
     }
 
     private func showPreferences() {
@@ -602,19 +661,19 @@ final class StatusBarController: NSObject {
     // MARK: - Keyboard shortcuts
 
     private func setupKeyboardShortcuts() {
-        KeyboardShortcuts.onKeyUp(for: .openMenu) { [weak self] in
+        effects.registerShortcut(.openMenu) { [weak self] in
             self?.mainStatusItem?.button?.performClick(nil)
         }
 
-        KeyboardShortcuts.onKeyUp(for: .joinNextMeeting) { [weak self] in
+        effects.registerShortcut(.joinNextMeeting) { [weak self] in
             guard let self,
                   let event = self.meetingManager.nextEvent else { return }
             self.joinMeeting(event)
         }
 
-        KeyboardShortcuts.onKeyUp(for: .toggleCompanionChat) {
-            guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion) else { return }
-            CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeChatClient() })
+        effects.registerShortcut(.toggleCompanionChat) { [weak self] in
+            guard let self, self.defaults.bool(forKey: Constants.Defaults.featureCompanion) else { return }
+            self.effects.togglePanel()
         }
     }
 
@@ -629,38 +688,38 @@ final class StatusBarController: NSObject {
 
         // Unregister shortcuts whose template no longer exists. Library keys
         // are scanned directly because the library has no list-all API.
-        let templates = TemplateStore().load()
+        let templates = effects.loadTemplates()
         let liveTemplateIDs = Set(templates.map(\.id))
-        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix(libraryPrefix + prefix) {
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(libraryPrefix + prefix) {
             let raw = String(key.dropFirst(libraryPrefix.count))
             let templateID = String(raw.dropFirst(prefix.count))
             if let uuid = UUID(uuidString: templateID), !liveTemplateIDs.contains(uuid) {
-                KeyboardShortcuts.setShortcut(nil, for: name.rewriteTemplate(uuid))
+                effects.setShortcut(nil, name.rewriteTemplate(uuid))
             }
         }
 
         for template in templates {
             let shortcutName = name.rewriteTemplate(template.id)
-            guard KeyboardShortcuts.getShortcut(for: shortcutName) != nil else { continue }
+            guard effects.getShortcut(shortcutName) != nil else { continue }
             // onKeyUp appends, so a stale handler from the previous sync would
             // fire alongside the new one and start duplicate rewrites.
-            KeyboardShortcuts.removeHandler(for: shortcutName)
-            KeyboardShortcuts.onKeyUp(for: shortcutName) { [weak self] in
-                guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion),
-                      let client = CompanionConfigService.makeClient(forModelID: template.modelID) else { return }
-                ToastCenter.shared.show("Rewriting with \(template.name)…", icon: "wand.and.stars", duration: 1.2)
-                self?.runTemplateRewrite(templateID: template.id, client: client)
+            effects.removeShortcutHandler(shortcutName)
+            effects.registerShortcut(shortcutName) { [weak self] in
+                guard let self, self.defaults.bool(forKey: Constants.Defaults.featureCompanion),
+                      let client = self.effects.makeClient(template.modelID) else { return }
+                self.effects.toast("Rewriting with \(template.name)…", "wand.and.stars", 1.2)
+                self.runTemplateRewrite(templateID: template.id, client: client)
             }
         }
     }
 
     private func runTemplateRewrite(templateID: UUID, client: LLMClient) {
-        guard let template = TemplateStore().load().first(where: { $0.id == templateID }) else { return }
-        RewriteCoordinator.shared.startRewrite(template: template, client: client)
+        guard let template = effects.loadTemplates().first(where: { $0.id == templateID }) else { return }
+        effects.rewrite(template, client)
     }
 
     private func observeTemplateStore() {
-        NotificationCenter.default.addObserver(
+        notifications.addObserver(
             forName: TemplateStore.didChangeNotification,
             object: nil,
             queue: .main
@@ -689,14 +748,15 @@ extension StatusBarController: NSMenuDelegate {
             onActivateNoSleep: { [weak self] duration in self?.noSleepManager.activate(duration: duration) },
             onDeactivateNoSleep: { [weak self] in self?.noSleepManager.deactivate() },
             onShowPreferences: { [weak self] in self?.showPreferences() },
-            onQuit: { NSApp.terminate(nil) },
-            onToggleCompanionChat: {
-                guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureCompanion) else { return }
-                CompanionPanelController.shared.togglePanel(clientProvider: { CompanionConfigService.makeChatClient() })
+            onQuit: { [weak self] in self?.effects.quit() },
+            onToggleCompanionChat: { [weak self] in
+                guard let self, self.defaults.bool(forKey: Constants.Defaults.featureCompanion) else { return }
+                self.effects.togglePanel()
             },
             showEvents: isCalendarFeatureEnabled,
             showNoSleep: isNoSleepFeatureEnabled,
-            showCompanion: isCompanionFeatureEnabled
+            showCompanion: isCompanionFeatureEnabled,
+            defaults: defaults
         )
 
         // Transfer items from the freshly-built menu into the persistent menu object.

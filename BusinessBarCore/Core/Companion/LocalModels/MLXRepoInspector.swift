@@ -100,7 +100,7 @@ public enum MLXRepoInspector {
     public static func isValidRepoID(_ raw: String) -> Bool {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed == raw, trimmed.contains("/") else { return false }
-        let parts = trimmed.split(separator: "/")
+        let parts = trimmed.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 2 else { return false }
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
         return parts.allSatisfy { part in

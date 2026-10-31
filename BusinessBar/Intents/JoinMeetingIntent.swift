@@ -7,18 +7,34 @@ struct JoinNextMeetingIntent: AppIntent {
     static var title: LocalizedStringResource = "Join Next Meeting"
     static var description = IntentDescription("Opens the meeting link for your next scheduled event")
     static var openAppWhenRun: Bool = false
+    private var featureEnabled: @MainActor () -> Bool
+    private var nextEvent: @MainActor () -> CalendarEvent?
+    private var openMeeting: @MainActor (URL) -> Void
+
+    init() {
+        featureEnabled = { UserDefaults.standard.bool(forKey: Constants.Defaults.featureCalendar) }
+        nextEvent = { (NSApplication.shared.delegate as? AppDelegate)?.getMeetingManager()?.nextEvent }
+        openMeeting = { NSWorkspace.shared.open($0) }
+    }
+
+    init(
+        featureEnabled: @escaping @MainActor () -> Bool,
+        nextEvent: @escaping @MainActor () -> CalendarEvent?,
+        openMeeting: @escaping @MainActor (URL) -> Void
+    ) {
+        self.featureEnabled = featureEnabled
+        self.nextEvent = nextEvent
+        self.openMeeting = openMeeting
+    }
     
     func perform() async throws -> some IntentResult {
         let isFeatureEnabled = await MainActor.run {
-            UserDefaults.standard.bool(forKey: Constants.Defaults.featureCalendar)
+            featureEnabled()
         }
         guard isFeatureEnabled else { throw IntentError.featureDisabled }
 
-        // Access the meeting manager from the app delegate
         guard let (nextEvent, meetingLink) = await MainActor.run(body: { () -> (CalendarEvent, URL)? in
-            guard let appDelegate = NSApplication.shared.delegate as? AppDelegate,
-                  let meetingManager = appDelegate.getMeetingManager(),
-                  let nextEvent = meetingManager.nextEvent,
+            guard let nextEvent = self.nextEvent(),
                   let meetingLink = nextEvent.meetingLink else {
                 return nil
             }
@@ -28,7 +44,7 @@ struct JoinNextMeetingIntent: AppIntent {
         }
         
         _ = await MainActor.run {
-            NSWorkspace.shared.open(meetingLink)
+            openMeeting(meetingLink)
         }
         
         return .result(dialog: "Opening \(nextEvent.title)")

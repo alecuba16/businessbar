@@ -66,8 +66,52 @@ public final class MLXServerManager: ObservableObject {
     private var startContinuations: [CheckedContinuation<Void, Error>] = []
     private static let log = Logger(subsystem: "com.businessbar.app", category: "MLXServer")
 
-    private init() {
-        installResourceGuards()
+    private let defaults: UserDefaults
+    private let home: String
+    private let driver: MLXProcessDriver
+    private let resolvePython: (MLXModelCatalog.Kind) async throws -> String
+    private let portAvailable: (Int) -> Bool
+    private let now: () -> Date
+    private let sleep: (UInt64) async throws -> Void
+    private let residentSize: (pid_t) -> Int64
+    private let session: URLSession
+
+    private convenience init() {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3
+        config.timeoutIntervalForResource = 3
+        self.init(defaults: .standard, home: NSHomeDirectory(),
+                  driver: .live(registerForQuit: Self.registerForQuitKill),
+                  session: URLSession(configuration: config),
+                  resolvePython: { kind in
+                      try await Task.detached(priority: .userInitiated) {
+                          if let override = await MLXServerManager.pythonPathOverride { return override }
+                          return try MLXEnvironment.resolveServerPython(for: kind)
+                      }.value
+                  }, portAvailable: MLXEnvironment.portIsAvailable,
+                  now: Date.init, sleep: { try await Task.sleep(nanoseconds: $0) },
+                  residentSize: Self.rssBytes, observeResources: { $0.installResourceGuards() })
+    }
+
+    public init(defaults: UserDefaults, home: String, driver: MLXProcessDriver,
+                session: URLSession,
+                resolvePython: @escaping (MLXModelCatalog.Kind) async throws -> String,
+                portAvailable: @escaping (Int) -> Bool,
+                now: @escaping () -> Date,
+                sleep: @escaping (UInt64) async throws -> Void,
+                residentSize: @escaping (pid_t) -> Int64,
+                observeResources: (MLXServerManager) -> Void) {
+        self.defaults = defaults
+        self.home = home
+        self.driver = driver
+        self.session = session
+        self.resolvePython = resolvePython
+        self.portAvailable = portAvailable
+        self.now = now
+        self.sleep = sleep
+        self.residentSize = residentSize
+        lastRequestAt = now()
+        observeResources(self)
     }
 
     deinit {
@@ -83,14 +127,14 @@ public final class MLXServerManager: ObservableObject {
     public func start(modelID: String) async throws {
         guard !state.isRunning, state != .starting else { return }
 
-        guard let entry = MLXModelCatalog.entry(id: modelID) else {
+        guard let entry = MLXModelCatalog.entry(id: modelID, defaults: defaults) else {
             throw ServerError.modelNotDownloaded(modelID)
         }
-        guard MLXModelCatalog.isDownloaded(modelID: modelID) else {
+        guard MLXModelCatalog.isDownloaded(modelID: modelID, home: home) else {
             throw ServerError.modelNotDownloaded(modelID)
         }
-        let port = MLXServerConfig.port()
-        guard MLXEnvironment.portIsAvailable(port) else {
+        let port = MLXServerConfig.port(defaults: defaults)
+        guard portAvailable(port) else {
             throw ServerError.portInUse(port)
         }
 
@@ -98,10 +142,7 @@ public final class MLXServerManager: ObservableObject {
         refreshPeers()
 
         do {
-            let python = try await Task.detached(priority: .userInitiated) {
-                if let override = await MLXServerManager.pythonPathOverride { return override }
-                return try MLXEnvironment.resolveServerPython(for: entry.kind)
-            }.value
+            let python = try await resolvePython(entry.kind)
 
             let serverModule = entry.kind == .textAndImages
                 ? "mlx_vlm.server"
@@ -122,21 +163,21 @@ public final class MLXServerManager: ObservableObject {
             child.environment = env
             child.standardOutput = Pipe()
             child.standardError = Pipe()
-            MLXServerManager.registerForQuitKill(child)
+            driver.registerForQuit(child)
             child.terminationHandler = { [weak self] process in
-                let exitCode = process.terminationStatus
                 Task { @MainActor in
-                    self?.childExited(exitCode: exitCode)
+                    guard let self else { return }
+                    self.childExited(exitCode: self.driver.terminationStatus(process))
                 }
             }
 
-            try child.run()
+            try driver.run(child)
             process = child
             Self.log.info("mlx server spawned for \(modelID, privacy: .public)")
             try await waitForHealth(port: port, modelID: modelID)
             state = .running(modelID: modelID)
-            lastRequestAt = Date()
-            startPolling(port: port, pid: child.processIdentifier)
+            lastRequestAt = now()
+            startPolling(port: port, pid: driver.identifier(child))
             scheduleIdleTimer()
             resolveStartContinuations()
             refreshPeers()
@@ -183,17 +224,17 @@ public final class MLXServerManager: ObservableObject {
 
     /// Resets the idle countdown. Called on every request the app sends.
     public func markActivity() {
-        lastRequestAt = Date()
+        lastRequestAt = now()
     }
 
     // MARK: - Health wait
 
     private func waitForHealth(port: Int, modelID: String) async throws {
-        let deadline = Date().addingTimeInterval(90)
+        let deadline = now().addingTimeInterval(90)
         let url = URL(string: "http://127.0.0.1:\(port)/health")!
 
-        while Date() < deadline {
-            guard process?.isRunning == true else {
+        while now() < deadline {
+            guard let process, driver.isRunning(process) else {
                 throw ServerError.exitedDuringStart(modelID: modelID)
             }
             do {
@@ -204,25 +245,19 @@ public final class MLXServerManager: ObservableObject {
             } catch {
                 // Not up yet; keep polling.
             }
-            try await Task.sleep(nanoseconds: 500_000_000)
+            try await sleep(500_000_000)
         }
         throw ServerError.startTimedOut(modelID: modelID)
     }
-
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 3
-        config.timeoutIntervalForResource = 3
-        return URLSession(configuration: config)
-    }()
 
     // MARK: - Polling
 
     private func startPolling(port: Int, pid: pid_t) {
         healthPollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard let self, self.state.isRunning else { return }
+                guard let self else { return }
+                do { try await self.sleep(2_000_000_000) } catch { return }
+                guard self.state.isRunning, !Task.isCancelled else { return }
                 guard let url = URL(string: "http://127.0.0.1:\(port)/health") else { return }
                 do {
                     let (_, response) = try await self.session.data(from: url)
@@ -238,9 +273,10 @@ public final class MLXServerManager: ObservableObject {
 
         rssPollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard let self, self.state.isRunning else { return }
-                self.residentBytes = MLXServerManager.rssBytes(pid: pid)
+                guard let self else { return }
+                do { try await self.sleep(5_000_000_000) } catch { return }
+                guard self.state.isRunning, !Task.isCancelled else { return }
+                self.residentBytes = self.residentSize(pid)
             }
         }
     }
@@ -258,15 +294,16 @@ public final class MLXServerManager: ObservableObject {
 
     private func scheduleIdleTimer() {
         idleTimer?.cancel()
-        guard !MLXServerConfig.keepLoaded() else { return }
-        let minutes = MLXServerConfig.idleMinutes()
+        guard !MLXServerConfig.keepLoaded(defaults: defaults) else { return }
+        let minutes = MLXServerConfig.idleMinutes(defaults: defaults)
         idleTimer = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(minutes) * 60_000_000_000)
-            guard let self, self.state.isRunning, !Task.isCancelled else { return }
+            guard let self else { return }
+            do { try await self.sleep(UInt64(minutes) * 60_000_000_000) } catch { return }
+            guard self.state.isRunning, !Task.isCancelled else { return }
             // The timer sleeps from the moment activity was stamped, so the
             // window has fully elapsed by wake; a small tolerance covers the
             // sleep starting a beat after the stamp.
-            guard Date().timeIntervalSince(self.lastRequestAt) >= TimeInterval(minutes * 60 - 1) else {
+            guard self.now().timeIntervalSince(self.lastRequestAt) >= TimeInterval(minutes * 60 - 1) else {
                 self.scheduleIdleTimer()
                 return
             }
@@ -294,15 +331,15 @@ public final class MLXServerManager: ObservableObject {
 
     private func killChild() {
         if let child = process {
-            if child.isRunning {
-                child.terminate()
+            if driver.isRunning(child) {
+                driver.terminate(child)
                 // Grace, then hard kill; both sync so stop() is deterministic.
-                let deadline = Date().addingTimeInterval(3)
-                while child.isRunning && Date() < deadline {
+                let deadline = now().addingTimeInterval(3)
+                while driver.isRunning(child) && now() < deadline {
                     usleep(100_000)
                 }
-                if child.isRunning {
-                    kill(child.processIdentifier, SIGKILL)
+                if driver.isRunning(child) {
+                    driver.forceKill(child)
                 }
             }
             child.terminationHandler = nil
@@ -367,7 +404,7 @@ public final class MLXServerManager: ObservableObject {
         )
         memoryPressureSource?.setEventHandler { [weak self] in
             guard let self, self.state.isRunning else { return }
-            guard Date().timeIntervalSince(self.lastRequestAt) > 10 else { return }
+            guard self.now().timeIntervalSince(self.lastRequestAt) > 10 else { return }
             Self.log.warning("memory pressure critical, stopping idle mlx server")
             self.stop()
         }
@@ -378,11 +415,13 @@ public final class MLXServerManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self, self.state.isRunning else { return }
-            guard ProcessInfo.processInfo.thermalState == .serious,
-                  Date().timeIntervalSince(self.lastRequestAt) > 10 else { return }
-            Self.log.warning("thermal state serious, stopping idle mlx server")
-            self.stop()
+            Task { @MainActor [weak self] in
+                guard let self, self.state.isRunning else { return }
+                guard ProcessInfo.processInfo.thermalState == .serious,
+                      self.now().timeIntervalSince(self.lastRequestAt) > 10 else { return }
+                Self.log.warning("thermal state serious, stopping idle mlx server")
+                self.stop()
+            }
         }
     }
 

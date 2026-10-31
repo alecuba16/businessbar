@@ -8,6 +8,27 @@ final class ActivitySimulator {
     private var simulationTimer: Timer?
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "ActivitySimulator")
 
+    private let defaults: UserDefaults
+    private let schedule: (TimeInterval, Bool, @escaping () -> Void) -> Timer
+    private let idleTime: () -> TimeInterval
+    private let moveMouse: () -> Void
+
+    init(defaults: UserDefaults = .standard,
+         schedule: @escaping (TimeInterval, Bool, @escaping () -> Void) -> Timer = { interval, repeats, action in
+             Timer.scheduledTimer(withTimeInterval: interval, repeats: repeats) { _ in action() }
+         },
+         idleTime: (() -> TimeInterval)? = nil,
+         moveMouse: (() -> Void)? = nil) {
+        self.defaults = defaults
+        self.schedule = schedule
+        self.idleTime = idleTime ?? Self.getSystemIdleTime
+        self.moveMouse = moveMouse ?? Self.simulateMouseMovement
+    }
+
+    deinit {
+        simulationTimer?.invalidate()
+    }
+
     // MARK: - Public API
 
     func startSimulation() {
@@ -18,7 +39,7 @@ final class ActivitySimulator {
         let interval = currentCheckInterval()
         let threshold = currentIdleThreshold(forInterval: interval)
         Self.logger.info("Starting — checks every \(Int(interval))s, fires after \(threshold)s idle")
-        simulationTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        simulationTimer = schedule(interval, true) { [weak self] in
             self?.checkAndSimulate()
         }
     }
@@ -33,30 +54,30 @@ final class ActivitySimulator {
     // MARK: - Settings helpers
 
     private func currentCheckInterval() -> TimeInterval {
-        let stored = UserDefaults.standard.integer(forKey: Constants.Defaults.activityCheckInterval)
+        let stored = defaults.integer(forKey: Constants.Defaults.activityCheckInterval)
         let value = stored > 0 ? stored : Constants.DefaultValues.activityCheckInterval
         return TimeInterval(value)
     }
 
     private func currentIdleThreshold(forInterval interval: TimeInterval) -> Int {
-        let stored = UserDefaults.standard.integer(forKey: Constants.Defaults.activityIdleMultiplier)
+        let stored = defaults.integer(forKey: Constants.Defaults.activityIdleMultiplier)
         let multiplier = stored > 0 ? stored : Constants.DefaultValues.activityIdleMultiplier
         return Int(interval) * multiplier
     }
 
     // MARK: - Simulation logic
 
-    private func checkAndSimulate() {
+    func checkAndSimulate() {
         let interval = currentCheckInterval()
         let threshold = currentIdleThreshold(forInterval: interval)
-        let idleTime = getSystemIdleTime()
+        let idleTime = self.idleTime()
         if idleTime > TimeInterval(threshold) {
             Self.logger.debug("Idle \(String(format: "%.1f", idleTime))s > threshold \(threshold)s — simulating")
-            simulateMouseMovement()
+            moveMouse()
         }
     }
 
-    private func getSystemIdleTime() -> TimeInterval {
+    private static func getSystemIdleTime() -> TimeInterval {
         var iterator: io_iterator_t = 0
         defer { IOObjectRelease(iterator) }
 
@@ -76,7 +97,7 @@ final class ActivitySimulator {
         return TimeInterval(idleNanos) / TimeInterval(NSEC_PER_SEC)
     }
 
-    private func simulateMouseMovement() {
+    private static func simulateMouseMovement() {
         let currentLocation = NSEvent.mouseLocation
         let newLocation = CGPoint(x: currentLocation.x + 1, y: currentLocation.y + 1)
 

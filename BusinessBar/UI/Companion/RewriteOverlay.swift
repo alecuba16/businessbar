@@ -16,7 +16,17 @@ final class RewriteOverlayController: NSObject, NSWindowDelegate {
     static let shared = RewriteOverlayController()
 
     private var panel: NSPanel?
-    private var selectionService = SelectionService()
+    private var selectionService: any OverlaySelectionSink
+
+    /// Test seam: the real controller swaps text through AX or the
+    /// pasteboard, both forbidden in the coverage fixture process. The
+    /// coordinator already takes an injected RewriteSelectionSource for the
+    /// same reason; the overlay needs its own sink because Replace routes
+    /// through replaceSelectionInOwner, which the coordinator protocol
+    /// does not carry.
+    init(selectionService: (any OverlaySelectionSink)? = nil) {
+        self.selectionService = selectionService ?? SelectionService()
+    }
 
     /// Remembers where the captured text came from so Replace is offered
     /// only when the AX path captured it.
@@ -160,6 +170,15 @@ final class RewriteOverlayController: NSObject, NSWindowDelegate {
         currentSelection = nil
     }
 
+    /// Test read: whether the owned panel is still on screen.
+    var panelVisible: Bool { panel?.isVisible ?? false }
+
+    /// Test teardown for injected controllers: order the panel out and
+    /// drop the state without going through windowWillClose.
+    func panelOrderOutAndClear() {
+        dismiss()
+    }
+
     // MARK: - NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
@@ -167,6 +186,19 @@ final class RewriteOverlayController: NSObject, NSWindowDelegate {
         currentSelection = nil
     }
 }
+
+// MARK: - Overlay selection sink
+
+/// Replace path of the overlay controller. SelectionService conforms;
+/// the coverage scenarios inject a recording fixture instead.
+protocol OverlaySelectionSink {
+    func replaceSelection(with text: String) async -> Bool
+    func replaceSelectionInOwner(
+        of selection: SelectionService.CapturedSelection, with newText: String
+    ) async -> Bool
+}
+
+extension SelectionService: OverlaySelectionSink {}
 
 // MARK: - NSScreen helper
 

@@ -32,8 +32,13 @@ struct LocalModelsSheet: View {
 /// start/stop with live status, model catalog with explicit downloads,
 /// and custom model provisioning from a Hugging Face repo id.
 struct LocalModelsSection: View {
-    @ObservedObject private var server = MLXServerManager.shared
-    @ObservedObject private var store = MLXModelStore.shared
+    @ObservedObject private var server: MLXServerManager
+    @ObservedObject private var store: MLXModelStore
+    private let defaults: UserDefaults
+    private let home: String
+    private let locateUV: () -> String?
+    private let fetchDirectory: () async throws -> [MLXModelDirectory.Item]
+    private let inspectRepo: (String) async throws -> MLXRepoInspector.Report
 
     @State private var portText: String
     @State private var idleText: String
@@ -41,10 +46,12 @@ struct LocalModelsSection: View {
     @State private var activeModelID: String?
     @State private var statusDetail = ""
     @State private var downloadedCache: [String] = []
-    @State private var customRepoText = ""
-    @State private var customCheck: MLXRepoInspector.Report?
-    @State private var customError: String?
-    @State private var customChecking = false
+    /// Custom-model provisioning flow. Held as an injected Observable
+    /// object for the same measured reason as ChatView's staging: writes
+    /// through external view-struct copies never reach installed @State,
+    /// so the coverage fixture needs a reference it shares with the
+    /// hosted view to type into the repo field and drive the check.
+    @State private var customFlow: RepoCheckFlow
     @State private var customEntries: [MLXModelCatalog.Entry] = []
     @State private var directoryItems: [MLXModelDirectory.Item] = []
     @State private var directoryFetching = false
@@ -52,17 +59,36 @@ struct LocalModelsSection: View {
     @State private var directoryFilter: MLXModelCatalog.Kind?
     @State private var directorySortBySize = false
 
-    private let installedRAM = Int64(ProcessInfo.processInfo.physicalMemory)
+    private let installedRAM: Int64
 
-    init() {
-        _portText = State(initialValue: String(MLXServerConfig.port()))
-        _idleText = State(initialValue: String(MLXServerConfig.idleMinutes()))
-        _keepLoaded = State(initialValue: MLXServerConfig.keepLoaded())
-        _activeModelID = State(initialValue: MLXServerConfig.activeModelID())
-        _customEntries = State(initialValue: MLXModelCatalog.customEntries)
+    init(
+        server: MLXServerManager = .shared,
+        store: MLXModelStore = .shared,
+        defaults: UserDefaults = .standard,
+        home: String = NSHomeDirectory(),
+        installedRAM: Int64 = Int64(ProcessInfo.processInfo.physicalMemory),
+        locateUV: @escaping () -> String? = MLXEnvironment.locateUV,
+        fetchDirectory: @escaping () async throws -> [MLXModelDirectory.Item] = { try await MLXModelDirectory.fetch() },
+        inspectRepo: @escaping (String) async throws -> MLXRepoInspector.Report = { try await MLXRepoInspector.check(repoID: $0) },
+        customFlow: RepoCheckFlow = RepoCheckFlow()
+    ) {
+        self.server = server
+        self.store = store
+        self.defaults = defaults
+        self.home = home
+        self.installedRAM = installedRAM
+        self.locateUV = locateUV
+        self.fetchDirectory = fetchDirectory
+        self.inspectRepo = inspectRepo
+        _portText = State(initialValue: String(MLXServerConfig.port(defaults: defaults)))
+        _idleText = State(initialValue: String(MLXServerConfig.idleMinutes(defaults: defaults)))
+        _keepLoaded = State(initialValue: MLXServerConfig.keepLoaded(defaults: defaults))
+        _activeModelID = State(initialValue: MLXServerConfig.activeModelID(defaults: defaults))
+        _customEntries = State(initialValue: MLXModelCatalog.customEntries(defaults: defaults))
+        _customFlow = State(initialValue: customFlow)
     }
 
-    private var uvPath: String? { MLXEnvironment.locateUV() }
+    private var uvPath: String? { locateUV() }
 
     var body: some View {
         Section {
@@ -140,7 +166,7 @@ struct LocalModelsSection: View {
                             }
                         }
                         .controlSize(.small)
-                        .disabled(!MLXModelCatalog.isDownloaded(modelID: modelID))
+                        .disabled(!MLXModelCatalog.isDownloaded(modelID: modelID, home: home))
                     }
                 }
 
@@ -159,7 +185,7 @@ struct LocalModelsSection: View {
     private var serverStateLabel: String {
         switch server.state {
         case .stopped:
-            return MLXModelCatalog.isDownloaded(modelID: activeModelID ?? "")
+            return MLXModelCatalog.isDownloaded(modelID: activeModelID ?? "", home: home)
                 ? "Stopped"
                 : "No model downloaded yet"
         default:
@@ -193,7 +219,7 @@ struct LocalModelsSection: View {
                         .fontWeight(.medium)
                     fitPill(fit)
                     kindPill(entry.kind)
-                    let reasoning = MLXModelCatalog.reasoningCapability(id: entry.id)
+                    let reasoning = MLXModelCatalog.reasoningCapability(id: entry.id, defaults: defaults, home: home)
                     if reasoning.supported {
                         Image(systemName: "brain")
                             .foregroundColor(.secondary)
@@ -431,7 +457,7 @@ struct LocalModelsSection: View {
         directoryError = nil
         Task {
             do {
-                let items = try await MLXModelDirectory.fetch()
+                let items = try await fetchDirectory()
                 await MainActor.run {
                     directoryItems = items
                     directoryFetching = false
@@ -453,8 +479,8 @@ struct LocalModelsSection: View {
             ramBytes: item.sizeBytes.map { MLXRepoInspector.estimateRAM(sizeBytes: $0) } ?? 0,
             kind: item.kind
         )
-        MLXModelCatalog.addCustomEntry(entry)
-        customEntries = MLXModelCatalog.customEntries
+        MLXModelCatalog.addCustomEntry(entry, defaults: defaults)
+        customEntries = MLXModelCatalog.customEntries(defaults: defaults)
         refreshDownloads()
     }
 
@@ -466,19 +492,19 @@ struct LocalModelsSection: View {
     private var customModelProvisioning: some View {
         Group {
             HStack {
-                TextField("Hugging Face repo id, e.g. mlx-community/Model-4bit", text: $customRepoText)
-                    .onChange(of: customRepoText) { _ in
+                TextField("Hugging Face repo id, e.g. mlx-community/Model-4bit", text: $customFlow.repoText)
+                    .onChange(of: customFlow.repoText) { _ in
                         // A new id invalidates the previous check result.
-                        customCheck = nil
-                        customError = nil
+                        customFlow.check = nil
+                        customFlow.error = nil
                     }
-                Button(customChecking ? "Checking…" : "Check") {
+                Button(customFlow.checking ? "Checking…" : "Check") {
                     runRepoCheck()
                 }
                 .controlSize(.small)
-                .disabled(customChecking || customRepoText.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(customFlow.checking || customFlow.repoText.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            if customChecking {
+            if customFlow.checking {
                 HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.small)
@@ -487,12 +513,12 @@ struct LocalModelsSection: View {
                         .foregroundColor(.secondary)
                 }
             }
-            if let error = customError {
+            if let error = customFlow.error {
                 Text(error)
                     .font(.caption)
                     .foregroundColor(.red)
             }
-            if let report = customCheck {
+            if let report = customFlow.check {
                 customPreviewCard(report)
             }
         }
@@ -560,21 +586,21 @@ struct LocalModelsSection: View {
     }
 
     private func runRepoCheck() {
-        customChecking = true
-        customError = nil
-        customCheck = nil
-        let repoID = customRepoText
+        customFlow.checking = true
+        customFlow.error = nil
+        customFlow.check = nil
+        let repoID = customFlow.repoText
         Task {
             do {
-                let report = try await MLXRepoInspector.check(repoID: repoID)
+                let report = try await inspectRepo(repoID)
                 await MainActor.run {
-                    customCheck = report
-                    customChecking = false
+                    customFlow.check = report
+                    customFlow.checking = false
                 }
             } catch {
                 await MainActor.run {
-                    customError = error.localizedDescription
-                    customChecking = false
+                    customFlow.error = error.localizedDescription
+                    customFlow.checking = false
                 }
             }
         }
@@ -589,19 +615,19 @@ struct LocalModelsSection: View {
             kind: report.kind,
             reasoning: report.reasoning.supported ? report.reasoning : nil
         )
-        MLXModelCatalog.addCustomEntry(entry)
-        MLXModelCatalog.setReasoningCapability(id: report.repoID, report.reasoning)
-        customEntries = MLXModelCatalog.customEntries
-        customCheck = nil
-        customRepoText = ""
+        MLXModelCatalog.addCustomEntry(entry, defaults: defaults)
+        MLXModelCatalog.setReasoningCapability(id: report.repoID, report.reasoning, defaults: defaults)
+        customEntries = MLXModelCatalog.customEntries(defaults: defaults)
+        customFlow.check = nil
+        customFlow.repoText = ""
         refreshDownloads()
     }
 
     private func removeCustomEntry(_ entry: MLXModelCatalog.Entry) {
-        MLXModelCatalog.removeCustomEntry(id: entry.id)
-        customEntries = MLXModelCatalog.customEntries
+        MLXModelCatalog.removeCustomEntry(id: entry.id, defaults: defaults)
+        customEntries = MLXModelCatalog.customEntries(defaults: defaults)
         if activeModelID == entry.id {
-            activeModelID = MLXServerConfig.activeModelID()
+            activeModelID = MLXServerConfig.activeModelID(defaults: defaults)
             updateLocalProfile()
         }
     }
@@ -613,19 +639,19 @@ struct LocalModelsSection: View {
             TextField("Port", text: $portText)
                 .onChange(of: portText) { _, newValue in
                     if let port = Int(newValue), (1...65_535).contains(port) {
-                        MLXServerConfig.setPort(port)
+                        MLXServerConfig.setPort(port, defaults: defaults)
                         updateLocalProfile()
                     }
                 }
             TextField("Idle stop (minutes)", text: $idleText)
                 .onChange(of: idleText) { _, newValue in
                     if let minutes = Int(newValue), minutes > 0 {
-                        MLXServerConfig.setIdleMinutes(minutes)
+                        MLXServerConfig.setIdleMinutes(minutes, defaults: defaults)
                     }
                 }
             Toggle("Keep model loaded", isOn: $keepLoaded)
                 .onChange(of: keepLoaded) { _, newValue in
-                    MLXServerConfig.setKeepLoaded(newValue)
+                    MLXServerConfig.setKeepLoaded(newValue, defaults: defaults)
                 }
         }
     }
@@ -633,7 +659,7 @@ struct LocalModelsSection: View {
     // MARK: Actions
 
     private func setActiveModel(_ entry: MLXModelCatalog.Entry) {
-        MLXServerConfig.setActiveModelID(entry.id)
+        MLXServerConfig.setActiveModelID(entry.id, defaults: defaults)
         activeModelID = entry.id
         // A running server keeps its old model; switching restarts it on
         // the next chat request or explicit Start.
@@ -647,7 +673,7 @@ struct LocalModelsSection: View {
     private func refreshDownloads() {
         let all = MLXModelCatalog.entries + customEntries
         downloadedCache = all
-            .filter { MLXModelCatalog.isDownloaded(modelID: $0.id) }
+            .filter { MLXModelCatalog.isDownloaded(modelID: $0.id, home: home) }
             .map(\.id)
     }
 
@@ -655,10 +681,26 @@ struct LocalModelsSection: View {
         // The published state already drives the labels; this exists so
         // the onReceive has a place to clear stale details when idle.
         if case .failed = server.state {
-            if let modelID = activeModelID, MLXModelCatalog.isDownloaded(modelID: modelID) {
+            if let modelID = activeModelID, MLXModelCatalog.isDownloaded(modelID: modelID, home: home) {
                 return
             }
             statusDetail = ""
         }
     }
+}
+
+/// State for the custom-model provisioning flow, split out of the view
+/// struct so the coverage fixture can share the reference (measured:
+/// external copies of a SwiftUI view never reach installed @State, while
+/// an injected Observable object keeps identity). The TextField binding
+/// writes through the same object the fixture holds.
+@MainActor
+@Observable
+final class RepoCheckFlow {
+    var repoText = ""
+    var check: MLXRepoInspector.Report?
+    var error: String?
+    var checking = false
+
+    nonisolated init() {}
 }

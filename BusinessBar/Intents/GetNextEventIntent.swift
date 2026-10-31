@@ -7,19 +7,29 @@ struct GetNextEventIntent: AppIntent {
     static var title: LocalizedStringResource = "Get Next Event"
     static var description = IntentDescription("Returns details about your next scheduled calendar event")
     static var openAppWhenRun: Bool = false
+    private var featureEnabled: @MainActor () -> Bool
+    private var nextEvent: @MainActor () -> CalendarEvent?
+
+    init() {
+        featureEnabled = { UserDefaults.standard.bool(forKey: Constants.Defaults.featureCalendar) }
+        nextEvent = {
+            (NSApplication.shared.delegate as? AppDelegate)?.getMeetingManager()?.nextEvent
+        }
+    }
+
+    init(featureEnabled: @escaping @MainActor () -> Bool, nextEvent: @escaping @MainActor () -> CalendarEvent?) {
+        self.featureEnabled = featureEnabled
+        self.nextEvent = nextEvent
+    }
     
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
         let isFeatureEnabled = await MainActor.run {
-            UserDefaults.standard.bool(forKey: Constants.Defaults.featureCalendar)
+            featureEnabled()
         }
         guard isFeatureEnabled else { throw IntentError.featureDisabled }
 
         guard let nextEvent = await MainActor.run(body: { () -> CalendarEvent? in
-            guard let appDelegate = NSApplication.shared.delegate as? AppDelegate,
-                  let meetingManager = appDelegate.getMeetingManager() else {
-                return nil
-            }
-            return meetingManager.nextEvent
+            self.nextEvent()
         }) else {
             throw IntentError.noEvent
         }

@@ -73,6 +73,11 @@ let package = Package(
                 .product(name: "AppAuth", package: "AppAuth-iOS")
             ],
             path: "Tests/BusinessBarTests"
+        ),
+        .testTarget(
+            name: "BusinessBarCoverageTests",
+            dependencies: ["BusinessBar", "BusinessBarCore"],
+            path: "Tests/CoverageTests"
         )
     ]
 )

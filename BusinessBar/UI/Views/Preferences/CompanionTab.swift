@@ -1,3 +1,4 @@
+import ApplicationServices
 import BusinessBarCore
 import KeyboardShortcuts
 import SwiftUI
@@ -7,10 +8,16 @@ import SwiftUI
 /// active so a grant in System Settings shows up on return.
 @MainActor
 private final class AccessibilityPermissionModel: ObservableObject {
-    @Published private(set) var isGranted = AXIsProcessTrusted()
+    @Published private(set) var isGranted: Bool
+    private let status: () -> Bool
+
+    init(status: @escaping () -> Bool) {
+        self.status = status
+        isGranted = status()
+    }
 
     func refresh() {
-        isGranted = AXIsProcessTrusted()
+        isGranted = status()
     }
 }
 
@@ -20,7 +27,7 @@ private final class AccessibilityPermissionModel: ObservableObject {
 /// provider configuration and prompt templates.
 struct CompanionTab: View {
     @AppStorage(Constants.Defaults.featureCompanion) private var companionEnabled = true
-    @StateObject private var accessibilityPermission = AccessibilityPermissionModel()
+    @StateObject private var accessibilityPermission: AccessibilityPermissionModel
 
     @State private var historyMaxAgeDays: Int
     @State private var historyMaxSessions: Int
@@ -36,12 +43,27 @@ struct CompanionTab: View {
     @State private var editingModel: EditingModelTarget?
     @State private var showsLocalModels = false
 
-    private let templateStore = TemplateStore()
+    private let templateStore: TemplateStore
+    private let requestAccessibilityPermissionPrompt: () -> Bool
+    private let openAccessibilitySettingsURL: () -> Void
 
-    init() {
+    init(templateStore: TemplateStore = TemplateStore(),
+         accessibilityStatus: @escaping () -> Bool = { AXIsProcessTrusted() },
+         requestAccessibilityPermissionPrompt: @escaping () -> Bool = {
+        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        return AXIsProcessTrustedWithOptions(options)
+    },
+         openAccessibilitySettingsURL: @escaping () -> Void = {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }) {
+        self.templateStore = templateStore
+        self.requestAccessibilityPermissionPrompt = requestAccessibilityPermissionPrompt
+        self.openAccessibilitySettingsURL = openAccessibilitySettingsURL
+        _accessibilityPermission = StateObject(wrappedValue: AccessibilityPermissionModel(status: accessibilityStatus))
         _historyMaxAgeDays = State(initialValue: CompanionConfigService.historyMaxAgeDays())
         _historyMaxSessions = State(initialValue: CompanionConfigService.historyMaxSessions())
-        _templates = State(initialValue: TemplateStore().load())
+        _templates = State(initialValue: templateStore.load())
         _providers = State(initialValue: CompanionConfigService.chatProviders())
     }
 
@@ -315,13 +337,12 @@ struct CompanionTab: View {
 
                             HStack(spacing: 10) {
                                 Button("Open System Settings") {
-                                    openAccessibilitySettings()
+                                    openAccessibilitySettingsURL()
                                 }
                                 .buttonStyle(.borderedProminent)
 
                                 Button("Request Permission") {
-                                    let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-                                    _ = AXIsProcessTrustedWithOptions(options)
+                                    _ = requestAccessibilityPermissionPrompt()
                                     accessibilityPermission.refresh()
                                 }
                                 .buttonStyle(.bordered)
@@ -428,13 +449,6 @@ struct CompanionTab: View {
     private func agentCommandLine(_ provider: ChatProvider) -> String {
         guard !provider.acpCommand.isEmpty else { return "No command set" }
         return ([provider.acpCommand] + provider.acpArguments).joined(separator: " ")
-    }
-
-    /// Opens System Settings to the Accessibility privacy pane, the same
-    /// destination the Badges tab uses.
-    private func openAccessibilitySettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-        NSWorkspace.shared.open(url)
     }
 }
 

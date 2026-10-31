@@ -7,25 +7,140 @@ import os.log
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    struct WindowPresentation {
+        var show: @MainActor () -> Void
+    }
+
+    @MainActor
+    struct Dependencies {
+        var defaults: UserDefaults
+        var notifications: NotificationCenter
+        var loadTemplates: @MainActor () -> [PromptTemplate]
+        var saveTemplates: @MainActor ([PromptTemplate]) -> Void
+        var eventStore: @MainActor (CalendarProvider, GoogleAuth) -> any EventStoreProtocol
+        var meeting: @MainActor (any EventStoreProtocol) -> MeetingManager
+        var badge: @MainActor () -> BadgeManager
+        var noSleep: @MainActor () -> NoSleepManager
+        var notification: @MainActor () -> NotificationManager
+        var status: @MainActor (MeetingManager, BadgeManager, NoSleepManager, @escaping @MainActor () -> Void) -> AnyObject
+        var preferences: @MainActor (UpdaterViewModel, BadgeManager, MeetingManager, GoogleAuth, PreferencesView.PreferenceTab?) -> WindowPresentation?
+        var onboarding: @MainActor () -> WindowPresentation
+        var activationPolicy: @MainActor (NSApplication.ActivationPolicy) -> Void
+        var installCrash: @MainActor () -> Void
+        var crashAlert: @MainActor () -> Void
+        var registerURL: @MainActor (AppDelegate) -> Void
+        var shortcut: @MainActor (KeyboardShortcuts.Shortcut) -> Void
+        var googleConfigured: @MainActor () -> Bool
+        var axTrusted: @MainActor () -> Bool
+        var permissionAlert: @MainActor () -> Bool
+        var preferencesError: @MainActor () -> Void
+        var enqueue: @MainActor (@escaping @MainActor () -> Void) -> Void
+        var after: @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> Void
+
+        static var live: Dependencies {
+            Dependencies(
+                defaults: .standard,
+                notifications: .default,
+                loadTemplates: { TemplateStore().load() },
+                saveTemplates: { TemplateStore().save($0) },
+                eventStore: { provider, auth in
+                    if provider == .google { return GCEventStoreAdapter(auth: auth) }
+                    return EKEventStoreAdapter()
+                },
+                meeting: { MeetingManager(eventStore: $0) },
+                badge: { BadgeManager() },
+                noSleep: { NoSleepManager() },
+                notification: { NotificationManager() },
+                status: { meeting, badge, noSleep, preferences in
+                    StatusBarController(meetingManager: meeting, badgeManager: badge, noSleepManager: noSleep, onShowPreferences: preferences)
+                },
+                preferences: { updater, badge, meeting, auth, tab in
+                    let controller = PreferencesWindowController(updaterViewModel: updater, badgeManager: badge, meetingManager: meeting, googleAuth: auth, initialTab: tab)
+                    return WindowPresentation(show: { controller.show() })
+                },
+                onboarding: {
+                    let controller = OnboardingWindowController()
+                    return WindowPresentation(show: { controller.show() })
+                },
+                activationPolicy: { NSApp.setActivationPolicy($0) },
+                installCrash: { CrashHandler.shared.install() },
+                crashAlert: { CrashHandler.shared.showCrashAlertIfNeeded() },
+                registerURL: { delegate in
+                    NSAppleEventManager.shared().setEventHandler(
+                        delegate,
+                        andSelector: #selector(handleURLEvent(getURLEvent:replyEvent:)),
+                        forEventClass: AEEventClass(kInternetEventClass),
+                        andEventID: AEEventID(kAEGetURL)
+                    )
+                },
+                shortcut: { KeyboardShortcuts.setShortcut($0, for: .toggleCompanionChat) },
+                googleConfigured: { GoogleAuthConfig.isConfigured },
+                axTrusted: { AXIsProcessTrusted() },
+                permissionAlert: {
+                    let alert = NSAlert()
+                    alert.messageText = "Accessibility Permission Required"
+                    alert.informativeText = "BusinessBar needs Accessibility permission to read dock badge counts for your monitored apps.\n\nClick \"Open Settings\" to grant access, then re-launch BusinessBar."
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "Open Settings")
+                    alert.addButton(withTitle: "Later")
+                    return alert.runModal() == .alertFirstButtonReturn
+                },
+                preferencesError: {
+                    let alert = NSAlert()
+                    alert.messageText = "Could not open Preferences"
+                    alert.informativeText = "An unexpected error occurred while creating the Preferences window.\n\nPlease check the logs in ~/Library/Logs/BusinessBar/ for details."
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                },
+                enqueue: { action in DispatchQueue.main.async { action() } },
+                after: { delay, action in DispatchQueue.main.asyncAfter(deadline: .now() + delay) { action() } }
+            )
+        }
+    }
+
+    private let dependencies: Dependencies
     // MARK: - Managers
-    private var statusBarController: StatusBarController?
+    private var statusBarController: AnyObject?
     private var meetingManager: MeetingManager?
     private var badgeManager: BadgeManager?
     private var noSleepManager: NoSleepManager?
     private var notificationManager: NotificationManager?
 
     // MARK: - Services
-    private(set) var googleAuth = GoogleAuth()
-    private(set) var updaterViewModel = UpdaterViewModel()
+    private(set) var googleAuth: GoogleAuth
+    private(set) var updaterViewModel: UpdaterViewModel
+    private let terminateServices: () -> Void
+
+    override convenience init() {
+        self.init(googleAuth: GoogleAuth(), updaterViewModel: UpdaterViewModel(), terminateServices: {
+            ShellExecutor.killAllAtQuit()
+            MLXServerManager.killAtQuit()
+            MLXModelStore.killAtQuit()
+            CompanionConfigService.shutdownACPSync()
+        })
+    }
+
+    convenience init(googleAuth: GoogleAuth, updaterViewModel: UpdaterViewModel, terminateServices: @escaping () -> Void) {
+        self.init(googleAuth: googleAuth, updaterViewModel: updaterViewModel, terminateServices: terminateServices, dependencies: .live)
+    }
+
+    init(googleAuth: GoogleAuth, updaterViewModel: UpdaterViewModel, terminateServices: @escaping () -> Void, dependencies: Dependencies) {
+        self.googleAuth = googleAuth
+        self.updaterViewModel = updaterViewModel
+        self.terminateServices = terminateServices
+        self.dependencies = dependencies
+        super.init()
+    }
 
     // MARK: - Windows
-    private var preferencesWindowController: PreferencesWindowController?
-    private var onboardingWindowController: OnboardingWindowController?
+    private var preferencesWindowController: WindowPresentation?
+    private var onboardingWindowController: WindowPresentation?
 
     // Backing managers for the SwiftUI Settings scene. Created lazily so a
     // first launch does not pay for them before managers initialize.
-    private lazy var lazyBadgeManager = BadgeManager()
-    private lazy var lazyMeetingManager = MeetingManager(eventStore: EKEventStoreAdapter())
+    private lazy var lazyBadgeManager = dependencies.badge()
+    private lazy var lazyMeetingManager = dependencies.meeting(dependencies.eventStore(.eventKit, googleAuth))
 
     /// Managers handed to the SwiftUI `Settings` scene. Reuse the live
     /// managers when they exist so both windows observe the same state.
@@ -37,21 +152,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - NSApplicationDelegate
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        dependencies.activationPolicy(.accessory)
 
         // Install crash handlers before anything else so unhandled crashes
         // are captured to disk.
-        CrashHandler.shared.install()
+        dependencies.installCrash()
 
         AppLogger.info("Application launching", category: "AppDelegate")
 
         // Register Apple Event handler for URL scheme callbacks (Google OAuth redirect).
-        NSAppleEventManager.shared().setEventHandler(
-            self,
-            andSelector: #selector(handleURLEvent(getURLEvent:replyEvent:)),
-            forEventClass: AEEventClass(kInternetEventClass),
-            andEventID: AEEventID(kAEGetURL)
-        )
+        dependencies.registerURL(self)
 
         registerDefaults()
         migrateChatShortcutDefault()
@@ -61,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         checkFirstLaunch()
 
         // Check if the app crashed in the previous session and alert the user.
-        CrashHandler.shared.showCrashAlertIfNeeded()
+        dependencies.crashAlert()
 
         AppLogger.info("Application launched successfully", category: "AppDelegate")
     }
@@ -69,16 +179,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Async tasks may never run before the process exits, so the kill must
         // be synchronous. Skips the graceful session/cancel round trip.
-        ShellExecutor.killAllAtQuit()
-        MLXServerManager.killAtQuit()
-        MLXModelStore.killAtQuit()
-        CompanionConfigService.shutdownACPSync()
+        terminateServices()
     }
 
     /// Receives URLs routed back to the app via CFBundleURLTypes URL schemes.
     /// Used to complete the Google OAuth flow when the browser redirects to
     /// `com.googleusercontent.apps.{CLIENT_NUMBER}:/oauthredirect?code=...`
-    @objc private func handleURLEvent(getURLEvent event: NSAppleEventDescriptor,
+    @objc func handleURLEvent(getURLEvent event: NSAppleEventDescriptor,
                                       replyEvent: NSAppleEventDescriptor) {
         guard let urlString = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
               let url = URL(string: urlString) else {
@@ -92,7 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Setup
 
     private func registerDefaults() {
-        UserDefaults.standard.registerDefaults()
+        dependencies.defaults.registerDefaults()
     }
 
     /// Moves the chat panel shortcut to the new Cmd+B default once, but
@@ -100,17 +207,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// shortcuts are left untouched.
     private func migrateChatShortcutDefault() {
         let key = "KeyboardShortcuts_" + KeyboardShortcuts.Name.toggleCompanionChat.rawValue
-        guard let raw = UserDefaults.standard.string(forKey: key),
+        guard let raw = dependencies.defaults.string(forKey: key),
               let data = raw.data(using: .utf8),
               let shortcut = try? JSONDecoder().decode(KeyboardShortcuts.Shortcut.self, from: data),
               shortcut == KeyboardShortcuts.Shortcut(.l, modifiers: [.command, .shift]),
-              UserDefaults.standard.object(forKey: "companionChatShortcutMigratedToCmdB") == nil
+              dependencies.defaults.object(forKey: "companionChatShortcutMigratedToCmdB") == nil
         else { return }
-        KeyboardShortcuts.setShortcut(
-            KeyboardShortcuts.Shortcut(.b, modifiers: [.command]),
-            for: .toggleCompanionChat
-        )
-        UserDefaults.standard.set(true, forKey: "companionChatShortcutMigratedToCmdB")
+        dependencies.shortcut(KeyboardShortcuts.Shortcut(.b, modifiers: [.command]))
+        dependencies.defaults.set(true, forKey: "companionChatShortcutMigratedToCmdB")
     }
 
     /// Replaces the shipped default templates with the versions that pin
@@ -118,12 +222,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// unless they are byte-identical to some old default prompt, so user
     /// edits survive the migration.
     private func migrateDefaultTemplatesToOutputTags() {
-        guard UserDefaults.standard.object(forKey: "companionTemplatesMigratedToOutputTags") == nil
+        guard dependencies.defaults.object(forKey: "companionTemplatesMigratedToOutputTags") == nil
         else { return }
-        UserDefaults.standard.set(true, forKey: "companionTemplatesMigratedToOutputTags")
+        dependencies.defaults.set(true, forKey: "companionTemplatesMigratedToOutputTags")
 
-        let store = TemplateStore()
-        let stored = store.load()
+        let stored = dependencies.loadTemplates()
         let oldPrompts = Set([
             "Improve the writing of the following text. Keep its language, meaning and approximate length. Reply with the improved text only, no commentary.\n\n[placeholder]",
             "Correct grammar and spelling mistakes in the following text. Keep its language and meaning. Reply with the corrected text only, no commentary.\n\n[placeholder]",
@@ -138,7 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         if updated != stored {
-            store.save(updated)
+            dependencies.saveTemplates(updated)
         }
     }
 
@@ -152,29 +255,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let eventStore: EventStoreProtocol
         if useGoogle {
             AppLogger.info("Using Google Calendar provider", category: "Calendar")
-            eventStore = GCEventStoreAdapter(auth: googleAuth)
+            eventStore = dependencies.eventStore(.google, googleAuth)
         } else {
             // Fall back to EventKit if Google credentials aren't configured yet.
-            if providerRaw == CalendarProvider.google.rawValue && !GoogleAuthConfig.isConfigured {
+            if providerRaw == CalendarProvider.google.rawValue && !dependencies.googleConfigured() {
                 AppLogger.warning("Google Calendar selected but not configured — falling back to EventKit", category: "Calendar")
-                UserDefaults.standard.set(CalendarProvider.eventKit.rawValue,
+                dependencies.defaults.set(CalendarProvider.eventKit.rawValue,
                                           forKey: Constants.Defaults.calendarProvider)
             }
             AppLogger.info("Using EventKit calendar provider", category: "Calendar")
-            eventStore = EKEventStoreAdapter()
+            eventStore = dependencies.eventStore(.eventKit, googleAuth)
         }
 
-        meetingManager      = MeetingManager(eventStore: eventStore)
-        badgeManager        = BadgeManager()
-        noSleepManager      = NoSleepManager()
-        notificationManager = NotificationManager()
+        meetingManager      = dependencies.meeting(eventStore)
+        badgeManager        = dependencies.badge()
+        noSleepManager      = dependencies.noSleep()
+        notificationManager = dependencies.notification()
 
         notificationManager?.requestAuthorization()
         setupNotificationScheduling()
 
         // Activate NoSleep on start if configured
-        let activateOnStart = UserDefaults.standard.bool(forKey: Constants.Defaults.noSleepActivateOnStart)
-        let noSleepFeatureEnabled = UserDefaults.standard.bool(forKey: Constants.Defaults.featureNoSleep)
+        let activateOnStart = dependencies.defaults.bool(forKey: Constants.Defaults.noSleepActivateOnStart)
+        let noSleepFeatureEnabled = dependencies.defaults.bool(forKey: Constants.Defaults.featureNoSleep)
         AppLogger.info("NoSleep activateOnStart: \(activateOnStart), featureEnabled: \(noSleepFeatureEnabled)", category: "NoSleep")
         if activateOnStart && noSleepFeatureEnabled {
             noSleepManager?.toggle()
@@ -186,22 +289,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let badgeManager,
               let noSleepManager else { return }
 
-        statusBarController = StatusBarController(
-            meetingManager: meetingManager,
-            badgeManager: badgeManager,
-            noSleepManager: noSleepManager,
-            onShowPreferences: { [weak self] in
+        statusBarController = dependencies.status(
+            meetingManager,
+            badgeManager,
+            noSleepManager,
+            { [weak self] in
                 self?.showPreferences()
             }
         )
     }
 
     private func checkFirstLaunch() {
-        let hasLaunchedBefore = UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
+        let hasLaunchedBefore = dependencies.defaults.bool(forKey: "hasLaunchedBefore")
         if !hasLaunchedBefore {
             AppLogger.info("First launch detected — showing onboarding", category: "AppDelegate")
             showOnboarding()
-            UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+            dependencies.defaults.set(true, forKey: "hasLaunchedBefore")
         }
 
         // If the user has previously added apps to monitor but Accessibility
@@ -212,26 +315,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func promptForAccessibilityIfNeeded() {
         guard let badgeManager else { return }
-        guard UserDefaults.standard.bool(forKey: Constants.Defaults.featureBadges) else { return }
+        guard dependencies.defaults.bool(forKey: Constants.Defaults.featureBadges) else { return }
         guard !badgeManager.monitoredApps.isEmpty else { return }
-        guard !AXIsProcessTrusted() else { return }
+        guard !dependencies.axTrusted() else { return }
 
         // Delay slightly so the status bar item is visible before the alert
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        dependencies.after(1.5) { [weak self] in
             self?.showAccessibilityPermissionAlert()
         }
     }
 
     private func showAccessibilityPermissionAlert() {
         AppLogger.warning("Showing accessibility permission alert — monitored apps exist but AX permission not granted", category: "Permissions")
-        let alert = NSAlert()
-        alert.messageText = "Accessibility Permission Required"
-        alert.informativeText = "BusinessBar needs Accessibility permission to read dock badge counts for your monitored apps.\n\nClick \"Open Settings\" to grant access, then re-launch BusinessBar."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Open Settings")
-        alert.addButton(withTitle: "Later")
 
-        if alert.runModal() == .alertFirstButtonReturn {
+        if dependencies.permissionAlert() {
             badgeManager?.openAccessibilitySettings()
         }
     }
@@ -245,17 +342,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         meetingManager.$events
             .sink { [weak self, weak notificationManager] _ in
-                DispatchQueue.main.async {
+                self?.dependencies.enqueue {
                     guard let self, let notificationManager else { return }
                     self.scheduleNotificationsForEvents(meetingManager.events, using: notificationManager)
                 }
             }
             .store(in: &cancellables)
 
-        NotificationCenter.default.publisher(for: .businessBarPreferencesDidChange)
+        dependencies.notifications.publisher(for: .businessBarPreferencesDidChange)
             .sink { [weak self, weak meetingManager, weak notificationManager] _ in
                 guard let self, let meetingManager, let notificationManager else { return }
-                DispatchQueue.main.async {
+                self.dependencies.enqueue {
                     self.scheduleNotificationsForEvents(meetingManager.events, using: notificationManager)
                 }
             }
@@ -263,8 +360,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func scheduleNotificationsForEvents(_ events: [CalendarEvent], using notificationManager: NotificationManager) {
-        let calendarFeatureEnabled = UserDefaults.standard.bool(forKey: Constants.Defaults.featureCalendar)
-        let notificationsFeatureEnabled = UserDefaults.standard.bool(forKey: Constants.Defaults.featureNotifications)
+        let calendarFeatureEnabled = dependencies.defaults.bool(forKey: Constants.Defaults.featureCalendar)
+        let notificationsFeatureEnabled = dependencies.defaults.bool(forKey: Constants.Defaults.featureNotifications)
         guard calendarFeatureEnabled && notificationsFeatureEnabled else {
             for eventID in scheduledEventIDs {
                 notificationManager.cancelNotifications(for: eventID)
@@ -274,7 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let minutesBefore = UserDefaults.standard.integer(forKey: Constants.Defaults.notificationMinutesBefore)
+        let minutesBefore = dependencies.defaults.integer(forKey: Constants.Defaults.notificationMinutesBefore)
         let newEventIDs = Set(events.map { $0.id })
 
         for eventID in scheduledEventIDs.subtracting(newEventIDs) {
@@ -287,7 +384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        let endOfEventEnabled = UserDefaults.standard.bool(forKey: Constants.Defaults.endOfEventNotification)
+        let endOfEventEnabled = dependencies.defaults.bool(forKey: Constants.Defaults.endOfEventNotification)
         if endOfEventEnabled {
             for event in events where !event.isAllDay {
                 notificationManager.scheduleNotification(for: event, minutesBefore: 0)
@@ -301,7 +398,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showOnboarding() {
         if onboardingWindowController == nil {
-            onboardingWindowController = OnboardingWindowController()
+            onboardingWindowController = dependencies.onboarding()
         }
         onboardingWindowController?.show()
     }
@@ -311,26 +408,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// keeps whatever section it was left on.
     func showPreferences(initialTab: PreferencesView.PreferenceTab? = nil) {
         if preferencesWindowController == nil {
-            let bm = badgeManager ?? BadgeManager()
-            let mm = meetingManager ?? MeetingManager(eventStore: EKEventStoreAdapter())
+            let bm = badgeManager ?? dependencies.badge()
+            let mm = meetingManager ?? dependencies.meeting(dependencies.eventStore(.eventKit, googleAuth))
             AppLogger.info("Creating preferences window", category: "AppDelegate")
-            preferencesWindowController = PreferencesWindowController(
-                updaterViewModel: updaterViewModel,
-                badgeManager: bm,
-                meetingManager: mm,
-                googleAuth: googleAuth,
-                initialTab: initialTab
-            )
+            preferencesWindowController = dependencies.preferences(updaterViewModel, bm, mm, googleAuth, initialTab)
         }
 
         guard let controller = preferencesWindowController else {
             AppLogger.fatal("Preferences window controller is nil after initialization", category: "AppDelegate")
-            let alert = NSAlert()
-            alert.messageText = "Could not open Preferences"
-            alert.informativeText = "An unexpected error occurred while creating the Preferences window.\n\nPlease check the logs in ~/Library/Logs/BusinessBar/ for details."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+            dependencies.preferencesError()
             return
         }
 
