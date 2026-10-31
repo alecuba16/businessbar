@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -72,7 +73,14 @@ def xctest_profiles(record, product_directory, started_ns, preexisting=()):
     pattern = Path(record.get("profile_pattern", ""))
     if record.get("schema") != 1 or type(pid) is not int or pid <= 0 or "%p" not in pattern.name:
         raise CoverageError("Invalid XCTest process provenance")
-    if not pattern.is_absolute() or pattern.parent.resolve() != (product_directory / "codecov").resolve():
+    if not pattern.is_absolute():
+        raise CoverageError("XCTest profile destination is outside the selected build product")
+    # macOS /var -> /private/var: resolve both sides before comparing,
+    # the pattern parent resolves to the real path while the product
+    # directory may keep the symlinked form (measured on the CI runner,
+    # where tempfile roots live under /var/folders and this equality
+    # failed exactly when both forms mixed).
+    if Path(os.path.realpath(pattern.parent)) != Path(os.path.realpath(product_directory / "codecov")):
         raise CoverageError("XCTest profile destination is outside the selected build product")
     parts = re.split(r"(%[0-9]*m|%p)", pattern.name)
     expression = "".join(
