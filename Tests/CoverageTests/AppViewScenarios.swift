@@ -653,6 +653,13 @@ enum AppViewScenarios {
         let defaults = try context.defaults("badges-deep")
         var requests = 0
         var settingsOpens = 0
+        // Mutable from the off-main tccutil seam, so the counter and throw
+        // flag live on a reference type instead of captured vars.
+        final class ResetRuns {
+            var count = 0
+            var shouldThrow = false
+        }
+        let resetRuns = ResetRuns()
         let monitor = BadgeBoundary()
         let badges = BadgeManager(
             defaults: defaults, notifications: NotificationCenter(), trust: { true }, monitor: monitor,
@@ -707,9 +714,49 @@ enum AppViewScenarios {
         try deniedHost.press("Request Permission", context)
         try context.equal(requests, 1, "Request Permission uses the injected request boundary")
         try context.equal(settingsOpens, 1, "Open System Settings uses the injected settings boundary")
-        // Reset Permission runs a real tccutil on the host, so the button is
-        // only located, never pressed.
-        try context.expect(deniedHost.control("Reset Permission") != nil, "Reset Permission remains present without executing tccutil")
+        // Reset Permission routes through the injected tccutil seam: the
+        // press disables the feature flag, runs the reset off-main, and
+        // restores the button once the reset answers.
+        let resetHost = Hosted(BadgesTab(
+            badgeManager: denied,
+            resetTCCPermission: {
+                resetRuns.count += 1
+                if resetRuns.shouldThrow {
+                    throw CoverageContext.Failure(description: "tccutil fixture failure")
+                }
+                return 0
+            }
+        ).defaultAppStorage(deniedDefaults), size: NSSize(width: 800, height: 1100))
+        defer { resetHost.close() }
+        await settle()
+        try resetHost.render(context)
+        deniedDefaults.set(true, forKey: Constants.Defaults.featureBadges)
+        await settle()
+        try resetHost.press("Reset Permission", context)
+        for _ in 0..<200 where resetRuns.count == 0 {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.equal(resetRuns.count, 1, "Reset Permission runs the injected tccutil once")
+        try context.expect(deniedDefaults.bool(forKey: Constants.Defaults.featureBadges) == false, "Reset disables the badge feature flag")
+
+        // The reset completes asynchronously; wait for the button to
+        // re-enable before pressing again so the throw path is not
+        // swallowed by the reentry guard.
+        for _ in 0..<200 where resetHost.control("Reset Permission")?.isAccessibilityEnabled() != true {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        // Throwing seam: the failure log path still restores the button.
+        resetRuns.shouldThrow = true
+        try resetHost.press("Reset Permission", context)
+        for _ in 0..<200 where resetRuns.count == 1 {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.equal(resetRuns.count, 2, "Throwing reset still runs the seam")
+        for _ in 0..<200 where resetHost.control("Reset Permission")?.isAccessibilityEnabled() != true {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(resetHost.text.contains("Reset Permission"), "Reset button restores after the failure")
 
         // Feature toggle wiring: disabled panes dim and stays observable.
         deniedDefaults.set(false, forKey: Constants.Defaults.featureBadges)

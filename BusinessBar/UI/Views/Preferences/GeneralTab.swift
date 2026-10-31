@@ -14,6 +14,14 @@ struct GeneralTab: View {
     @State private var launchAtLogin: Bool
     private let launchAtLoginStatus: () -> Bool
     private let setLaunchAtLogin: (Bool) -> Void
+    /// Test seam: the fixture runs as a bare executable where the real
+    /// RuntimeBundle guard would always skip notification cleanup.
+    private let isRuntimeBundlePresent: Bool
+    /// Destructive reset effects, injectable so the coverage fixture can
+    /// run the reset flow without wiping real defaults, keychain entries,
+    /// TCC grants, or Library artifacts. Defaults keep the production
+    /// behavior exactly.
+    private let resetEffects: ResetEffects
 
     // MARK: - Logging configuration
     @AppStorage(Constants.Defaults.loggingEnabled)     private var loggingEnabled     = true
@@ -24,10 +32,14 @@ struct GeneralTab: View {
 
     init(
         launchAtLoginStatus: @escaping () -> Bool = { LaunchAtLoginHelper.isEnabled },
-        setLaunchAtLogin: @escaping (Bool) -> Void = { LaunchAtLoginHelper.setEnabled($0) }
+        setLaunchAtLogin: @escaping (Bool) -> Void = { LaunchAtLoginHelper.setEnabled($0) },
+        isRuntimeBundlePresent: Bool = RuntimeBundle.isPresent,
+        resetEffects: ResetEffects = ResetEffects()
     ) {
         self.launchAtLoginStatus = launchAtLoginStatus
         self.setLaunchAtLogin = setLaunchAtLogin
+        self.isRuntimeBundlePresent = isRuntimeBundlePresent
+        self.resetEffects = resetEffects
         _launchAtLogin = State(initialValue: launchAtLoginStatus())
     }
 
@@ -184,57 +196,40 @@ struct GeneralTab: View {
         AppLogger.fatal("User triggered full settings reset — all data will be erased", category: "General")
 
         // A fresh install is not configured for launch at login.
-        LaunchAtLoginHelper.setEnabled(false)
+        setLaunchAtLogin(false)
 
         // Wipe all persisted defaults (including onboarding and user data).
-        UserDefaults.standard.removePersistentDomain(forName: Constants.bundleIdentifier)
-        UserDefaults.standard.registerDefaults()
+        resetEffects.wipeDefaults()
 
         // Remove any saved Google OAuth state from keychain.
         do {
-            try KeychainHelper.delete(key: GoogleAuthConfig.keychainKey)
+            try resetEffects.deleteOAuthKeychain()
             AppLogger.info("Google OAuth keychain entry removed", category: "General")
         } catch {
             AppLogger.error("Failed to remove Google OAuth keychain entry: \(error.localizedDescription)", category: "General")
         }
 
         // Clear any scheduled/delivered notifications.
-        if RuntimeBundle.isPresent {
-            UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
-            UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        if isRuntimeBundlePresent {
+            resetEffects.clearNotifications()
             AppLogger.info("All notifications cleared", category: "General")
         }
 
         // Best-effort reset of macOS privacy grants for this bundle id.
-        resetTCCPermissions()
+        resetEffects.resetTCCPermissions()
         cleanupUserLibraryArtifacts()
 
         // Keep UI bindings in sync just before relaunch.
         updaterViewModel.automaticallyChecksForUpdates = false
         launchAtLogin = false
-        UserDefaults.standard.synchronize()
+        resetEffects.synchronizeDefaults()
         AppLogger.info("App state reset to fresh install — relaunching", category: "General")
 
-        restartApp()
-    }
-
-    private func resetTCCPermissions() {
-        AppLogger.info("Resetting all TCC permissions via tccutil", category: "Permissions")
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-        task.arguments = ["reset", "All", Constants.bundleIdentifier]
-        do {
-            try task.run()
-            task.waitUntilExit()
-            AppLogger.info("TCC permission reset completed (exit code: \(task.terminationStatus))", category: "Permissions")
-        } catch {
-            AppLogger.error("Failed to run tccutil for TCC reset: \(error.localizedDescription)", category: "Permissions")
-        }
+        resetEffects.restartApp()
     }
 
     private func cleanupUserLibraryArtifacts() {
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
+        let home = resetEffects.libraryHome()
         let bundleID = Constants.bundleIdentifier
 
         // Explicit known paths we own.
@@ -279,8 +274,44 @@ struct GeneralTab: View {
             removeItemIfExists(child)
         }
     }
+}
 
-    private func restartApp() {
+// MARK: - Reset effects
+
+/// Destructive effects of GeneralTab's full reset, collected so coverage
+/// fixtures can substitute every host-touching operation (defaults wipe,
+/// keychain delete, tccutil, notification purge, relaunch) with recorded
+/// no-ops while the reset flow and the Library cleanup loops still run
+/// against an injected home directory. Defaults keep the production
+/// behavior exactly.
+struct ResetEffects {
+    var wipeDefaults: () -> Void = {
+        UserDefaults.standard.removePersistentDomain(forName: Constants.bundleIdentifier)
+        UserDefaults.standard.registerDefaults()
+    }
+    var deleteOAuthKeychain: () throws -> Void = {
+        try KeychainHelper.delete(key: GoogleAuthConfig.keychainKey)
+    }
+    var clearNotifications: () -> Void = {
+        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
+    var resetTCCPermissions: () -> Void = {
+        AppLogger.info("Resetting all TCC permissions via tccutil", category: "Permissions")
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        task.arguments = ["reset", "All", Constants.bundleIdentifier]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            AppLogger.info("TCC permission reset completed (exit code: \(task.terminationStatus))", category: "Permissions")
+        } catch {
+            AppLogger.error("Failed to run tccutil for TCC reset: \(error.localizedDescription)", category: "Permissions")
+        }
+    }
+    var libraryHome: () -> URL = { FileManager.default.homeDirectoryForCurrentUser }
+    var synchronizeDefaults: () -> Void = { UserDefaults.standard.synchronize() }
+    var restartApp: () -> Void = {
         let bundleURL = Bundle.main.bundleURL
 
         if bundleURL.pathExtension == "app" {
@@ -307,7 +338,6 @@ struct GeneralTab: View {
         }
         NSApp.terminate(nil)
     }
-
 }
 
 // MARK: - LaunchAtLoginHelper

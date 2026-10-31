@@ -15,6 +15,14 @@ struct PermissionsStep: View {
     let onBack: () -> Void
     let onNext: () -> Void
     private let permissionStatus: () async -> PermissionStatus
+    /// Test seams: the coverage fixture runs as a bare executable where the
+    /// real notification center answers nothing and EventKit grants nothing,
+    /// so status/authorization/open-URL round trips are injectable.
+    private let requestCalendarAccessTask: () async throws -> Bool
+    private let notificationCenterStatus: (@escaping (UNAuthorizationStatus) -> Void) -> Void
+    private let notificationCenterRequest: (@escaping (Bool) -> Void) -> Void
+    private let openNotificationSettingsURL: (URL) -> Void
+    private let isRuntimeBundlePresent: Bool
     private let requestAccessibility: @MainActor () -> Void
     private let accessibilityRefreshDelay: () async -> Void
 
@@ -22,12 +30,35 @@ struct PermissionsStep: View {
         onBack: @escaping () -> Void,
         onNext: @escaping () -> Void,
         permissionStatus: @escaping () async -> PermissionStatus = { await Self.livePermissionStatus() },
+        requestCalendarAccessTask: @escaping () async throws -> Bool = {
+            let adapter = EKEventStoreAdapter()
+            return try await adapter.requestAccess()
+        },
+        notificationCenterStatus: @escaping (@escaping (UNAuthorizationStatus) -> Void) -> Void = { receive in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                receive(settings.authorizationStatus)
+            }
+        },
+        notificationCenterRequest: @escaping (@escaping (Bool) -> Void) -> Void = { receive in
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                receive(granted)
+            }
+        },
+        openNotificationSettingsURL: @escaping (URL) -> Void = { url in
+            NSWorkspace.shared.open(url)
+        },
+        isRuntimeBundlePresent: Bool = RuntimeBundle.isPresent,
         requestAccessibility: @escaping @MainActor () -> Void = { BadgeManager.requestAccessibilityPermission() },
         accessibilityRefreshDelay: @escaping () async -> Void = { try? await Task.sleep(for: .seconds(1)) }
     ) {
         self.onBack = onBack
         self.onNext = onNext
         self.permissionStatus = permissionStatus
+        self.requestCalendarAccessTask = requestCalendarAccessTask
+        self.notificationCenterStatus = notificationCenterStatus
+        self.notificationCenterRequest = notificationCenterRequest
+        self.openNotificationSettingsURL = openNotificationSettingsURL
+        self.isRuntimeBundlePresent = isRuntimeBundlePresent
         self.requestAccessibility = requestAccessibility
         self.accessibilityRefreshDelay = accessibilityRefreshDelay
     }
@@ -209,9 +240,8 @@ struct PermissionsStep: View {
 
     private func requestCalendarAccess() {
         Task {
-            let adapter = EKEventStoreAdapter()
             do {
-                let granted = try await adapter.requestAccess()
+                let granted = try await requestCalendarAccessTask()
                 await MainActor.run {
                     calendarGranted = granted
                     featureCalendarEnabled = granted
@@ -226,13 +256,13 @@ struct PermissionsStep: View {
     }
 
     private func requestNotificationAccess() {
-        guard RuntimeBundle.isPresent else { return }
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            switch settings.authorizationStatus {
+        guard isRuntimeBundlePresent else { return }
+        notificationCenterStatus { status in
+            switch status {
             case .denied:
                 Task { @MainActor in
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
-                        NSWorkspace.shared.open(url)
+                        openNotificationSettingsURL(url)
                     }
                 }
             case .authorized, .provisional:
@@ -241,7 +271,7 @@ struct PermissionsStep: View {
                     featureNotificationsEnabled = true
                 }
             case .notDetermined:
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                notificationCenterRequest { granted in
                     Task { @MainActor in
                         notificationsGranted = granted
                         featureNotificationsEnabled = granted
@@ -264,17 +294,6 @@ struct PermissionsStep: View {
             if accessibilityGranted {
                 featureBadgesEnabled = true
             }
-        }
-    }
-
-    private func isNotificationStatusGranted(_ status: UNAuthorizationStatus) -> Bool {
-        switch status {
-        case .authorized, .provisional:
-            return true
-        case .notDetermined, .denied:
-            return false
-        @unknown default:
-            return false
         }
     }
 }

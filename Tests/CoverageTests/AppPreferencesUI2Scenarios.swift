@@ -1356,13 +1356,19 @@ enum AppPreferencesUI2Scenarios {
         }
 
         // Row toggles: the measured AX tree renders these Form Toggles as
-        // AXCheckBox nodes (value 0/1, no label); the web and github ones
-        // press and flip through the config service. Web search off
-        // persists provider "none" while keeping the last real provider.
+        // AXCheckBox nodes (value 0/1, no label); the web, command, and
+        // github ones press and flip through the config service. The
+        // command toggle registers its notification category through the
+        // injected seam, never the real notification center. Web search
+        // off persists provider "none" while keeping the last real
+        // provider.
         Config.setSearchProviderKind("brave")
         Config.setCommandToolsEnabled(false)
         Config.setGitHubSearchEnabled(false)
-        let section = UI2Hosted(ToolsSection(), size: NSSize(width: 900, height: 900))
+        var categoryRegistrations = 0
+        let section = UI2Hosted(ToolsSection(
+            registerNotificationCategory: { categoryRegistrations += 1 }
+        ), size: NSSize(width: 900, height: 900))
         defer { section.close() }
         await ui2Settle()
         try section.pressCheckbox(index: 0, context, "Web Search")
@@ -1373,9 +1379,16 @@ enum AppPreferencesUI2Scenarios {
         await ui2Settle()
         try context.expect(Config.searchProviderKind() == "brave", "Web search back on restores the provider")
 
-        // Command Runner row renders with its seeded state; the toggle
-        // press is the crash path documented above, so the caption and the
-        // seeded switch position carry this row's assertions.
+        // Command Runner toggle: the press persists enabled and registers
+        // the notification category exactly once through the seam.
+        try section.pressCheckbox(index: 1, context, "Command Runner on")
+        await ui2Settle()
+        try context.expect(Config.commandToolsEnabled(), "Command runner switch persists enabled")
+        try context.equal(categoryRegistrations, 1, "Command runner on registers the notification category once")
+        try section.pressCheckbox(index: 1, context, "Command Runner off")
+        await ui2Settle()
+        try context.expect(!Config.commandToolsEnabled(), "Command runner switch persists disabled")
+        try context.equal(categoryRegistrations, 1, "Command runner off registers nothing")
         try context.expect(section.text.contains("Command Runner"), "Command runner row renders")
 
         try section.pressCheckbox(index: 2, context, "GitHub Code Search")

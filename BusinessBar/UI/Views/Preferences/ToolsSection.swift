@@ -13,11 +13,21 @@ struct ToolsSection: View {
     @State private var showsWebSearchSheet = false
     @State private var showsCommandSheet = false
     @State private var showsGitHubSheet = false
+    /// Test seam: the command-runner toggle registers its notification
+    /// category when turning on; the fixture injects a recorded no-op so
+    /// the real notification center is never touched. Default keeps the
+    /// production registration exactly.
+    @MainActor private let registerNotificationCategory: () -> Void
 
-    init() {
+    init(
+        registerNotificationCategory: @escaping @MainActor () -> Void = {
+            CommandToolController.registerNotificationCategory()
+        }
+    ) {
         _webSearchEnabled = State(initialValue: CompanionConfigService.searchProviderKind() != "none")
         _commandToolsEnabled = State(initialValue: CompanionConfigService.commandToolsEnabled())
         _githubSearchEnabled = State(initialValue: CompanionConfigService.githubSearchEnabled())
+        self.registerNotificationCategory = registerNotificationCategory
     }
 
     var body: some View {
@@ -43,7 +53,7 @@ struct ToolsSection: View {
                 if enabled {
                     // AppDelegate owns the notification delegate and
                     // already asked for authorization at launch.
-                    CommandToolController.registerNotificationCategory()
+                    registerNotificationCategory()
                 }
             }
 

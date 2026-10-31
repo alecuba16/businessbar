@@ -20,6 +20,7 @@ enum AppUIMiscScenarios {
         do { try await rewriteOverlay(context) } catch { failures.append("rewriteOverlay: \(error)") }
         do { try markdownTextView(context) } catch { failures.append("markdownTextView: \(error)") }
         do { try await permissionsStepDeep(context) } catch { failures.append("permissionsStepDeep: \(error)") }
+        do { try await permissionsStepRequests(context) } catch { failures.append("permissionsStepRequests: \(error)") }
         do { try notificationManagerLiveGuard(context) } catch { failures.append("notificationManagerLiveGuard: \(error)") }
         do { try preferencesWindowController(context) } catch { failures.append("preferencesWindowController: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
@@ -289,6 +290,133 @@ enum AppUIMiscScenarios {
 
         try context.equal(backCalls, 0, "No back navigation in the deep pass")
         try context.equal(finishCalls, 0, "No finish navigation in the deep pass")
+    }
+
+    /// Grant-button request flows with every real permission call replaced
+    /// by an injected seam: EventKit access, notification center status and
+    /// authorization, settings URL, and the accessibility prompt. Each
+    /// hosted step leaves exactly one row ungranted so the single
+    /// "Grant Permission" button maps to that row's request path.
+    private static func permissionsStepRequests(_ context: CoverageContext) async throws {
+        // Calendar grant success: the injected EventKit round trip grants,
+        // the toggle appears, and the stored flag follows the grant.
+        let calendarDefaults = try context.defaults("permissions-calendar-grant")
+        let calendarTab = UI2MiscHosted(PermissionsStep(
+            onBack: {},
+            onNext: {},
+            permissionStatus: { .init(calendar: false, notifications: true, accessibility: true) },
+            requestCalendarAccessTask: { true }
+        ).defaultAppStorage(calendarDefaults), size: NSSize(width: 750, height: 900))
+        defer { calendarTab.close() }
+        await miscSettle()
+        try calendarTab.press("Grant Permission", context)
+        for _ in 0..<200 where calendarDefaults.bool(forKey: Constants.Defaults.featureCalendar) == false {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(calendarDefaults.bool(forKey: Constants.Defaults.featureCalendar), "Calendar grant enables the feature flag")
+        try context.expect(calendarTab.text.contains("Calendar"), "Calendar row still renders after the grant")
+
+        // Calendar grant failure: the throwing seam covers the catch path
+        // and leaves the feature disabled.
+        let failingDefaults = try context.defaults("permissions-calendar-fail")
+        let failingTab = UI2MiscHosted(PermissionsStep(
+            onBack: {},
+            onNext: {},
+            permissionStatus: { .init(calendar: false, notifications: true, accessibility: true) },
+            requestCalendarAccessTask: { throw CoverageContext.Failure(description: "eventkit fixture denial") }
+        ).defaultAppStorage(failingDefaults), size: NSSize(width: 750, height: 900))
+        defer { failingTab.close() }
+        await miscSettle()
+        try failingTab.press("Grant Permission", context)
+        for _ in 0..<60 {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(failingDefaults.bool(forKey: Constants.Defaults.featureCalendar) == false, "Calendar denial keeps the feature disabled")
+
+        // Notification denied: the settings URL opens through the seam.
+        var openedURLs: [String] = []
+        let deniedDefaults = try context.defaults("permissions-notify-denied")
+        let deniedTab = UI2MiscHosted(PermissionsStep(
+            onBack: {},
+            onNext: {},
+            permissionStatus: { .init(calendar: true, notifications: false, accessibility: true) },
+            notificationCenterStatus: { receive in receive(.denied) },
+            notificationCenterRequest: { receive in receive(false) },
+            openNotificationSettingsURL: { url in openedURLs.append(url.absoluteString) },
+            isRuntimeBundlePresent: true
+        ).defaultAppStorage(deniedDefaults), size: NSSize(width: 750, height: 900))
+        defer { deniedTab.close() }
+        await miscSettle()
+        try deniedTab.press("Grant Permission", context)
+        for _ in 0..<60 where openedURLs.isEmpty {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(openedURLs == ["x-apple.systempreferences:com.apple.preference.notifications"], "Denied notifications open System Settings through the seam")
+
+        // Notification authorized: the granted branch flips the flag
+        // without an authorization round trip.
+        let authorizedDefaults = try context.defaults("permissions-notify-authorized")
+        let authorizedTab = UI2MiscHosted(PermissionsStep(
+            onBack: {},
+            onNext: {},
+            permissionStatus: { .init(calendar: true, notifications: false, accessibility: true) },
+            notificationCenterStatus: { receive in receive(.authorized) },
+            notificationCenterRequest: { receive in receive(false) },
+            isRuntimeBundlePresent: true
+        ).defaultAppStorage(authorizedDefaults), size: NSSize(width: 750, height: 900))
+        defer { authorizedTab.close() }
+        await miscSettle()
+        try authorizedTab.press("Grant Permission", context)
+        for _ in 0..<200 where authorizedDefaults.bool(forKey: Constants.Defaults.featureNotifications) == false {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(authorizedDefaults.bool(forKey: Constants.Defaults.featureNotifications), "Authorized notifications enable the feature")
+
+        // Notification notDetermined: the authorization prompt answers
+        // granted, covering the request round trip.
+        let promptDefaults = try context.defaults("permissions-notify-prompt")
+        let promptTab = UI2MiscHosted(PermissionsStep(
+            onBack: {},
+            onNext: {},
+            permissionStatus: { .init(calendar: true, notifications: false, accessibility: true) },
+            notificationCenterStatus: { receive in receive(.notDetermined) },
+            notificationCenterRequest: { receive in receive(true) },
+            isRuntimeBundlePresent: true
+        ).defaultAppStorage(promptDefaults), size: NSSize(width: 750, height: 900))
+        defer { promptTab.close() }
+        await miscSettle()
+        try promptTab.press("Grant Permission", context)
+        for _ in 0..<200 where promptDefaults.bool(forKey: Constants.Defaults.featureNotifications) == false {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(promptDefaults.bool(forKey: Constants.Defaults.featureNotifications), "Prompted notification grant enables the feature")
+
+        // Accessibility grant: the prompt seam flips the status the next
+        // refresh reads, so the delayed refresh enables the badges feature
+        // exactly like a real grant landing between polls.
+        var accessibilityPrompts = 0
+        var accessibilityGrantedNow = false
+        let badgeUngrantedDefaults = try context.defaults("permissions-accessibility-ungranted")
+        badgeUngrantedDefaults.set(true, forKey: Constants.Defaults.featureBadges)
+        let badgeTabUngranted = UI2MiscHosted(PermissionsStep(
+            onBack: {},
+            onNext: {},
+            permissionStatus: { .init(calendar: true, notifications: true, accessibility: accessibilityGrantedNow) },
+            requestAccessibility: {
+                accessibilityGrantedNow = true
+                accessibilityPrompts += 1
+            },
+            accessibilityRefreshDelay: {}
+        ).defaultAppStorage(badgeUngrantedDefaults), size: NSSize(width: 750, height: 900))
+        defer { badgeTabUngranted.close() }
+        await miscSettle()
+        try context.expect(badgeUngrantedDefaults.bool(forKey: Constants.Defaults.featureBadges) == false, "Ungranted accessibility clears the badges flag on first refresh")
+        try badgeTabUngranted.press("Grant Permission", context)
+        for _ in 0..<200 where badgeUngrantedDefaults.bool(forKey: Constants.Defaults.featureBadges) == false {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.equal(accessibilityPrompts, 1, "Accessibility grant prompts through the seam")
+        try context.expect(badgeUngrantedDefaults.bool(forKey: Constants.Defaults.featureBadges), "Granted accessibility enables the badges feature")
     }
 
     // MARK: - NotificationManager live guard

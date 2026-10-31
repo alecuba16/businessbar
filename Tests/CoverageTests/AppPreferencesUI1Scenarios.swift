@@ -202,6 +202,7 @@ enum AppPreferencesUI1Scenarios {
         do { try await companionTab(context) } catch { failures.append("companionTab: \(error)") }
         do { try await companionTabSheets(context) } catch { failures.append("companionTabSheets: \(error)") }
         do { try await generalTab(context) } catch { failures.append("generalTab: \(error)") }
+        do { try await generalTabReset(context) } catch { failures.append("generalTabReset: \(error)") }
         do { try launchAtLoginHelper(context) } catch { failures.append("launchAtLoginHelper: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
@@ -465,6 +466,138 @@ enum AppPreferencesUI1Scenarios {
         }
         try context.expect(dismissed, "Cancel dismisses the reset confirmation dialog")
         try context.expect(tab.text.contains("Launch at login"), "Reset cancel leaves the tab rendered")
+    }
+
+    /// Full reset flow with every destructive effect recorded by the
+    /// injected ResetEffects: no real defaults wipe, keychain delete,
+    /// tccutil run, or relaunch ever happens, while the Library cleanup
+    /// loops execute against fixture-owned paths inside the runner's
+    /// isolated home. A second hosted tab throws from the keychain seam
+    /// to cover the error branch, and runs with the bundle flag false to
+    /// cover the notification guard's skip branch.
+    static func generalTabReset(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("general-tab-reset")
+        let boundary = UpdaterBackendBoundary()
+        let updater = UpdaterViewModel(backend: boundary)
+        updater.automaticallyChecksForUpdates = true
+
+        let fm = FileManager.default
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let bundleID = Constants.bundleIdentifier
+        let ownedPaths: [URL] = [
+            home.appendingPathComponent("Library/LaunchAgents/\(bundleID).plist"),
+            home.appendingPathComponent("Library/Preferences/\(bundleID).plist"),
+            home.appendingPathComponent("Library/Preferences/\(bundleID).variant.plist"),
+            home.appendingPathComponent("Library/Application Support/\(Constants.appName)/keep.txt"),
+            home.appendingPathComponent("Library/Saved Application State/\(bundleID).savedState")
+        ]
+        for path in ownedPaths {
+            try fm.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+            fm.createFile(atPath: path.path, contents: Data("fixture".utf8))
+        }
+
+        final class ResetRecorder {
+            var wipedDefaults = 0
+            var deletedKeychain = 0
+            var clearedNotifications = 0
+            var resetTCC = 0
+            var synchronized = 0
+            var restarted = 0
+        }
+        let recorder = ResetRecorder()
+        var launchChanges: [Bool] = []
+        let effects = ResetEffects(
+            wipeDefaults: { recorder.wipedDefaults += 1 },
+            deleteOAuthKeychain: { recorder.deletedKeychain += 1 },
+            clearNotifications: { recorder.clearedNotifications += 1 },
+            resetTCCPermissions: { recorder.resetTCC += 1 },
+            libraryHome: { home },
+            synchronizeDefaults: { recorder.synchronized += 1 },
+            restartApp: { recorder.restarted += 1 }
+        )
+
+        let tab = Hosted(
+            GeneralTab(
+                launchAtLoginStatus: { true },
+                setLaunchAtLogin: { enabled in launchChanges.append(enabled) },
+                isRuntimeBundlePresent: true,
+                resetEffects: effects
+            )
+            .environmentObject(updater)
+            .defaultAppStorage(defaults),
+            size: NSSize(width: 800, height: 1200)
+        )
+        defer { tab.close() }
+        await settle()
+
+        try tab.press("Reset All Settings to Defaults", context)
+        await settle()
+        try context.expect(tab.sheetText().contains("Reset All Settings?"), "Reset press presents the confirmation dialog")
+        try tab.alertPress("Reset", context)
+        await settle()
+        for _ in 0..<40 where recorder.restarted == 0 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        try context.equal(recorder.wipedDefaults, 1, "Reset wipes the defaults domain once")
+        try context.equal(recorder.deletedKeychain, 1, "Reset deletes the OAuth keychain entry once")
+        try context.equal(recorder.clearedNotifications, 1, "Reset clears notifications once with the bundle present")
+        try context.equal(recorder.resetTCC, 1, "Reset runs the TCC reset once")
+        try context.equal(recorder.synchronized, 1, "Reset synchronizes defaults once")
+        try context.equal(recorder.restarted, 1, "Reset relaunches the app once")
+        try context.expect(launchChanges.first == false, "Reset disables launch at login through the injected setter")
+        try context.expect(updater.automaticallyChecksForUpdates == false, "Reset turns off automatic update checks")
+        for path in ownedPaths {
+            try context.expect(fm.fileExists(atPath: path.path) == false, "Reset removes owned path: \(path.lastPathComponent)")
+        }
+
+        // Keychain failure branch: the throwing seam covers the error log
+        // while the rest of the reset still completes.
+        let failingRecorder = ResetRecorder()
+        var failingLaunches: [Bool] = []
+        var failingEffects = effects
+        failingEffects.deleteOAuthKeychain = { throw CoverageContext.Failure(description: "keychain fixture failure") }
+        failingEffects.wipeDefaults = { failingRecorder.wipedDefaults += 1 }
+        failingEffects.clearNotifications = { failingRecorder.clearedNotifications += 1 }
+        failingEffects.resetTCCPermissions = { failingRecorder.resetTCC += 1 }
+        failingEffects.synchronizeDefaults = { failingRecorder.synchronized += 1 }
+        failingEffects.restartApp = { failingRecorder.restarted += 1 }
+        let failingTab = Hosted(
+            GeneralTab(
+                launchAtLoginStatus: { true },
+                setLaunchAtLogin: { enabled in failingLaunches.append(enabled) },
+                isRuntimeBundlePresent: false,
+                resetEffects: failingEffects
+            )
+            .environmentObject(updater)
+            .defaultAppStorage(defaults),
+            size: NSSize(width: 800, height: 1200)
+        )
+        defer { failingTab.close() }
+        await settle()
+        try failingTab.press("Reset All Settings to Defaults", context)
+        await settle()
+        try failingTab.alertPress("Reset", context)
+        await settle()
+        for _ in 0..<40 where failingRecorder.restarted == 0 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.equal(failingRecorder.restarted, 1, "Keychain failure still completes the reset flow")
+        try context.equal(failingRecorder.clearedNotifications, 0, "Absent bundle skips notification clearing")
+        try context.expect(failingLaunches.first == false, "Failure run still disables launch at login")
+
+        // Both reset runs wipe the Library tree, including the
+        // ~/Library/Logs/BusinessBar directory AppLogger.shared created once
+        // at process init. The real app recreates it on relaunch; this
+        // process keeps running, so the scenario restores the directory or
+        // every later file-log write in the suite fails (measured:
+        // AppLoggingScenarios got 0 files).
+        try fm.createDirectory(
+            at: home.appendingPathComponent("Library/Logs/BusinessBar", isDirectory: true),
+            withIntermediateDirectories: true
+        )
     }
 
     /// LaunchAtLoginHelper bare-binary branch: the coverage runner executes

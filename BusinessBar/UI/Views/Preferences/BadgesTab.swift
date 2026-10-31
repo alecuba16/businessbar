@@ -8,6 +8,10 @@ struct BadgesTab: View {
     /// Injected from PreferencesWindow so the tab drives the shared BadgeManager
     /// rather than reading UserDefaults directly.
     @ObservedObject var badgeManager: BadgeManager
+    /// Test seam: runs the tccutil Accessibility reset off the main thread.
+    /// The coverage fixture injects a recorded no-op; the default keeps the
+    /// production tccutil run exactly.
+    private let resetTCCPermission: () throws -> Int32
 
     @State private var showingAppPicker = false
     @State private var isResettingPermission = false
@@ -17,6 +21,21 @@ struct BadgesTab: View {
     @AppStorage(Constants.Defaults.hideIconWhenNoNotification) private var hideWhenNoNotification = false
     @AppStorage(Constants.Defaults.badgePollInterval)          private var badgePollInterval      = Constants.DefaultValues.badgePollInterval
     @AppStorage(Constants.Defaults.badgeIconSize)              private var badgeIconSize          = "small"
+
+    init(
+        badgeManager: BadgeManager,
+        resetTCCPermission: @escaping () throws -> Int32 = {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", "Accessibility", Constants.bundleIdentifier]
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus
+        }
+    ) {
+        self.badgeManager = badgeManager
+        self.resetTCCPermission = resetTCCPermission
+    }
 
     var body: some View {
         Form {
@@ -230,13 +249,9 @@ struct BadgesTab: View {
         AppLogger.info("Resetting Accessibility permission via tccutil", category: "Permissions")
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            task.arguments = ["reset", "Accessibility", Constants.bundleIdentifier]
             do {
-                try task.run()
-                task.waitUntilExit()
-                AppLogger.info("Accessibility permission reset completed (exit code: \(task.terminationStatus))", category: "Permissions")
+                let code = try resetTCCPermission()
+                AppLogger.info("Accessibility permission reset completed (exit code: \(code))", category: "Permissions")
             } catch {
                 AppLogger.error("Failed to run tccutil for Accessibility reset: \(error.localizedDescription)", category: "Permissions")
             }
