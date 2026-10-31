@@ -40,7 +40,9 @@ enum AppCoverageScenarios {
         await run("preferences-ui1", failures: &failures) { try await AppPreferencesUI1Scenarios.run(context) }
         await run("preferences-ui2", failures: &failures) { try await AppPreferencesUI2Scenarios.run(context) }
         await run("crash-acp", failures: &failures) { try await AppCrashAcpScenarios.run(context) }
+        await run("ui-misc", failures: &failures) { try await AppUIMiscScenarios.run(context) }
         await run("logging", failures: &failures) { try await AppLoggingScenarios.run(context) }
+        await run("chat-stream", failures: &failures) { try await AppChatStreamScenarios.run(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 

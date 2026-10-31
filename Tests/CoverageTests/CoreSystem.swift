@@ -37,6 +37,7 @@ enum CoreSystemScenarios {
     static func run(_ context: CoverageContext) async throws {
         try await badges(context)
         try monitor(context)
+        try await monitorRealObserver(context)
         try discoveryAndIcons(context)
         try await noSleep(context)
         try assertionsAndActivity(context)
@@ -191,6 +192,84 @@ enum CoreSystemScenarios {
         try c.expect(absent.allDockItemElements().isEmpty, "missing Dock is empty")
         absent.startMonitoring(apps: apps)
         absent.stopMonitoring()
+    }
+
+    /// The real AXObserver path: setupAXObserver/tearDownAXObserver and the
+    /// kAXCreated notification callback. Measured with a probe on this host:
+    /// AXObserverCreate succeeds on the scenario process's OWN pid without
+    /// AX trust (self-owned AX needs no prompt), and creating an owned
+    /// window fires the notification so handleDockChildChange and
+    /// refreshDockChildren run for real. The dock seam points at the
+    /// process itself, so no other application is ever queried.
+    private static func monitorRealObserver(_ c: CoverageContext) async throws {
+        // The AX tree of this process only materializes once NSApplication
+        // is properly launched (measured: the probe failed the same way
+        // without this). Prohibited policy keeps it off the Dock.
+        let application = NSApplication.shared
+        application.setActivationPolicy(.prohibited)
+        application.finishLaunching()
+        let defaults = UserDefaults(suiteName: "core.badge.real-observer")!
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let ownBundleID = Bundle.main.bundleIdentifier ?? "coverage.self"
+        let monitor = BadgeMonitor(
+            defaults: defaults,
+            trust: { true },
+            dock: { (selfPID, AXUIElementCreateApplication(selfPID)) },
+            attribute: { element, name in
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+                return value
+            },
+            schedule: { interval, action in
+                Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in action() }
+            }
+        )
+        let apps = [MonitoredApp(bundleIdentifier: ownBundleID, displayName: "Self")]
+        var received: [Int] = []
+        monitor.onBadgeUpdate = { _, count in received.append(count) }
+
+        // startMonitoring with a real observer on our own pid: the element
+        // scan finds nothing yet (no windows), then a created window makes
+        // the kAXCreated notification fire and the dock children refresh
+        // to include it.
+        monitor.startMonitoring(apps: apps)
+        try c.expect(monitor.allDockItemElements().count >= 0, "Real-observer start completes against the own process")
+
+        let window = NSWindow(
+            contentRect: NSRect(x: -100_000, y: -100_000, width: 200, height: 200),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        // Same rule as every hosted harness window: with the Swift strong
+        // reference alive, AppKit's released-when-closed would over-release
+        // (measured: _NSWindowTransformAnimation dealloc segfault in the
+        // next suite's autorelease pool pop).
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+        var matched = monitor.allDockItemElements().count
+        for _ in 0..<40 where matched == 0 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            matched = monitor.allDockItemElements().count
+        }
+        try c.expect(matched > 0, "Owned window creation reaches the real kAXCreated observer")
+
+        // The notification callback and the poll both ran without touching
+        // any process other than the scenario's own.
+        monitor.pollBadges()
+        monitor.stopMonitoring()
+        try c.expect(monitor.allDockItemElements().count >= matched, "Teardown keeps the live scan functional after stop")
+        // Deterministic window teardown: closing inside the scenario and
+        // draining the run loop settles the CA window-animation commit here
+        // (measured crash: leaving it to the variable's dealloc segfaulted
+        // an _NSWindowTransformAnimation in the next suite's autorelease
+        // pool pop).
+        window.orderOut(nil)
+        window.close()
+        for _ in 0..<10 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
     }
 
     private static func discoveryAndIcons(_ c: CoverageContext) throws {

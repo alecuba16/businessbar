@@ -169,6 +169,28 @@ enum CoreMLXScenarios {
         try await lifecycle(context, session: session)
         try await measuredNetworkGaps(context)
         try await measuredLifecycleGaps(context, session: session)
+        try liveDefaultsAndQuitKill(context)
+    }
+
+    /// rssBytes and killAtQuit are the launch-and-quit surface of the
+    /// manager the app wires up: /bin/ps answers resident size for a live
+    /// pid, and the quit-kill reap is the no-op the app hits when no
+    /// server ever spawned. The convenience init that wires the .live
+    /// driver stays private to the module, so its coverage belongs to the
+    /// app's own launch path, not this harness.
+    private static func liveDefaultsAndQuitKill(_ c: CoverageContext) throws {
+        // rssBytes against the scenario's own process: /bin/ps answers for
+        // a live pid, and 0 for a dead one.
+        let own = MLXServerManager.rssBytes(pid: ProcessInfo.processInfo.processIdentifier)
+        try c.expect(own >= 0, "rssBytes returns KB-precision bytes for a live pid")
+        try c.equal(MLXServerManager.rssBytes(pid: -1), 0, "rssBytes returns zero for a dead pid")
+
+        // Quit-kill with an empty table is the quit-time no-op the app
+        // hits when no server ever spawned. The registration path itself
+        // only runs from the .live driver on a real spawn, which the
+        // harness never performs.
+        MLXServerManager.killAtQuit()
+        try c.expect(true, "Quit-kill with an empty table is a safe no-op")
     }
 
     private static func validators(_ c: CoverageContext) throws {

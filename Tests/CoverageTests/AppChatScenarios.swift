@@ -355,7 +355,10 @@ enum AppChatScenarios {
         try context.expect(view.text.contains("New Chat"), "Drawer offers a new chat")
         try context.expect(view.text.contains("Seeded Session"), "Drawer lists the seeded session")
         try context.expect(view.text.contains("1 messages"), "Drawer row shows the seeded message count")
-        try context.expect(view.text.contains("Close history"), "Drawer carries the close control")
+        // The visible close is an image-only button exposing just its help
+        // tooltip (the labeled twin is accessibilityHidden for the Esc
+        // shortcut), so the close control is asserted by help text.
+        try context.expect(view.controlWithHelp("Close history") != nil, "Drawer carries the close control")
 
         // Row press loads the session and closes the drawer.
         try view.pressContaining("Seeded Session", context)
@@ -414,15 +417,19 @@ enum AppChatScenarios {
         try context.expect(store.isStreaming, "Stop press leaves the flag to the stream task, which is absent here")
 
         // Close-and-start-new: with messages on screen the closable-session
-        // guard passes, the thread clears, and history reloads unchanged
-        // because nothing was persisted (persistence rides on send).
+        // guard passes and the thread clears. The nil-client send never
+        // reaches store.send (the view guards first), but the earlier Edit
+        // press persisted the truncated thread as an empty-titled session,
+        // so history reloads with exactly that one entry, matching the
+        // "closed chat stays in history" contract.
         store.isStreaming = false
         store.messages = [ChatMessage(role: .user, content: "kept prompt")]
         await chatSettle()
         try view.pressHelp("Close this chat and start a new one. The closed chat stays in history.", context)
         await chatSettle()
         try context.expect(store.messages.isEmpty, "Close and start new clears the on-screen thread")
-        try context.expect(store.sessionHistory.isEmpty, "Nothing was persisted, so history stays empty")
+        try context.expect(store.currentSessionID == nil, "Close and start new drops the current session id")
+        try context.expect(store.sessionHistory.count == 1 && store.sessionHistory.first?.title.isEmpty == true, "The edit-persisted session stays in history after close")
     }
 
     static func selectionService(_ context: CoverageContext) async throws {

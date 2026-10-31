@@ -75,6 +75,95 @@ private final class UI2Hosted<Content: View> {
         window.contentView = nil
         window.close()
     }
+
+    /// Presses an unnamed Form Toggle rendered as an AXCheckBox node
+    /// (value 0/1, no label, measured on this host in ToolsSection).
+    /// performPress's boolean is NOT a reliable success signal: measured on
+    /// this host, CalendarsTab's custom-Binding toggle returns false while
+    /// the action still runs (the flag flips). The scenarios assert the
+    /// effect; this helper only requires the node to be enabled.
+    func pressCheckbox(index: Int, _ context: CoverageContext, _ label: String) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+        }
+        let checkboxes = OwnedAccessibility.elements(in: host).filter {
+            ($0.accessibilityRole() as? String ?? "").contains("CheckBox")
+        }
+        guard checkboxes.count > index, checkboxes[index].isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Checkbox not found or disabled at index \(index): \(label)")
+        }
+        _ = checkboxes[index].accessibilityPerformPress()
+    }
+
+    /// Presses a borderless image button located by its help tooltip.
+    /// Measured on this host: the node answers performPress.
+    func pressByHelp(_ help: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        guard let element = OwnedAccessibility.elements(in: host).first(where: { $0.helpText() == help }),
+              element.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "UI2 control with help not found or disabled: \(help)")
+        }
+        try context.expect(element.accessibilityPerformPress(), "UI2 press by help succeeds: \(help)")
+    }
+
+    /// Presses the first pressable node after the node carrying the text,
+    /// for borderless row buttons (minus circles) rendered next to their
+    /// row text. Measured on this host: the image button follows its row
+    /// text in AX order and answers performPress.
+    func pressAfterText(_ rowText: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+        }
+        let all = OwnedAccessibility.elements(in: host)
+        guard let row = all.lastIndex(where: { element in
+            [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String]
+                .compactMap { $0 }
+                .contains { $0.contains(rowText) }
+        }) else {
+            throw CoverageContext.Failure(description: "UI2 row text not found: \(rowText)")
+        }
+        guard let button = all[(row + 1)...].first(where: { $0.isAccessibilityEnabled() }) else {
+            throw CoverageContext.Failure(description: "UI2 row button not found after: \(rowText)")
+        }
+        try context.expect(button.accessibilityPerformPress(), "UI2 row button press succeeds after \(rowText)")
+    }
+
+    /// Sheets presented by the hosted view open their own
+    /// SheetPresentationWindow; presses inside them walk that window.
+    func sheetText() -> String {
+        OwnedAccessibility.materialize()
+        return sheetElements().flatMap { element in
+            [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String].compactMap { $0 }
+        }.joined(separator: "\n")
+    }
+
+    func sheetPress(_ label: String, _ context: CoverageContext) throws {
+        guard let element = sheetElements().first(where: { $0.accessibilityLabel() == label || $0.accessibilityTitle() == label }),
+              element.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "UI2 sheet control not found or disabled: \(label)")
+        }
+        try context.expect(element.accessibilityPerformPress(), "UI2 sheet control press succeeds: \(label)")
+    }
+
+    private func sheetElements() -> [OwnedAccessibility.Element] {
+        OwnedAccessibility.materialize()
+        var found: [OwnedAccessibility.Element] = []
+        for panel in NSApp.windows {
+            guard panel.isVisible,
+                  String(describing: type(of: panel)).contains("SheetPresentation"),
+                  let content = panel.contentView else { continue }
+            found.append(contentsOf: OwnedAccessibility.elements(in: content))
+        }
+        return found
+    }
 }
 
 @MainActor
@@ -90,6 +179,7 @@ enum AppPreferencesUI2Scenarios {
     static func run(_ context: CoverageContext) async throws {
         var failures: [String] = []
         do { try await toolsSection(context) } catch { failures.append("toolsSection: \(error)") }
+        do { try await toolsSectionDeep(context) } catch { failures.append("toolsSectionDeep: \(error)") }
         do { try await localModelsSection(context) } catch { failures.append("localModelsSection: \(error)") }
         do { try await localModelsDeep(context) } catch { failures.append("localModelsDeep: \(error)") }
         do { try await calendarsTab(context) } catch { failures.append("calendarsTab: \(error)") }
@@ -234,6 +324,14 @@ enum AppPreferencesUI2Scenarios {
         }
 
         // Server manager with a stub python resolver and a free port.
+        // The port must be CLOSED on this host: the health-wait treats any
+        // 200 responder as the server, and a developer's real MLX server on
+        // the default port (measured live: 8790 answering /health) would
+        // flip the fixture into the running state. An OS-assigned ephemeral
+        // port is closed the moment its probe socket closes.
+        let probeSocket = try SocketProbe()
+        let fixturePort = try probeSocket.port()
+        MLXServerConfig.setPort(fixturePort, defaults: defaults)
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.timeoutIntervalForRequest = 1
         sessionConfig.timeoutIntervalForResource = 1
@@ -309,10 +407,12 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(section.text.contains("Stopped"), "Downloaded active model shows the stopped label")
         try context.expect(section.text.contains("Keep model loaded"), "Settings rows present")
         // TextFields initialized with real values expose the value, not the
-        // placeholder: owned-AX shows bare "8790" and "5" lines with no
-        // "Port"/"Idle stop (minutes)" labels while the fields hold text.
+        // placeholder: owned-AX shows the port and idle minutes as bare
+        // lines with no "Port"/"Idle stop (minutes)" labels while the
+        // fields hold text. The port line is the probe-reserved fixture
+        // port written above.
         let axLines = section.text.split(separator: "\n").map(String.init)
-        try context.expect(axLines.contains("8790"), "Port field carries its configured value")
+        try context.expect(axLines.contains(String(fixturePort)), "Port field carries its configured value")
         try context.expect(axLines.contains("5"), "Idle field carries its configured value")
 
         // Directory browse: injected fetch returns fixture items, filter and
@@ -498,14 +598,14 @@ enum AppPreferencesUI2Scenarios {
         )
         defer { deniedTab.close() }
         await ui2Settle()
-        try deniedTab.pressSwitch(index: 0, context, "Enable calendar functionality off")
+        try deniedTab.pressCheckbox(index: 0, context, "Enable calendar functionality off")
         await ui2Settle()
         try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar) == false, "Feature toggle press persists the disabled state")
 
         // Feature toggle back on without permission: the eventKit branch
         // runs the real request through the fake store, which denies, so the
         // request-denied log branch runs and the flag stays off.
-        try deniedTab.pressSwitch(index: 0, context, "Enable calendar functionality on")
+        try deniedTab.pressCheckbox(index: 0, context, "Enable calendar functionality on")
         await ui2Settle()
         await ui2Settle()
         try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar) == false, "Denied request keeps the feature disabled")
@@ -528,10 +628,19 @@ enum AppPreferencesUI2Scenarios {
         await ui2Settle()
         // The stored kill-switch from the denied round trips stays off until
         // the granted press flips it through the same binding.
-        try grantedTab.pressSwitch(index: 0, context, "Enable calendar functionality granted on")
+        try grantedTab.pressCheckbox(index: 0, context, "Enable calendar functionality granted on")
         await ui2Settle()
         await ui2Settle()
         try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Granted request persists the enabled state")
+        // loadCalendars guards on the feature flag, so the onAppear load
+        // early-returned while the flag was still off. The app's own reload
+        // trigger (activation, same as the PermissionsStep flow) drives
+        // refreshAuthStatus and the now-enabled load.
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        for _ in 0..<20 where grantedTab.text.contains("Coverage calendar granted") == false {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
         try context.expect(grantedTab.text.contains("Coverage calendar granted"), "Granted store calendars render in the selection list")
 
         // Grant Notification Permission press: RuntimeBundle is absent in
@@ -573,6 +682,11 @@ enum AppPreferencesUI2Scenarios {
             FileManager.default.createFile(atPath: snapshot.appendingPathComponent(file).path, contents: Data("fixture".utf8))
         }
 
+        // Closed fixture port (see localModelsSection for the measured
+        // reason): a real MLX server answering /health on the default port
+        // would flip this stub into the running state.
+        let probeSocket = try SocketProbe()
+        MLXServerConfig.setPort(try probeSocket.port(), defaults: defaults)
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.timeoutIntervalForRequest = 1
         sessionConfig.timeoutIntervalForResource = 1
@@ -671,6 +785,14 @@ enum AppPreferencesUI2Scenarios {
         MLXServerConfig.setActiveModelID(curatedID, defaults: defaults)
         await ui2Settle()
         try context.expect(section.text.contains(MLXModelCatalog.entries[0].displayName), "Curated row renders after activation")
+        // downloadedCache only refreshes on server or store events, so a
+        // real download round trip (fake downloader, then Cancel) drives the
+        // refresh the same way a user's download does; the row then swaps
+        // its Download control for Delete with the seeded weights on disk.
+        try section.press("Download", context)
+        await ui2Settle()
+        try section.press("Cancel", context)
+        await ui2Settle()
         try section.press("Delete", context)
         await ui2Settle()
         try context.expect(MLXModelCatalog.isDownloaded(modelID: curatedID, home: home) == false, "Curated delete removes the seeded weights")
@@ -702,4 +824,159 @@ enum AppPreferencesUI2Scenarios {
         }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
     }
+
+    /// Deep pass over the tools rows and the three configure sheets:
+    /// every press here was measured on the hosted AX tree first
+    /// (switches render as AXCheckBox nodes here, not PlatformSwitch).
+    /// The Command Runner toggle is never pressed: its onChange calls
+    /// CommandToolController.registerNotificationCategory() which reaches
+    /// UNUserNotificationCenter.current() and aborts the bare binary
+    /// (measured Abort trap 6); its row state is driven through config
+    /// writes instead. Field bindings stay out (AX writes do not reach
+    /// SwiftUI bindings, the LocalModels Check lesson), NSOpenPanel stays
+    /// out (real panel), and the Add-rule button stays out (disabled while
+    /// its field binding is empty).
+    static func toolsSectionDeep(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
+        let defaults = try context.defaults("tools-deep")
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        let previousCredentials = Config.credentials
+        var secrets: [String: Data] = [:]
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        Config.credentials = .init(load: { secrets[$0] }, save: { secrets[$0] = $1 }, delete: { secrets.removeValue(forKey: $0) })
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+            Config.credentials = previousCredentials
+        }
+
+        // Row toggles: the measured AX tree renders these Form Toggles as
+        // AXCheckBox nodes (value 0/1, no label); the web and github ones
+        // press and flip through the config service. Web search off
+        // persists provider "none" while keeping the last real provider.
+        Config.setSearchProviderKind("brave")
+        Config.setCommandToolsEnabled(false)
+        Config.setGitHubSearchEnabled(false)
+        let section = UI2Hosted(ToolsSection(), size: NSSize(width: 900, height: 900))
+        defer { section.close() }
+        await ui2Settle()
+        try section.pressCheckbox(index: 0, context, "Web Search")
+        await ui2Settle()
+        try context.expect(Config.searchProviderKind() == "none", "Web search off persists provider none")
+        try context.expect(Config.lastSearchProviderKind() == "brave", "Off keeps the last real provider")
+        try section.pressCheckbox(index: 0, context, "Web Search back on")
+        await ui2Settle()
+        try context.expect(Config.searchProviderKind() == "brave", "Web search back on restores the provider")
+
+        // Command Runner row renders with its seeded state; the toggle
+        // press is the crash path documented above, so the caption and the
+        // seeded switch position carry this row's assertions.
+        try context.expect(section.text.contains("Command Runner"), "Command runner row renders")
+
+        try section.pressCheckbox(index: 2, context, "GitHub Code Search")
+        await ui2Settle()
+        try context.expect(Config.githubSearchEnabled(), "GitHub switch persists enabled")
+        try section.pressCheckbox(index: 2, context, "GitHub Code Search off")
+        await ui2Settle()
+        try context.expect(!Config.githubSearchEnabled(), "GitHub switch persists disabled")
+
+        // Configure presses present the sheets through the section's own
+        // presentation state.
+        try section.press("Configure…", context)
+        await ui2Settle()
+        try context.expect(section.sheetText().contains("Web Search"), "Web search Configure presents its sheet")
+        try section.sheetPress("Done", context)
+        await ui2Settle()
+
+        // Command sheet: seeded prefix rules render, the minus press
+        // removes through the onSave boundary, the category reset press
+        // clears the pinned mode, and Done dismisses.
+        Config.setCommandToolsEnabled(true)
+        Config.setCommandAllowedPrefixes(["git status", "npm test"])
+        Config.setCommandDeniedPrefixes(["curl *"])
+        Config.setCommandCategoryMode(.deny, for: .fileWrite)
+        let commandSheet = UI2Hosted(CommandRunnerToolSheet(), size: NSSize(width: 520, height: 700))
+        defer { commandSheet.close() }
+        await ui2Settle()
+        try context.expect(commandSheet.text.contains("git status"), "Seeded allow rule renders")
+        try commandSheet.pressByHelp("Follow the session mode", context)
+        await ui2Settle()
+        try context.expect(Config.commandCategoryMode(.fileWrite) == nil, "Category reset clears the pinned mode")
+
+        // Rule minus press: only the minus circle on the allow row is a
+        // borderless image button next to the rule text; the row lookup
+        // targets by rule text then the following pressable node.
+        try commandSheet.pressAfterText("npm test", context)
+        await ui2Settle()
+        try context.expect(Config.commandAllowedPrefixes() == ["git status"], "Rule minus press removes through onSave")
+        try commandSheet.press("Done", context)
+
+        // Custom web search sheet: header pairs render and the minus
+        // press (located by its help tooltip, measured) persists the
+        // trimmed list.
+        Config.setSearchProviderKind("custom")
+        try? Config.setCustomSearchHeaders([(name: "X-Fixture", value: "one"), (name: "X-Second", value: "two")])
+        let customSheet = UI2Hosted(WebSearchToolSheet(), size: NSSize(width: 520, height: 460))
+        defer { customSheet.close() }
+        await ui2Settle()
+        try context.expect(customSheet.text.contains("X-Fixture"), "Header pair name renders")
+        try customSheet.pressByHelp("Remove header", context)
+        await ui2Settle()
+        // The help lookup presses the FIRST minus (X-Fixture's row), so the
+        // remaining pair is the second one.
+        try context.expect(Config.customSearchHeaders().map(\.name) == ["X-Second"], "Header minus press persists the remaining pair")
+        try customSheet.press("Add Header", context)
+        await ui2Settle()
+        // The appended pair starts empty, so its placeholder never shows
+        // as text; the added row is measured by its own Remove-header
+        // button appearing in the help list.
+        let removeHelps = OwnedAccessibility.elements(in: customSheet.host).compactMap { $0.helpText() }
+        try context.expect(removeHelps.filter { $0 == "Remove header" }.count == 2, "Add Header appends an editable pair row")
+        try customSheet.press("Done", context)
+    }
+}
+
+/// Reserves a locally closed port for fixture health checks. The probe
+/// binds an OS-assigned port and holds it without listening, so connects
+/// are refused while the scenario runs and nothing else can steal the port:
+/// the health-wait must never see a real server answering 200 there.
+final class SocketProbe: @unchecked Sendable {
+    private let fd: Int32
+
+    init() throws {
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw CoverageContext.Failure(description: "probe socket failed") }
+        fd = descriptor
+        var on: Int32 = 1
+        _ = Darwin.setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = INADDR_LOOPBACK.bigEndian
+        addr.sin_port = 0
+        let bound = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 else {
+            Darwin.close(fd)
+            throw CoverageContext.Failure(description: "probe bind failed")
+        }
+    }
+
+    func port() throws -> Int {
+        var addr = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let read = withUnsafeMutablePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.getsockname(fd, sa, &len)
+            }
+        }
+        guard read == 0 else { throw CoverageContext.Failure(description: "probe getsockname failed") }
+        return Int(addr.sin_port.bigEndian)
+    }
+
+    deinit { Darwin.close(fd) }
 }

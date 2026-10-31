@@ -8,7 +8,8 @@ enum CoreCoverageScenarios {
             ("network/ACP", CoreNetworkScenarios.run),
             ("MLX", CoreMLXScenarios.run),
             ("badges/NoSleep", CoreSystemScenarios.run),
-            ("meeting/utilities", CoreMeetingUtilitiesScenarios.run)
+            ("meeting/utilities", CoreMeetingUtilitiesScenarios.run),
+            ("tail/mapping", CoreTailScenarios.run)
         ]
         var failures: [String] = []
         for (name, scenario) in suites {

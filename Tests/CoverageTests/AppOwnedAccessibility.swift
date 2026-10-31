@@ -6,16 +6,28 @@ import Foundation
 enum OwnedAccessibility {
     private static var preparedApplication = false
     @MainActor struct Element {
-        fileprivate let object: NSObject
+        let object: NSObject
+
+        init(object: NSObject) {
+            self.object = object
+        }
 
         func accessibilityLabel() -> String? { value("accessibilityLabel") as? String }
         func accessibilityTitle() -> String? { value("accessibilityTitle") as? String }
         func accessibilityValue() -> Any? { value("accessibilityValue") }
         func isAccessibilityEnabled() -> Bool { boolean("isAccessibilityEnabled") }
         func accessibilityPerformPress() -> Bool { boolean("accessibilityPerformPress") }
+        func accessibilityPerformShowMenu() -> Bool { boolean("accessibilityPerformShowMenu") }
+        var respondsShowMenu: Bool { object.responds(to: NSSelectorFromString("accessibilityPerformShowMenu")) }
+        func performShowMenu() -> Bool { boolean("accessibilityPerformShowMenu") }
+        func children() -> [Element] {
+            (object.perform(NSSelectorFromString("accessibilityChildren"))?.takeUnretainedValue() as? [Any] ?? [])
+                .compactMap { ($0 as? NSObject).map { Element(object: $0) } }
+        }
         func accessibilityRole() -> Any? { value("accessibilityRole") }
         func helpText() -> String? { value("accessibilityHelp") as? String }
         func className() -> String { String(describing: type(of: object)) }
+        var objectValue: NSObject { object }
 
         /// Routes text through the accessibility value setter. Measured on
         /// this host: NSTextView-backed nodes persist the string into the

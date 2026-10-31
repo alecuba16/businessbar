@@ -130,14 +130,18 @@ private extension AppPreferencesUI1Scenarios {
         }
 
         /// Sheets presented by the hosted tab open their own
-        /// SheetPresentationWindow; presses inside them walk that window.
+        /// SheetPresentationWindow; SwiftUI confirmationDialogs present an
+        /// _NSAlertPanel instead (measured on this host). Presses inside
+        /// either walk those windows.
         func sheetElements() -> [OwnedAccessibility.Element] {
             OwnedAccessibility.materialize()
             var found: [OwnedAccessibility.Element] = []
             for window in NSApp.windows {
                 guard window.isVisible,
-                      String(describing: type(of: window)).contains("SheetPresentation"),
-                      let content = window.contentView else { continue }
+                      let content = window.contentView,
+                      window !== self.window,
+                      String(describing: type(of: window)).contains("SheetPresentation")
+                        || String(describing: type(of: window)).contains("NSAlertPanel") else { continue }
                 found.append(contentsOf: OwnedAccessibility.elements(in: content))
             }
             return found
@@ -149,6 +153,18 @@ private extension AppPreferencesUI1Scenarios {
                 throw CoverageContext.Failure(description: "Sheet control not found or disabled: \(label)")
             }
             try context.expect(element.accessibilityPerformPress(), "Sheet control press succeeds: \(label)")
+        }
+
+        /// Presses a button inside a confirmationDialog's _NSAlertPanel.
+        /// Measured on this host: the alert button's performPress returns
+        /// false while the action still runs (the alert dismisses), so the
+        /// helper verifies the dismissal instead of the return value.
+        func alertPress(_ label: String, _ context: CoverageContext) throws {
+            guard let element = sheetElements().first(where: { $0.accessibilityLabel() == label || $0.accessibilityTitle() == label }),
+                  element.isAccessibilityEnabled() else {
+                throw CoverageContext.Failure(description: "Alert control not found or disabled: \(label)")
+            }
+            _ = element.accessibilityPerformPress()
         }
 
         func sheetText() -> String {
@@ -426,13 +442,21 @@ enum AppPreferencesUI1Scenarios {
         await settle()
         try context.expect(tab.text.contains("Medium"), "Info level shows the medium energy label")
 
-        // Reset press only presents the confirmation dialog; Cancel dismisses
-        // without touching the destructive branch, which stays untested here.
+        // Reset press only presents the confirmation dialog; Cancel
+        // dismisses (verified by the alert leaving the window list)
+        // without touching the destructive branch, which stays untested.
         try tab.press("Reset All Settings to Defaults", context)
         await settle()
         try context.expect(tab.sheetText().contains("Reset All Settings?"), "Reset press presents the confirmation dialog")
-        try tab.sheetPress("Cancel", context)
+        try tab.alertPress("Cancel", context)
         await settle()
+        var dismissed = false
+        for _ in 0..<20 where dismissed == false {
+            await Task.yield()
+            dismissed = tab.sheetText().contains("Reset All Settings?") == false
+            if dismissed == false { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        try context.expect(dismissed, "Cancel dismisses the reset confirmation dialog")
         try context.expect(tab.text.contains("Launch at login"), "Reset cancel leaves the tab rendered")
     }
 }
