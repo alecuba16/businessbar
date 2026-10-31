@@ -96,18 +96,23 @@ private final class StubModelsServer: @unchecked Sendable {
         self.payload = Data(payload.utf8)
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        listener = try NWListener(using: params, on: .any)
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.handle(connection)
-        }
+        let listener = try NWListener(using: params, on: .any)
+        // Start first: no connection can be handled until the main run
+        // loop spins, which only happens in the bind wait below, so the
+        // handler can be attached after the members are initialized.
         listener.start(queue: .main)
         var spins = 0
         while listener.port == nil && spins < 500 {
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
             spins += 1
         }
-        port = listener.port?.rawValue ?? 0
-        guard port != 0 else { throw CoverageContext.Failure(description: "Stub server failed to bind") }
+        let boundPort = listener.port?.rawValue ?? 0
+        guard boundPort != 0 else { throw CoverageContext.Failure(description: "Stub server failed to bind") }
+        self.listener = listener
+        self.port = boundPort
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection)
+        }
     }
 
     private func handle(_ connection: NWConnection) {
