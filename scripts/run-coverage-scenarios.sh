@@ -257,9 +257,11 @@ if [[ "$isolation_only" != yes ]]; then
         # after the corresponding suite completed; any mid-suite death
         # removes at least one of them.
         scenarios_log="$run_dir/logs/scenarios-run.log"
-        grep -q '^PASS: core behavior scenarios$' "$scenarios_log" \
-            || fail 'scenarios process lost the core suite (silent mid-suite exit; see scenarios-run.log)'
-        if [[ "${BUSINESSBAR_COVERAGE_SUITE:-all}" == all ]]; then
+        if [[ "${BUSINESSBAR_COVERAGE_SUITE:-all}" == all || "${BUSINESSBAR_COVERAGE_SUITE:-all}" == core ]]; then
+            grep -q '^PASS: core behavior scenarios$' "$scenarios_log" \
+                || fail 'scenarios process lost the core suite (silent mid-suite exit; see scenarios-run.log)'
+        fi
+        if [[ "${BUSINESSBAR_COVERAGE_SUITE:-all}" == all || "${BUSINESSBAR_COVERAGE_SUITE:-all}" == app ]]; then
             grep -q '^PASS: app behavior scenarios$' "$scenarios_log" \
                 || fail 'scenarios process lost the app suite (silent mid-suite exit; see scenarios-run.log)'
         fi

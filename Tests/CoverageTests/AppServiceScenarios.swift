@@ -46,6 +46,7 @@ enum AppServiceScenarios {
         try await calendars(context)
         try await notifications(context)
         try await lifecycle(context)
+        try await appDelegateLiveClosures(context)
     }
 
     private static func keychain(_ context: CoverageContext) throws {
@@ -537,6 +538,79 @@ private extension AppServiceScenarios {
         func drain() {
             while !queued.isEmpty { queued.removeFirst()() }
         }
+    }
+
+    /// Live Dependency closures the injected lifecycle scenarios leave
+    /// cold: the convenience inits (GoogleAuth/UpdaterViewModel defaults plus
+    /// .live), the safe live factories, and the stored terminate closure.
+    /// Deliberately NOT invoked: the status factory (real menu bar item,
+    /// global hotkey registration, minute timer), the activation policy
+    /// write (visible Dock state), the crash handlers, both modal alerts,
+    /// and the global shortcut write. The preferences and onboarding
+    /// factories are constructed but never shown: building an NSWindow
+    /// without orderFront commits nothing to the window server.
+    private static func appDelegateLiveClosures(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("appdelegate-live")
+        defaults.registerDefaults()
+
+        // Convenience init chain: GoogleAuth() live ctor loads through the
+        // isolated-home keychain (absent entry throws, ctor catches),
+        // UpdaterViewModel() builds the Sparkle controller without starting
+        // it, and the terminating closure stays stored, not executed.
+        let plainInit = AppDelegate()
+        try context.expect(plainInit.getMeetingManager() == nil, "Convenience init stays lazy: no managers before launch")
+
+        // Safe live factories, invoked one at a time against fixture state.
+        let live = AppDelegate.Dependencies.live
+        try context.expect(live.googleConfigured() == false, "Live Google configuration reads the absent bundle credentials")
+        _ = live.axTrusted() // reads TCC state; answer not asserted (host-dependent)
+        let templates = live.loadTemplates()
+        try context.expect(templates == PromptTemplate.defaults, "Live template store loads the shipped defaults")
+        live.saveTemplates(templates)
+        try context.expect(live.loadTemplates() == templates, "Live template store round-trips through the fixture home")
+
+        let auth = GoogleAuth(dependencies: .init(
+            loadCredential: { throw FixtureError.unavailable }, saveCredential: { _ in }, deleteCredential: {},
+            configuration: { .init(clientNumber: "fixture", clientSecret: "fixture-secret") },
+            request: { _ in throw FixtureError.unavailable }, openURL: { _ in false }
+        ))
+        let eventKitStore = live.eventStore(.eventKit, auth)
+        try context.expect(eventKitStore is EKEventStoreAdapter, "Live eventStore factory builds the EventKit adapter")
+        let googleStore = live.eventStore(.google, auth)
+        try context.expect(googleStore is GCEventStoreAdapter, "Live eventStore factory builds the Google adapter")
+
+        let meeting = live.meeting(eventKitStore)
+        try context.expect(meeting.nextEvent == nil, "Live meeting factory loads without events")
+        let badge = live.badge()
+        try context.expect(badge.monitoredApps.isEmpty, "Live badge factory starts with no monitored apps")
+        let noSleep = live.noSleep()
+        try context.expect(noSleep.isActive == false, "Live no-sleep factory starts inactive")
+        let notification = live.notification()
+        _ = notification // bundle-absent guard skips UNUserNotificationCenter setup
+
+        // Preferences and onboarding factories construct their windows but
+        // the returned presentations are never shown.
+        let updater = UpdaterViewModel(backend: Updater())
+        let preferences = live.preferences(updater, badge, meeting, auth, .general)
+        try context.expect(preferences != nil, "Live preferences factory builds the window controller")
+        let onboarding = live.onboarding()
+        try context.expect(onboarding != nil, "Live onboarding factory builds the window controller")
+
+        // registerURL installs the handler on this process only; no event
+        // is ever delivered to the coverage binary.
+        live.registerURL(plainInit)
+
+        // enqueue/after dispatch on the main queue; drain both.
+        var enqueued = false
+        live.enqueue { enqueued = true }
+        var delayedRan = false
+        live.after(0.01) { delayedRan = true }
+        for _ in 0..<100 where !(enqueued && delayedRan) {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        try context.expect(enqueued, "Live enqueue dispatches the action")
+        try context.expect(delayedRan, "Live after fires the delayed action")
     }
 
     @MainActor

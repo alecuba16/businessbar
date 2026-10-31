@@ -17,6 +17,10 @@ struct CalendarsTab: View {
     private let resetTCCPermission: (_ service: String, _ completion: @escaping (Int) -> Void) -> Void
     private let notificationCenterAuthorizationStatus: (@escaping (UNAuthorizationStatus) -> Void) -> Void
     private let notificationCenterRequestAuthorization: (@escaping (Bool) -> Void) -> Void
+    /// Seamed Google credential configuration: the coverage binary runs
+    /// without bundled credentials.json, so the real check is false there
+    /// and the Google sign-in branch stays unreachable without it.
+    private let googleConfigured: () -> Bool
     /// Seamed runtime-bundle flag: the coverage fixture runs as a bare
     /// executable, so the real check is false there and the notification
     /// request switch stays unreachable without it.
@@ -80,7 +84,8 @@ struct CalendarsTab: View {
                 receive(granted)
             }
         },
-        isRuntimeBundlePresent: Bool = RuntimeBundle.isPresent
+        isRuntimeBundlePresent: Bool = RuntimeBundle.isPresent,
+        googleConfigured: @escaping () -> Bool = { GoogleAuthConfig.isConfigured }
     ) {
         self.meetingManager = meetingManager
         self.googleAuth = googleAuth
@@ -92,6 +97,7 @@ struct CalendarsTab: View {
         self.notificationCenterAuthorizationStatus = notificationCenterAuthorizationStatus
         self.notificationCenterRequestAuthorization = notificationCenterRequestAuthorization
         self.isRuntimeBundlePresent = isRuntimeBundlePresent
+        self.googleConfigured = googleConfigured
         _calendarAuthStatus = State(initialValue: calendarAuthorization())
     }
 
@@ -103,7 +109,7 @@ struct CalendarsTab: View {
         if calendarProvider == CalendarProvider.eventKit.rawValue {
             return hasMacCalendarPermission
         }
-        return GoogleAuthConfig.isConfigured && googleAuth.isAuthenticated
+        return googleConfigured() && googleAuth.isAuthenticated
     }
 
     private var canEditCalendarConfig: Bool {
@@ -155,7 +161,7 @@ struct CalendarsTab: View {
                         .buttonStyle(.bordered)
                     }
                 } else {
-                    if !GoogleAuthConfig.isConfigured {
+                    if !googleConfigured() {
                         Text("Google OAuth is not configured. Configure credentials in GoogleAuth.swift.")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -498,17 +504,6 @@ struct CalendarsTab: View {
                 refreshAuthStatus()
                 notifyPreferencesChanged()
             }
-        }
-    }
-
-    private func isNotificationStatusGranted(_ status: UNAuthorizationStatus) -> Bool {
-        switch status {
-        case .authorized, .provisional:
-            return true
-        case .notDetermined, .denied:
-            return false
-        @unknown default:
-            return false
         }
     }
 

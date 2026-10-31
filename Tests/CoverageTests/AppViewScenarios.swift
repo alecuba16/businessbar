@@ -25,6 +25,7 @@ enum AppViewScenarios {
         await run("onboarding flow") { try await onboardingFlow(context) }
         await run("appearance") { try await appearance(context) }
         await run("nosleep tails") { try await nosleepTails(context) }
+        await run("nosleep permissions") { try await nosleepPermissions(context) }
         await run("menus") { try await menus(context) }
         await run("preferences") { try await preferences(context) }
         await run("local models") { try await localModels(context) }
@@ -445,6 +446,83 @@ enum AppViewScenarios {
         await settle()
         try context.expect(host.text.contains("Accessibility permission granted"), "Activation re-probe keeps the granted status")
         try context.equal(defaults.bool(forKey: Constants.Defaults.noSleepSimulateActivity), true, "Granted re-probe keeps simulation enabled")
+    }
+
+    /// NoSleepTab permission buttons through the injected seams. The grant
+    /// press, the System Settings open, and the tccutil reset all route
+    /// through init closures so nothing touches real machine state; the
+    /// reset completion re-probes the status through the same injected
+    /// closure, covering the denied refresh branch that disables simulation.
+    private static func nosleepPermissions(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("nosleep-permissions")
+        defaults.set(true, forKey: Constants.Defaults.featureNoSleep)
+        defaults.set(true, forKey: Constants.Defaults.noSleepSimulateActivity)
+
+        var requests = 0
+        var openedSettings = 0
+        var resetCodes: [Int32] = []
+        var resetCalls = 0
+        enum ResetBehavior { case succeed(Int32); case fail }
+        var resetBehavior: ResetBehavior = .succeed(0)
+        let host = Hosted(
+            NoSleepTab(
+                accessibilityStatus: { resetCalls > 0 ? true : false },
+                resetTCCPermission: {
+                    resetCalls += 1
+                    switch resetBehavior {
+                    case .succeed(let code): resetCodes.append(code); return code
+                    case .fail: throw CoverageContext.Failure(description: "fixture reset")
+                    }
+                },
+                requestAccessibilityPermission: { requests += 1 },
+                openSystemSettingsURL: { openedSettings += 1 }
+            ).defaultAppStorage(defaults),
+            size: NSSize(width: 800, height: 1100)
+        )
+        defer { host.close() }
+        await settle()
+        try host.render(context)
+        try context.expect(host.text.contains("Accessibility permission required"), "Denied status renders before the presses")
+
+        // Denied refresh branch: the onAppear probe answered false, so the
+        // simulation flag got disabled on first render.
+        try context.equal(defaults.bool(forKey: Constants.Defaults.noSleepSimulateActivity), false, "Denied refresh disables activity simulation")
+
+        // Grant press routes through the seam, not the real TCC prompt.
+        try host.press("Grant Permission", context)
+        try context.equal(requests, 1, "Grant press reached the injected request seam")
+
+        // System Settings press routes through the seam, not NSWorkspace.
+        try host.press("Open System Settings", context)
+        try context.equal(openedSettings, 1, "Settings press reached the injected URL seam")
+
+        // Reset press: success path. The seam records the exit code, and the
+        // completion's re-probe answers granted (status closure flips once a
+        // reset ran), so the button label returns from "Resetting…".
+        try host.press("Reset Permission", context)
+        for _ in 0..<40 where !resetCodes.isEmpty {
+            await settle()
+        }
+        try context.equal(resetCalls, 1, "Reset press ran the injected tccutil seam")
+        try context.expect(resetCodes == [0], "Reset seam reported the fixture exit code")
+        for _ in 0..<40 where host.text.contains("Resetting…") {
+            await settle()
+        }
+        try context.expect(host.text.contains("Resetting…") == false, "Reset flag clears after the seam completes")
+        try context.expect(host.text.contains("Accessibility permission granted"), "Re-probe after reset shows granted")
+
+        // Reset press: throwing path. The seam throws, the error log branch
+        // runs, and the completion still clears the in-flight flag.
+        resetBehavior = .fail
+        try host.press("Reset Permission", context)
+        for _ in 0..<40 where resetCalls < 2 {
+            await settle()
+        }
+        try context.equal(resetCalls, 2, "Second reset press ran the throwing seam")
+        for _ in 0..<40 where host.text.contains("Resetting…") {
+            await settle()
+        }
+        try context.expect(host.text.contains("Resetting…") == false, "Throwing reset still clears the flag")
     }
 
     private static func menus(_ context: CoverageContext) async throws {

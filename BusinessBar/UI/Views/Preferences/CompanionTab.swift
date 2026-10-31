@@ -1,3 +1,4 @@
+import ApplicationServices
 import BusinessBarCore
 import KeyboardShortcuts
 import SwiftUI
@@ -43,9 +44,22 @@ struct CompanionTab: View {
     @State private var showsLocalModels = false
 
     private let templateStore: TemplateStore
+    private let requestAccessibilityPermissionPrompt: () -> Bool
+    private let openAccessibilitySettingsURL: () -> Void
 
-    init(templateStore: TemplateStore = TemplateStore(), accessibilityStatus: @escaping () -> Bool = { AXIsProcessTrusted() }) {
+    init(templateStore: TemplateStore = TemplateStore(),
+         accessibilityStatus: @escaping () -> Bool = { AXIsProcessTrusted() },
+         requestAccessibilityPermissionPrompt: @escaping () -> Bool = {
+        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        return AXIsProcessTrustedWithOptions(options)
+    },
+         openAccessibilitySettingsURL: @escaping () -> Void = {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }) {
         self.templateStore = templateStore
+        self.requestAccessibilityPermissionPrompt = requestAccessibilityPermissionPrompt
+        self.openAccessibilitySettingsURL = openAccessibilitySettingsURL
         _accessibilityPermission = StateObject(wrappedValue: AccessibilityPermissionModel(status: accessibilityStatus))
         _historyMaxAgeDays = State(initialValue: CompanionConfigService.historyMaxAgeDays())
         _historyMaxSessions = State(initialValue: CompanionConfigService.historyMaxSessions())
@@ -323,13 +337,12 @@ struct CompanionTab: View {
 
                             HStack(spacing: 10) {
                                 Button("Open System Settings") {
-                                    openAccessibilitySettings()
+                                    openAccessibilitySettingsURL()
                                 }
                                 .buttonStyle(.borderedProminent)
 
                                 Button("Request Permission") {
-                                    let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-                                    _ = AXIsProcessTrustedWithOptions(options)
+                                    _ = requestAccessibilityPermissionPrompt()
                                     accessibilityPermission.refresh()
                                 }
                                 .buttonStyle(.bordered)
@@ -436,13 +449,6 @@ struct CompanionTab: View {
     private func agentCommandLine(_ provider: ChatProvider) -> String {
         guard !provider.acpCommand.isEmpty else { return "No command set" }
         return ([provider.acpCommand] + provider.acpArguments).joined(separator: " ")
-    }
-
-    /// Opens System Settings to the Accessibility privacy pane, the same
-    /// destination the Badges tab uses.
-    private func openAccessibilitySettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-        NSWorkspace.shared.open(url)
     }
 }
 

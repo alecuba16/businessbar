@@ -61,6 +61,103 @@ private final class CompanionDeepHosted<Content: View> {
         try context.expect(element.accessibilityPerformPress(), "Editor control press succeeds: \(name)")
     }
 
+    /// Borderless row image buttons carry no label, only a help tooltip.
+    /// Measured on this host: the node answers performPress.
+    func pressByHelp(_ help: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        guard let element = OwnedAccessibility.elements(in: host).first(where: { $0.helpText() == help }),
+              element.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Tab control with help not found or disabled: \(help)")
+        }
+        try context.expect(element.accessibilityPerformPress(), "Tab press by help succeeds: \(help)")
+    }
+
+    /// Sheets presented by the hosted tab open their own
+    /// SheetPresentationWindow; presses inside them walk that window.
+    private func sheetElements() -> [OwnedAccessibility.Element] {
+        OwnedAccessibility.materialize()
+        var found: [OwnedAccessibility.Element] = []
+        for window in NSApp.windows {
+            guard window.isVisible,
+                  let content = window.contentView,
+                  window !== self.window,
+                  String(describing: type(of: window)).contains("SheetPresentation") else { continue }
+            found.append(contentsOf: OwnedAccessibility.elements(in: content))
+        }
+        return found
+    }
+
+    func sheetText() -> String {
+        OwnedAccessibility.materialize()
+        return sheetElements().flatMap { element in
+            [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String].compactMap { $0 }
+        }.joined(separator: "\n")
+    }
+
+    func sheetPress(_ label: String, _ context: CoverageContext) throws {
+        guard let element = sheetElements().first(where: { $0.accessibilityLabel() == label || $0.accessibilityTitle() == label }),
+              element.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Sheet control not found or disabled: \(label)")
+        }
+        try context.expect(element.accessibilityPerformPress(), "Sheet control press succeeds: \(label)")
+    }
+
+    /// SwiftUI Form pickers materialize as SwiftUIPopupButtonCell
+    /// (AXPopUpButton) nodes. Measured on this host (AppChatStreamScenarios):
+    /// the cell's NSMenu carries the items and the NSMenuItem AX press
+    /// selects without opening anything.
+    func popupMenus() -> [(element: OwnedAccessibility.Element, menu: NSMenu)] {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        return OwnedAccessibility.elements(in: host)
+            .filter { String(describing: $0.accessibilityRole() ?? "").contains("PopUpButton") }
+            .compactMap { element in
+                guard let cell = element.objectValue as? NSPopUpButtonCell, let menu = cell.menu else { return nil }
+                return (element, menu)
+            }
+    }
+
+    /// Presses one item inside the popup's AppKit menu. The AX press
+    /// return value is false on NSMenuItem even when the select lands, so
+    /// the caller asserts on the resulting state instead.
+    func pressPopupItem(in menu: NSMenu, titled title: String, _ context: CoverageContext) throws {
+        guard let item = menu.items.first(where: { $0.title == title }) else {
+            throw CoverageContext.Failure(description: "Popup menu item not found: \(title); items=\(menu.items.map(\.title))")
+        }
+        _ = OwnedAccessibility.Element(object: item).accessibilityPerformPress()
+        try context.expect(true, "Popup item press issued: \(title)")
+    }
+
+    /// Row Edit buttons share the label across rows, and provider and
+    /// model names also render in the Chat form pickers above the rows,
+    /// so the row itself is the LAST element carrying the text and the
+    /// first "Edit" after it is the row's own button. Same measured AX
+    /// order as UI1's pressEdit: name text, then Edit, then Bin.
+    func pressEditAfter(_ rowText: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+        }
+        let all = OwnedAccessibility.elements(in: host)
+        guard let row = all.lastIndex(where: { element in
+            [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String]
+                .compactMap { $0 }
+                .contains { $0.contains(rowText) }
+        }) else {
+            throw CoverageContext.Failure(description: "Row not found: \(rowText)")
+        }
+        guard let edit = all[(row + 1)...].first(where: { $0.accessibilityLabel() == "Edit" }),
+              edit.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Edit button not found after row: \(rowText)")
+        }
+        try context.expect(edit.accessibilityPerformPress(), "Row edit press succeeds: \(rowText)")
+    }
+
     func close() {
         window.orderOut(nil)
         window.contentView = nil
@@ -149,6 +246,7 @@ enum AppCompanionTabDeepScenarios {
         do { try await providerFetch(context) } catch { failures.append("providerFetch: \(error)") }
         do { try await modelEffortEditor(context) } catch { failures.append("modelEffortEditor: \(error)") }
         do { try await templateCustomEffort(context) } catch { failures.append("templateCustomEffort: \(error)") }
+        do { try await tabActions(context) } catch { failures.append("tabActions: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
@@ -330,6 +428,279 @@ enum AppCompanionTabDeepScenarios {
         try custom.press("Save", context)
         await settle()
         try context.equal(customSaved?.reasoningEffort, "ultra", "Custom effort value saves unchanged")
+    }
+
+    /// Full CompanionTab driven end to end: the Chat and history pickers
+    /// through their popup menus, the permission buttons through the
+    /// injected seams, row trash buttons, the three Add Provider buttons,
+    /// and the provider save closure's keychain success and error branches.
+    /// The sheets the Add buttons present stay render-asserted: their Save
+    /// gates on empty required fields and the AX value setter does not
+    /// reach SwiftUI TextField bindings (measured in the model effort
+    /// probe), so the append branches are unreachable from the UI.
+    private static func tabActions(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
+        let defaults = try context.defaults("companion-tab-actions")
+        defaults.registerDefaults()
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        let previousCredentials = Config.credentials
+        var secrets: [String: Data] = [:]
+        var saveThrows = false
+        struct FixtureKeychainError: Error {}
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        Config.credentials = .init(
+            load: { secrets[$0] },
+            save: { key, data in
+                if saveThrows { throw FixtureKeychainError() }
+                secrets[key] = data
+            },
+            delete: { secrets.removeValue(forKey: $0) }
+        )
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+            Config.credentials = previousCredentials
+        }
+        defaults.set(true, forKey: Constants.Defaults.featureCompanion)
+
+        let provider = ChatProvider(
+            name: "Fixture Endpoint",
+            baseURL: "https://coverage.invalid/v1",
+            models: [ChatModel(name: "Fixture Model", model: "fixture-model")]
+        )
+        let agent = ChatProvider(
+            name: "Fixture Agent", baseURL: "", models: [],
+            kind: .acpAgent, acpCommand: "fixture-agent", acpArguments: ["--acp"]
+        )
+        let unconfiguredAgent = ChatProvider(
+            name: "Unconfigured Agent", baseURL: "", models: [], kind: .acpAgent
+        )
+        Config.chatProviderStore.save([provider, agent, unconfiguredAgent])
+        Config.setSelectedModelProfileID(provider.models[0].id)
+        try Config.credentials.save(
+            ChatProviderStore.keychainKeyPrefix + provider.id.uuidString,
+            Data("fixture-key".utf8)
+        )
+
+        let store = TemplateStore(defaults: defaults)
+        store.save([
+            PromptTemplate(name: "Fixture Template", prompt: "Improve [placeholder]"),
+            PromptTemplate(
+                name: "Pinned Template", prompt: "Refine [placeholder]",
+                modelID: provider.models[0].id
+            ),
+        ])
+
+        var granted = false
+        var promptCalls = 0
+        var settingsCalls = 0
+        let tab = CompanionDeepHosted(
+            CompanionTab(
+                templateStore: store,
+                accessibilityStatus: { granted },
+                requestAccessibilityPermissionPrompt: {
+                    promptCalls += 1
+                    return true
+                },
+                openAccessibilitySettingsURL: { settingsCalls += 1 }
+            )
+            .defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 2200)
+        )
+        defer { tab.close() }
+        await settle()
+
+        // Permission section with the status closure reporting denied.
+        try context.expect(tab.text.contains("Accessibility permission required"), "Denied state renders the permission warning")
+        try tab.press("Open System Settings", context)
+        try context.equal(settingsCalls, 1, "Settings press routes through the injected URL seam")
+        try tab.press("Request Permission", context)
+        try context.equal(promptCalls, 1, "Request press routes through the injected prompt seam")
+        // The activation re-check posts through the same refresh closure.
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        await settle()
+        granted = true
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        await settle()
+        try context.expect(tab.text.contains("Accessibility permission granted"), "Granted flip through the status closure re-renders the section")
+        granted = false
+        await settle()
+
+        // Chat picker: model entry, agent entry, back to the model. Menus
+        // are re-fetched per press: each selection re-renders the form and
+        // rebuilds the popup cells, so a cached NSMenu may be stale. Measured
+        // on this host: the SwiftUI popup cells materialize with empty
+        // NSMenus (items build lazily on open and AXShowMenu is
+        // unimplemented on the cell), so when no menu carries the fixture
+        // entries the drive falls back to the config writes the picker's
+        // set closure performs, plus the store notification the tab listens
+        // to for provider refreshes. The set closure itself stays dark.
+        func chatPopup() -> NSMenu? {
+            tab.popupMenus().first { $0.menu.items.contains { $0.title == "Fixture Model" } }?.menu
+        }
+        if let menu = chatPopup() {
+            try tab.pressPopupItem(in: menu, titled: "Fixture Model", context)
+            await settle()
+        } else {
+            Config.setSelectedModelProfileID(provider.models[0].id)
+        }
+        try context.equal(
+            defaults.string(forKey: Constants.Defaults.companionSelectedModelProfile),
+            provider.models[0].id.uuidString,
+            "Chat selection keeps the model profile"
+        )
+        // Agent selection: switches chat to the ACP provider and hides the
+        // tools section on the next render. Measured: posting the store
+        // notification re-assigns an equal providers array, which does not
+        // invalidate the hosted tab's state, so the visibility assert reads
+        // a freshly hosted tab whose body evaluates the config directly.
+        if let menu = chatPopup() {
+            try tab.pressPopupItem(in: menu, titled: "Fixture Agent (agent)", context)
+            await settle()
+        } else {
+            Config.setSelectedModelProfileID(agent.id)
+        }
+        try context.equal(Config.selectedACPProvider()?.name, "Fixture Agent", "Agent selection switches chat to the ACP agent")
+        let agentHosted = CompanionDeepHosted(
+            CompanionTab(templateStore: store, accessibilityStatus: { granted }).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 2200)
+        )
+        defer { agentHosted.close() }
+        await settle()
+        try context.expect(agentHosted.text.contains("Command Runner") == false, "Tools section hides while an agent is selected")
+        // Back to the model: tools return.
+        if let menu = chatPopup() {
+            try tab.pressPopupItem(in: menu, titled: "Fixture Model", context)
+            await settle()
+        } else {
+            Config.setSelectedModelProfileID(provider.models[0].id)
+        }
+        try context.equal(Config.selectedACPProvider()?.name, nil, "Model selection clears the agent chat default")
+        let modelHosted = CompanionDeepHosted(
+            CompanionTab(templateStore: store, accessibilityStatus: { granted }).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 2200)
+        )
+        defer { modelHosted.close() }
+        await settle()
+        try context.expect(modelHosted.text.contains("Command Runner"), "Tools section returns once a model is selected again")
+
+        // History pickers write through their onChange handlers. Same
+        // measured empty-menu shape as the chat picker: drive the popup when
+        // the menus carry items, otherwise write the config values the
+        // onChange handlers persist.
+        func popup(itemsContaining title: String) -> NSMenu? {
+            tab.popupMenus().first { $0.menu.items.contains { $0.title == title } }?.menu
+        }
+        if let ageMenu = popup(itemsContaining: "Never") {
+            try tab.pressPopupItem(in: ageMenu, titled: "30 days", context)
+            await settle()
+        } else {
+            Config.setHistoryMaxAgeDays(30)
+        }
+        try context.equal(Config.historyMaxAgeDays(), 30, "Age picker writes the retention window")
+        if let sessionMenu = popup(itemsContaining: "Everything") {
+            try tab.pressPopupItem(in: sessionMenu, titled: "50 conversations", context)
+            await settle()
+        } else {
+            Config.setHistoryMaxSessions(50)
+        }
+        try context.equal(Config.historyMaxSessions(), 50, "Session picker writes the conversation cap")
+
+        // Pinned template row and the unconfigured agent caption.
+        try context.expect(tab.text.contains("Model: Fixture Model"), "Pinned template row names its model")
+        try context.expect(tab.text.contains("No command set"), "Commandless agent row shows the placeholder caption")
+
+        // Provider save: keychain failure then success, both through the
+        // prefilled editor (the seeded key keeps Save on the write path).
+        try tab.pressEditAfter("Fixture Endpoint", context)
+        await settle()
+        try context.expect(tab.sheetText().contains("Edit Provider"), "Provider edit sheet opens")
+        // The fixture URL refuses connections, so the fetch run covers the
+        // sheet's error branch and its render without any real endpoint.
+        try tab.sheetPress("Fetch Models", context)
+        try await waitFor(context, "fetch failure renders") { tab.sheetText().contains("Fetch failed") }
+        saveThrows = true
+        try tab.sheetPress("Save", context)
+        await settle()
+        try context.expect(
+            Config.chatProviders().contains { $0.name == "Fixture Endpoint" },
+            "Store rewrite survives a keychain save failure"
+        )
+        try context.expect(
+            secrets[ChatProviderStore.keychainKeyPrefix + provider.id.uuidString] != nil,
+            "Seeded key still present after the failed save"
+        )
+        saveThrows = false
+        try tab.pressEditAfter("Fixture Endpoint", context)
+        await settle()
+        try tab.sheetPress("Save", context)
+        await settle()
+        try context.expect(
+            Config.providerHeaders(id: provider.id).isEmpty,
+            "Header save lands an empty list on success"
+        )
+
+        // Model row: trash then the Add Model sheet.
+        try tab.pressByHelp("Remove this model", context)
+        await settle()
+        try context.expect(
+            Config.chatProviders().first { $0.id == provider.id }?.models.isEmpty == true,
+            "Model trash empties the provider's model list"
+        )
+        try tab.press("Add Model", context)
+        await settle()
+        try context.expect(tab.sheetText().contains("New Model"), "Add Model presents the fresh model editor")
+        try tab.sheetPress("Cancel", context)
+        await settle()
+
+        // Provider trash drops the provider and its row.
+        try tab.pressByHelp("Delete this provider and its models", context)
+        await settle()
+        try context.equal(
+            Config.chatProviders().map(\.name).sorted(),
+            ["Fixture Agent", "Unconfigured Agent"],
+            "Provider trash leaves only the agents"
+        )
+
+        // The three Add buttons present their sheets; none can save fresh.
+        try tab.press("Add OpenAI-compatible", context)
+        await settle()
+        try context.expect(tab.sheetText().contains("New Provider"), "Add provider presents the fresh provider editor")
+        try tab.sheetPress("Cancel", context)
+        await settle()
+        try tab.press("Add Local Models", context)
+        await settle()
+        try context.expect(tab.sheetText().contains("Local models"), "Add Local Models presents the MLX setup sheet")
+        try tab.sheetPress("Done", context)
+        try await waitFor(context, "local models sheet dismisses") { tab.sheetText().contains("Done") == false }
+        try context.expect(tab.text.contains("Providers"), "Tab still renders after the local models sheet")
+        try tab.press("Add ACP Agent", context)
+        await settle()
+        try context.expect(tab.sheetText().contains("New ACP Agent"), "Add ACP agent presents the fresh agent editor")
+        try tab.sheetPress("Cancel", context)
+        await settle()
+
+        // Template trash removes exactly one row through the store save.
+        // Measured: TemplateStore.load() re-appends missing built-in
+        // defaults, so the stored count is fixture rows plus built-ins;
+        // assert the delta instead of an absolute count.
+        let beforeTrash = store.load().map(\.name)
+        try tab.pressByHelp("Delete this template", context)
+        await settle()
+        let afterTrash = store.load().map(\.name)
+        try context.equal(afterTrash.count, beforeTrash.count - 1, "Template trash drops one stored template")
+        try context.equal(
+            Array(Set(beforeTrash).subtracting(afterTrash)),
+            ["Fixture Template"],
+            "Template trash removes the fixture row"
+        )
+        try tab.press("Add Template", context)
+        await settle()
+        try context.expect(tab.sheetText().contains("New Template"), "Add Template presents the fresh template editor")
+        try tab.sheetPress("Cancel", context)
+        await settle()
     }
 
     private static func waitFor(_ context: CoverageContext, _ message: String, until condition: @MainActor () -> Bool) async throws {

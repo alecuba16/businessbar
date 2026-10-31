@@ -1,4 +1,5 @@
 import AppKit
+import AppAuth
 @testable import BusinessBarCore
 import Combine
 import Foundation
@@ -217,6 +218,7 @@ enum AppPreferencesUI2Scenarios {
         do { try await calendarsTab(context) } catch { failures.append("calendarsTab: \(error)") }
         do { try await calendarsTabDeep(context) } catch { failures.append("calendarsTabDeep: \(error)") }
         do { try await calendarsTabReset(context) } catch { failures.append("calendarsTabReset: \(error)") }
+        do { try await calendarsTabGoogle(context) } catch { failures.append("calendarsTabGoogle: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
@@ -1061,6 +1063,201 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(openedURLs.filter { $0.contains("notifications") }.count >= 2, "Notification settings open routes through the seam")
     }
 
+    /// Google-provider and request-tail paths the deep scenarios leave
+    /// cold: both signInWithGoogle outcome branches through an injected
+    /// OAuth fixture, the eventKit requestAccess catch branch through a
+    /// throwing store, and the unknown notification status branch. The
+    /// sign-in fixture answers every OAuth stage inline, so no network,
+    /// browser, or keychain is touched.
+    static func calendarsTabGoogle(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("calendars-tab-google")
+        defaults.registerDefaults()
+
+        let configuration = OIDServiceConfiguration(
+            authorizationEndpoint: URL(string: "https://fixture.invalid/authorize")!,
+            tokenEndpoint: URL(string: "https://fixture.invalid/token")!
+        )
+        let redirect = URL(string: "fixture:/redirect")!
+        let request = OIDAuthorizationRequest(
+            configuration: configuration, clientId: "fixture", scopes: ["email"],
+            redirectURL: redirect, responseType: OIDResponseTypeCode, additionalParameters: nil
+        )
+        let authorization = OIDAuthorizationResponse(request: request, parameters: ["code": "fixture-code" as NSString])
+        let tokenRequest = OIDTokenRequest(
+            configuration: configuration, grantType: "authorization_code", authorizationCode: "fixture-code",
+            redirectURL: redirect, clientID: "fixture", clientSecret: nil, scopes: ["email"],
+            refreshToken: nil, codeVerifier: nil, additionalParameters: nil
+        )
+        let tokenParameters: [String: NSCopying & NSObjectProtocol] = [
+            "access_token": "fixture-access" as NSString,
+            "token_type": "Bearer" as NSString,
+            "expires_in": NSNumber(value: 3600),
+            "refresh_token": "fixture-refresh" as NSString,
+            "id_token": "header.eyJlbWFpbCI6ImNvdmVyYWdlQGZpeHR1cmUuaW52YWxpZCJ9.signature" as NSString
+        ]
+        let token = OIDTokenResponse(request: tokenRequest, parameters: tokenParameters)
+        let fixtureAuthState = OIDAuthState(authorizationResponse: authorization, tokenResponse: token)
+
+        var discoveryFails = false
+        var authorizationFails = false
+        var savedCredentials: [Data] = []
+        var storedCredential: Data?
+        var opened: [URL] = []
+        var unknownStatusRequests = 0
+        let dependencies = GoogleAuth.Dependencies(
+            loadCredential: { guard let storedCredential else { throw CoverageContext.Failure(description: "fixture") }; return storedCredential },
+            saveCredential: { storedCredential = $0; savedCredentials.append($0) },
+            deleteCredential: { storedCredential = nil },
+            configuration: { .init(clientNumber: "fixture", clientSecret: "fixture-secret") },
+            request: { _ in (Data(), HTTPURLResponse(url: URL(string: "https://fixture.invalid/")!, statusCode: 200, httpVersion: nil, headerFields: nil)!) },
+            openURL: { opened.append($0); return true },
+            oauth: .init(
+                discover: { _, callback in callback(discoveryFails ? nil : configuration, nil) },
+                authorize: { _, _, callback in
+                    callback(authorizationFails ? nil : fixtureAuthState, nil)
+                    return nil
+                },
+                refresh: { _, callback in callback("fixture-refreshed", nil) }
+            )
+        )
+        let auth = GoogleAuth(dependencies: dependencies)
+
+        func makeGoogleTab(manager: MeetingManager? = nil) -> UI2Hosted<some View> {
+            UI2Hosted(
+                CalendarsTab(
+                    meetingManager: manager ?? MeetingManager(eventStore: UI2CalendarBoundary(), defaults: defaults, notificationCenter: NotificationCenter()),
+                    googleAuth: auth,
+                    defaults: defaults,
+                    calendarAuthorization: { .denied },
+                    notificationAuthorization: { receive in receive(false) },
+                    // UNAuthorizationStatus.unknown is an @unknown default,
+                    // not a case: the raw value round-trips through the seam
+                    // to hit the tab's @unknown default branch.
+                    notificationCenterAuthorizationStatus: { receive in
+                        unknownStatusRequests += 1
+                        receive(UNAuthorizationStatus(rawValue: 999)!)
+                    },
+                    isRuntimeBundlePresent: true,
+                    googleConfigured: { true }
+                ).defaultAppStorage(defaults),
+                size: NSSize(width: 900, height: 1400)
+            )
+        }
+
+        // Google provider with the feature off: the disabled sign-in button
+        // renders the unauthenticated caption.
+        defaults.set(BusinessBar.CalendarProvider.google.rawValue, forKey: BusinessBar.Constants.Defaults.calendarProvider)
+        defaults.set(false, forKey: BusinessBar.Constants.Defaults.featureCalendar)
+        let signedOut = makeGoogleTab()
+        defer { signedOut.close() }
+        await ui2Settle()
+        try context.expect(signedOut.text.contains("Grant Permission (Sign in with Google)"), "Google branch renders the sign-in button while signed out")
+
+        // Failed sign-in: discovery throws, the catch branch flips the
+        // feature flag off, and no credential is stored.
+        discoveryFails = true
+        try signedOut.press("Grant Permission (Sign in with Google)", context)
+        // No observable fixture state flips on failure, so drain the async
+        // sign-in task unconditionally before asserting.
+        for _ in 0..<8 {
+            await ui2Settle()
+        }
+        try context.expect(!auth.isAuthenticated, "Failed sign-in leaves the session unauthenticated")
+        try context.expect(savedCredentials.isEmpty, "Failed sign-in stores no credential")
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Failed sign-in keeps the feature disabled")
+
+        // Successful sign-in: the injected OAuth answers every stage inline,
+        // the id_token email decodes, the button flips to signed-in, and the
+        // grant persists the enabled flag.
+        discoveryFails = false
+        try signedOut.press("Grant Permission (Sign in with Google)", context)
+        for _ in 0..<20 where auth.isAuthenticated == false {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(auth.isAuthenticated, "Injected OAuth round trip authenticates")
+        try context.equal(auth.userEmail, "coverage@fixture.invalid", "Sign-in decodes the id_token email")
+        try context.expect(signedOut.text.contains("Signed in as coverage@fixture.invalid"), "Signed-in caption replaces the button")
+        for _ in 0..<20 where !defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Successful sign-in persists the enabled flag")
+
+        // Signed-in state renders the reset caption, and the sign-out press
+        // clears the state and the flag through the real signOut path.
+        await ui2Settle()
+        try signedOut.press("Reset Permission (Sign Out)", context)
+        for _ in 0..<20 where auth.isAuthenticated {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!auth.isAuthenticated, "Sign-out press clears the session")
+        for _ in 0..<20 where defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Sign-out press disables the feature flag")
+
+        // Notifications request tails: the feature toggle press with
+        // notifications unauthorized routes through requestNotificationAccess,
+        // whose unknown status branch clears both flags. The status seam
+        // answers .unknown, so the branch runs without any center call.
+        defaults.set(false, forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        try signedOut.press("Grant Notification Permission", context)
+        for _ in 0..<20 where unknownStatusRequests == 0 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(unknownStatusRequests > 0, "Unknown status branch answered the request")
+        for _ in 0..<8 {
+            await ui2Settle()
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Unknown status clears the notification toggle")
+
+        // EventKit request tail: a throwing store drives the catch branch,
+        // which logs, refreshes the stored status, and disables the flag.
+        defaults.set(BusinessBar.CalendarProvider.eventKit.rawValue, forKey: BusinessBar.Constants.Defaults.calendarProvider)
+        defaults.set(false, forKey: BusinessBar.Constants.Defaults.featureCalendar)
+        let throwing = UI2ThrowingCalendarBoundary()
+        let requestFailTab = makeGoogleTab(manager: MeetingManager(eventStore: throwing, defaults: defaults, notificationCenter: NotificationCenter()))
+        defer { requestFailTab.close() }
+        await ui2Settle()
+        try requestFailTab.press("Grant Permission", context)
+        for _ in 0..<20 where throwing.requestCount == 0 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.equal(throwing.requestCount, 1, "Throwing store answered one request")
+        // The catch branch and the isRequestingAccess reset land in the same
+        // async task after the increment, so drain before asserting.
+        for _ in 0..<8 {
+            await ui2Settle()
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Thrown request keeps the feature disabled")
+        try context.expect(requestFailTab.text.contains("Requesting…") == false, "Request flag clears after the thrown round trip")
+
+        // Meeting-notifications toggle tail: with the feature re-enabled and
+        // notifications still unauthorized, pressing the toggle on routes
+        // through setMeetingNotificationsEnabled's unauthorized guard into
+        // the same request path, and the unknown status clears it back off.
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
+        for _ in 0..<8 {
+            await ui2Settle()
+        }
+        let statusBeforeToggle = unknownStatusRequests
+        try requestFailTab.pressCheckbox(index: 3, context, "Enable meeting notifications on")
+        for _ in 0..<20 where unknownStatusRequests == statusBeforeToggle {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(unknownStatusRequests > statusBeforeToggle, "Toggle-on request reaches the unknown status branch")
+        for _ in 0..<8 {
+            await ui2Settle()
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Unknown status clears the toggled-on state")
+    }
+
     /// Row-control paths the rendering scenario leaves cold: the Start press
     /// against a stub python (failure caption), the download Cancel window,
     /// both Delete branches, and the reasoning help on a capability-bearing
@@ -1223,6 +1420,18 @@ enum AppPreferencesUI2Scenarios {
         func fetchCalendars() async throws -> [MBCalendar] {
             [.init(id: "granted", title: "Coverage calendar granted", color: "#227744", source: "Fixture")]
         }
+        func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+    }
+
+    /// Store variant whose request throws: exercises the requestAccess
+    /// catch branch without a TCC prompt.
+    private final class UI2ThrowingCalendarBoundary: EventStoreProtocol {
+        var requestCount = 0
+        func requestAccess() async throws -> Bool {
+            requestCount += 1
+            throw CoverageContext.Failure(description: "fixture calendar access")
+        }
+        func fetchCalendars() async throws -> [MBCalendar] { [] }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
     }
 
