@@ -182,6 +182,7 @@ enum AppPreferencesUI2Scenarios {
         do { try await toolsSectionDeep(context) } catch { failures.append("toolsSectionDeep: \(error)") }
         do { try await localModelsSection(context) } catch { failures.append("localModelsSection: \(error)") }
         do { try await localModelsDeep(context) } catch { failures.append("localModelsDeep: \(error)") }
+        do { try await localModelsTail(context) } catch { failures.append("localModelsTail: \(error)") }
         do { try await calendarsTab(context) } catch { failures.append("calendarsTab: \(error)") }
         do { try await calendarsTabDeep(context) } catch { failures.append("calendarsTabDeep: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
@@ -836,6 +837,108 @@ enum AppPreferencesUI2Scenarios {
     /// SwiftUI bindings, the LocalModels Check lesson), NSOpenPanel stays
     /// out (real panel), and the Add-rule button stays out (disabled while
     /// its field binding is empty).
+
+    /// LocalModels tail: the directory filter/sort segmented pickers via
+    /// real segment presses. The custom repo Check flow stays out: its repo
+    /// TextField binding cannot be driven through AX (measured: AX writes
+    /// do not reach SwiftUI bindings), and the localModelsDeep scenario
+    /// already covers the inspect boundary through its error caption path.
+    static func localModelsTail(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
+        let defaults = try context.defaults("local-models-tail")
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        let previousCredentials = Config.credentials
+        var secrets: [String: Data] = [:]
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        Config.credentials = .init(load: { secrets[$0] }, save: { secrets[$0] = $1 }, delete: { secrets.removeValue(forKey: $0) })
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+            Config.credentials = previousCredentials
+        }
+
+        let home = try context.temporaryDirectory("local-models-tail-home").path
+        let driver = MLXProcessDriver(run: { _ in throw CoverageContext.Failure(description: "fixture") }, isRunning: { _ in false }, terminate: { _ in }, forceKill: { _ in }, identifier: { _ in 0 }, registerForQuit: { _ in }, terminationStatus: { _ in 0 })
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.timeoutIntervalForRequest = 1
+        sessionConfig.timeoutIntervalForResource = 1
+        let session = URLSession(configuration: sessionConfig)
+        defer { session.invalidateAndCancel() }
+        let server = MLXServerManager(defaults: defaults, home: home, driver: driver, session: session, resolvePython: { _ in throw CoverageContext.Failure(description: "fixture") }, portAvailable: { _ in true }, now: Date.init, sleep: { _ in throw CancellationError() }, residentSize: { _ in 0 }, observeResources: { _ in })
+        let store = MLXModelStore(defaults: defaults, home: home, driver: driver, locateUV: { nil }, sleep: { _ in throw CancellationError() })
+
+        let section = UI2Hosted(
+            Form {
+                LocalModelsSection(
+                    server: server,
+                    store: store,
+                    defaults: defaults,
+                    home: home,
+                    installedRAM: 64_000_000_000,
+                    locateUV: { "/usr/bin/true" },
+                    fetchDirectory: {
+                        [
+                            MLXModelDirectory.Item(id: "mlx-community/Tail-Text-One-4bit", kind: .text, sizeBytes: 1_000, downloads: 10),
+                            MLXModelDirectory.Item(id: "mlx-community/Tail-Vision-Two-4bit", kind: .textAndImages, sizeBytes: nil, downloads: 900)
+                        ]
+                    },
+                    inspectRepo: { _ in throw CoverageContext.Failure(description: "fixture repo check") }
+                )
+            }.defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1600)
+        )
+        defer { section.close() }
+        await ui2Settle()
+
+        // Directory: browse, then filter and sort through the segmented
+        // pickers (AXRadioButton children of the segmented control).
+        try section.press("Browse more models", context)
+        for _ in 0..<40 where section.text.contains("Tail Text One") == false {
+            await ui2Settle()
+        }
+        try context.expect(section.text.contains("Tail Text One"), "Directory lists fetched models")
+        try context.expect(section.text.contains("Tail Vision Two"), "Both fixture rows list before filtering")
+
+        // Filter segmented picker: press the Text segment, only the text
+        // row remains.
+        try ui2PressSegment(section, "Filter", segment: "Text", context)
+        await ui2Settle()
+        try context.expect(section.text.contains("Tail Text One"), "Text filter keeps the text row")
+        try context.expect(section.text.contains("Tail Vision Two") == false, "Text filter hides the vision row")
+
+        try ui2PressSegment(section, "Filter", segment: "All", context)
+        await ui2Settle()
+        try context.expect(section.text.contains("Tail Vision Two"), "All filter restores the vision row")
+
+        // Sort segmented picker: Size sorts nil-size last by downloads.
+        try ui2PressSegment(section, "Sort", segment: "Size", context)
+        await ui2Settle()
+        try context.expect(section.text.contains("Tail Text One"), "Size sort keeps rows listed")
+    }
+
+    /// Presses one segment of a segmented Picker by its AX radio child.
+    /// Measured on this host: NSAccessibilitySegment.performPress returns
+    /// false yet the selection still lands (same shape as the NSMenuItem
+    /// route), so the return value is ignored and the callers assert the
+    /// resulting state instead.
+    private static func ui2PressSegment(_ host: UI2Hosted<some View>, _ pickerLabel: String, segment: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.host.layoutSubtreeIfNeeded()
+        host.host.displayIfNeeded()
+        let all = OwnedAccessibility.elements(in: host.host)
+        guard let labelIndex = all.lastIndex(where: { ($0.accessibilityValue() as? String) == pickerLabel || $0.accessibilityLabel() == pickerLabel }) else {
+            throw CoverageContext.Failure(description: "Segmented picker label not found: \(pickerLabel)")
+        }
+        let radios = all[(labelIndex...)].filter { ($0.accessibilityRole() as? String ?? "").contains("RadioButton") }
+        guard let segmentElement = radios.first(where: { ($0.accessibilityLabel() ?? "") == segment || ($0.accessibilityValue() as? String ?? "") == segment }) else {
+            throw CoverageContext.Failure(description: "Segment not found: \(segment); radios=\(radios.count)")
+        }
+        // The return value lies: measure selection by rendering state.
+        _ = segmentElement.accessibilityPerformPress()
+    }
+
     static func toolsSectionDeep(_ context: CoverageContext) async throws {
         typealias Config = CompanionConfigService
         let defaults = try context.defaults("tools-deep")
