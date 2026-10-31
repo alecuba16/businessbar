@@ -76,11 +76,21 @@ enum AppCompanionViewScenarios {
         OwnedAccessibility.materialize()
         let host = NSHostingView(rootView: view)
         let window = NSPanel(contentRect: NSRect(origin: NSPoint(x: -100000, y: -100000), size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        // Same teardown rule as UI2Hosted: no ordering animations, the
+        // transform animation outliving a panel over-releases on dealloc
+        // (measured run12 segfault).
+        window.animationBehavior = .none
         window.alphaValue = 0
         window.ignoresMouseEvents = true
         window.isReleasedWhenClosed = false
         window.contentView = host
-        defer { window.orderOut(nil); window.contentView = nil; window.close() }
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+            window.close()
+            // Drain pending CA transactions before the panel deallocs.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
         host.frame = NSRect(origin: .zero, size: size)
         window.orderFront(nil)
         host.layoutSubtreeIfNeeded()

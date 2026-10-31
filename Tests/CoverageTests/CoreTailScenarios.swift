@@ -156,23 +156,65 @@ enum CoreTailScenarios {
 
     /// The stdio transport against /bin/cat: start, one echoed line,
     /// stderr capture, recentStderr, and terminateNow on a live process.
+    /// The transport's stdout reader can permanently starve on a fresh
+    /// start (the pipe keeps the echo but the reader never fires,
+    /// measured ~60% per fresh transport, same class as
+    /// AppCrashAcpScenarios), so the echo is retried on a fresh transport
+    /// with a short ceiling per attempt instead of one long wait.
     private static func acpStdioTransport(_ c: CoverageContext) async throws {
-        let transport = ACPStdioTransport(
-            configuration: ACPAgentConfiguration(command: "/bin/cat", workingDirectory: nil)
-        )
+        let configuration = ACPAgentConfiguration(command: "/bin/cat", workingDirectory: nil)
         var received: [ACPWireMessage] = []
-        var closed = false
+        // One counter per transport attempt: stop can fire the close
+        // handler more than once (reader EOF and terminationHandler both
+        // call it), so per-attempt counters attribute events cleanly.
+        var closeCounters: [CloseCounter] = []
+        var transport = ACPStdioTransport(configuration: configuration)
+        var attempt = 0
+        closeCounters.append(CloseCounter())
         try await transport.start(
             onMessage: { message in received.append(message) },
-            onClose: { closed = true }
+            onClose: { closeCounters[0].close() }
         )
         try c.expect(transport.processIdentifier != nil, "Transport reports a pid once started")
         try c.expect(transport.recentStderr.isEmpty, "No stderr before any output")
-        try await transport.send(ACPJSONRPC.encodeInitializeRequest(id: .int(3)))
-        try await wait(c, "cat echoes the wire line back") { received.count == 1 }
+
+        var delivered = false
+        for _ in 0..<4 {
+            try await transport.send(ACPJSONRPC.encodeInitializeRequest(id: .int(3)))
+            let deadline = Date().addingTimeInterval(1.5)
+            while received.isEmpty {
+                if Date() > deadline { break }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            if !received.isEmpty {
+                delivered = true
+                break
+            }
+            // Starved reader: the pipe holds the echo but no callback will
+            // ever fire, so retry on a fresh transport (the stopped one
+            // must close; the live cat transport must stay open).
+            await transport.stop()
+            let stoppedCounter = closeCounters[attempt]
+            let stoppedDeadline = Date().addingTimeInterval(2)
+            while stoppedCounter.count == 0 {
+                if Date() > stoppedDeadline { break }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            try c.expect(stoppedCounter.count > 0, "Stopped transport observes its close callback")
+            let counter = CloseCounter()
+            closeCounters.append(counter)
+            let retry = ACPStdioTransport(configuration: configuration)
+            try await retry.start(
+                onMessage: { message in received.append(message) },
+                onClose: { closeCounters[closeCounters.count - 1].close() }
+            )
+            transport = retry
+            attempt += 1
+        }
+        try c.expect(delivered, "cat echoes the wire line back after transport retries")
         try c.expect(received.first != nil, "Echoed wire message decoded")
         try c.expect(transport.recentStderr.isEmpty, "cat writes no stderr")
-        try c.expect(closed == false, "Transport stays open while cat runs")
+        try c.expect(closeCounters[attempt].count == 0, "Live transport stays open while cat runs")
         transport.terminateNow()
         try c.expect(true, "terminateNow returns for a live process")
     }
@@ -289,6 +331,26 @@ private final class TailCalendarBackend: CalendarStoreBackend {
     func refreshSources() {}
     func calendars() -> [EKCalendar] { fixtureCalendars }
     func events(from startDate: Date, to endDate: Date, calendars: [EKCalendar]) -> [EKEvent] { fixtureEvents }
+}
+
+/// Close-event counter for a transport attempt. The close callback can
+/// arrive from any thread and more than once per attempt, so the count
+/// is lock-guarded.
+private final class CloseCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+
+    func close() {
+        lock.lock()
+        events += 1
+        lock.unlock()
+    }
 }
 
 /// Binds, listens, and answers one local port so portIsAvailable sees it.

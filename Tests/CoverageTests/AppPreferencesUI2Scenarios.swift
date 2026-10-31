@@ -15,6 +15,11 @@ private final class UI2Hosted<Content: View> {
         host = NSHostingView(rootView: content)
         let panel = NSPanel(contentRect: NSRect(origin: NSPoint(x: -100_000, y: -100_000), size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.hidesOnDeactivate = false
+        // No ordering animations: a transform animation outliving the panel
+        // over-releases in its dealloc during a later CA commit (measured
+        // run12 segfault: _NSWindowTransformAnimation dealloc under
+        // autoreleasePoolPop).
+        panel.animationBehavior = .none
         panel.alphaValue = 0
         window = panel
         window.isReleasedWhenClosed = false
@@ -74,6 +79,11 @@ private final class UI2Hosted<Content: View> {
         window.orderOut(nil)
         window.contentView = nil
         window.close()
+        // Drain pending CA transactions while this object (and the panel
+        // it keeps alive) are still referenced: teardown happens inside
+        // scenario closes, and a deferred commit after dealloc is what
+        // crashed the run12 process.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 
     /// Presses an unnamed Form Toggle rendered as an AXCheckBox node

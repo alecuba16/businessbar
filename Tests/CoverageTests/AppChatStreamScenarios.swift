@@ -18,6 +18,10 @@ private final class ChatStreamHosted<Content: View> {
         host = NSHostingView(rootView: content)
         let panel = NSPanel(contentRect: NSRect(origin: NSPoint(x: -100_000, y: -100_000), size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.hidesOnDeactivate = false
+        // Same teardown rule as UI2Hosted: no ordering animations, the
+        // transform animation outliving a panel over-releases on dealloc
+        // (measured run12 segfault).
+        panel.animationBehavior = .none
         panel.alphaValue = 0
         window = panel
         window.isReleasedWhenClosed = false
@@ -121,6 +125,8 @@ private final class ChatStreamHosted<Content: View> {
         window.orderOut(nil)
         window.contentView = nil
         window.close()
+        // Drain pending CA transactions before the panel deallocs.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 }
 

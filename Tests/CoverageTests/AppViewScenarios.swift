@@ -24,6 +24,7 @@ enum AppViewScenarios {
         await run("onboarding") { try await onboarding(context) }
         await run("onboarding flow") { try await onboardingFlow(context) }
         await run("appearance") { try await appearance(context) }
+        await run("nosleep tails") { try await nosleepTails(context) }
         await run("menus") { try await menus(context) }
         await run("preferences") { try await preferences(context) }
         await run("local models") { try await localModels(context) }
@@ -384,6 +385,68 @@ enum AppViewScenarios {
         }
     }
 
+    /// NoSleepTab onChange tails. The pickers bind @AppStorage, so external
+    /// defaults writes land through the binding and fire onChange while the
+    /// tab is hosted (measured on this host: the grouped Form pickers update
+    /// on the next render pass after the write). The tccutil reset and the
+    /// System Settings URL stay dark: they touch real system state.
+    private static func nosleepTails(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("nosleep-tails")
+        defaults.set(true, forKey: Constants.Defaults.featureNoSleep)
+        defaults.set(true, forKey: Constants.Defaults.noSleepSimulateActivity)
+        var simulateChanged = 0
+        var preferencesChanged = 0
+        let simulateObserver = NotificationCenter.default.addObserver(
+            forName: .noSleepSimulateActivityChanged, object: nil, queue: nil
+        ) { _ in simulateChanged += 1 }
+        let preferencesObserver = NotificationCenter.default.addObserver(
+            forName: .businessBarPreferencesDidChange, object: nil, queue: nil
+        ) { _ in preferencesChanged += 1 }
+        defer {
+            NotificationCenter.default.removeObserver(simulateObserver)
+            NotificationCenter.default.removeObserver(preferencesObserver)
+        }
+
+        // Granted accessibility: the simulation controls stay enabled.
+        let host = Hosted(NoSleepTab(accessibilityStatus: { true }).defaultAppStorage(defaults), size: NSSize(width: 800, height: 1100))
+        defer { host.close() }
+        await settle()
+        try host.render(context)
+        try context.expect(host.text.contains("Accessibility permission granted"), "Granted status renders in the tail host")
+        try context.expect(host.text.contains("Check every"), "Simulation settings render while granted")
+
+        // Feature toggle: external write fires the preferences-change
+        // notification through the binding's onChange.
+        let preferencesBefore = preferencesChanged
+        defaults.set(false, forKey: Constants.Defaults.featureNoSleep)
+        await settle()
+        await settle()
+        try context.expect(preferencesChanged > preferencesBefore, "Feature toggle posts the preferences-changed notification")
+        defaults.set(true, forKey: Constants.Defaults.featureNoSleep)
+        await settle()
+        await settle()
+
+        // Check interval and idle multiplier: both post the simulate-changed
+        // notification (the mapped idle threshold text re-renders too).
+        let simulateBefore = simulateChanged
+        defaults.set(60, forKey: Constants.Defaults.activityCheckInterval)
+        await settle()
+        await settle()
+        defaults.set(6, forKey: Constants.Defaults.activityIdleMultiplier)
+        await settle()
+        await settle()
+        try context.expect(simulateChanged > simulateBefore, "Interval and multiplier changes post the simulate-changed notification")
+        try context.expect(host.text.contains("= 6m"), "Idle threshold text follows the new interval and multiplier")
+
+        // didBecomeActive re-runs the status probe; granted stays granted and
+        // the simulation flag survives.
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        await settle()
+        await settle()
+        try context.expect(host.text.contains("Accessibility permission granted"), "Activation re-probe keeps the granted status")
+        try context.equal(defaults.bool(forKey: Constants.Defaults.noSleepSimulateActivity), true, "Granted re-probe keeps simulation enabled")
+    }
+
     private static func menus(_ context: CoverageContext) async throws {
         let defaults = try context.defaults("menus")
         defaults.set(true, forKey: Constants.Defaults.featureNoSleep)
@@ -724,6 +787,10 @@ enum AppViewScenarios {
             host = NSHostingView(rootView: content)
             let panel = NSPanel(contentRect: NSRect(origin: NSPoint(x: -100_000, y: -100_000), size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             panel.hidesOnDeactivate = false
+            // Same teardown rule as UI2Hosted: no ordering animations, the
+            // transform animation outliving a panel over-releases on
+            // dealloc (measured run12 segfault).
+            panel.animationBehavior = .none
             panel.alphaValue = 0
             window = panel
             window.isReleasedWhenClosed = false
@@ -809,6 +876,8 @@ enum AppViewScenarios {
             window.orderOut(nil)
             window.contentView = nil
             window.close()
+            // Drain pending CA transactions before the panel deallocs.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
     }
 }
