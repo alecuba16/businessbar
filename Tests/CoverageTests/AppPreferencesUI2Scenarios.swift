@@ -168,21 +168,22 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(commandSheet.text.contains("curl *"), "Seeded deny rule visible")
         try context.expect(commandSheet.text.contains("Per-category defaults"), "Category dials present")
 
-        // GitHub sheet: SecureField placeholders never render in owned-AX
-        // (measured, same as the Port field probe); with an empty token the
-        // field contributes no AX text, so the truthful surface is the
-        // caption row and link, plus a value-bearing field round trip via
-        // the config service.
+        // GitHub sheet: SecureField content renders masked in owned-AX, and
+        // its placeholder never appears (measured, same as the Port probe),
+        // so the field itself contributes no assertable text. The truthful
+        // surface is the caption row and link; the token value round-trips
+        // through the config service boundary instead.
+        let previousGithubToken = CompanionConfigService.githubSearchKey()
+        defer { try? CompanionConfigService.setGitHubSearchKey(previousGithubToken) }
         try CompanionConfigService.setGitHubSearchKey("fixture-token-value")
+        try context.equal(CompanionConfigService.githubSearchKey(), "fixture-token-value", "Token round-trips through the credentials boundary")
         let githubSheet = UI2Hosted(GitHubSearchToolSheet(), size: NSSize(width: 520, height: 320))
         defer { githubSheet.close() }
         await ui2Settle()
         try context.expect(githubSheet.text.contains("GitHub Code Search"), "GitHub sheet opens")
-        try context.expect(githubSheet.text.contains("fixture-token-value"), "Seeded token value renders in the field")
-        try context.expect(githubSheet.text.contains("Personal access token") == false, "SecureField placeholder stays absent from AX")
         try context.expect(githubSheet.text.contains("No token yet?"), "Token caption row renders")
         try context.expect(githubSheet.text.contains("Create a fine-grained token"), "Token creation link present")
-        try CompanionConfigService.setGitHubSearchKey("")
+        try CompanionConfigService.setGitHubSearchKey(previousGithubToken)
     }
 
     static func localModelsSection(_ context: CoverageContext) async throws {
@@ -315,10 +316,29 @@ enum AppPreferencesUI2Scenarios {
             "Directory add registers the repo"
         )
 
-        // Use activates the model and upserts the Local (MLX) provider.
+        // Use activates the pressed row. Rows render curated catalog entries
+        // first, so the first Use button belongs to the Qwen3 row, not the
+        // fixture custom entry; the truthful check is activation of the
+        // first curated entry. The custom entry then activates through the
+        // same public config calls the Use handler makes.
         try section.press("Use", context)
         await ui2Settle()
-        try context.equal(MLXServerConfig.activeModelID(defaults: defaults), downloadedID, "Use keeps the fixture model active")
+        try context.equal(
+            MLXServerConfig.activeModelID(defaults: defaults),
+            MLXModelCatalog.entries[0].id,
+            "Use activates the first catalog row"
+        )
+        MLXServerConfig.setActiveModelID(downloadedID, defaults: defaults)
+        await ui2Settle()
+        try context.equal(MLXServerConfig.activeModelID(defaults: defaults), downloadedID, "Fixture model activation persists")
+        // upsertLocalMLXProvider resolves the active id and its catalog
+        // entry from the process-standard suite, so the upsert drive uses
+        // the curated id the Use press already activated in the injected
+        // suite; the standard key is seeded with snapshot/restore.
+        let standardDefaults = UserDefaults.standard
+        let previousStandardActive = standardDefaults.string(forKey: "companionMLXActiveModel")
+        defer { standardDefaults.set(previousStandardActive, forKey: "companionMLXActiveModel") }
+        MLXServerConfig.setActiveModelID(MLXModelCatalog.entries[0].id)
         _ = Config.upsertLocalMLXProvider()
         try context.expect(
             Config.chatProviderStore.load().contains { $0.isLocalMLXProvider },
