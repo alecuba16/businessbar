@@ -196,6 +196,7 @@ enum AppPreferencesUI1Scenarios {
         do { try await companionTab(context) } catch { failures.append("companionTab: \(error)") }
         do { try await companionTabSheets(context) } catch { failures.append("companionTabSheets: \(error)") }
         do { try await generalTab(context) } catch { failures.append("generalTab: \(error)") }
+        do { try launchAtLoginHelper(context) } catch { failures.append("launchAtLoginHelper: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
@@ -458,5 +459,33 @@ enum AppPreferencesUI1Scenarios {
         }
         try context.expect(dismissed, "Cancel dismisses the reset confirmation dialog")
         try context.expect(tab.text.contains("Launch at login"), "Reset cancel leaves the tab rendered")
+    }
+
+    /// LaunchAtLoginHelper bare-binary branch: the coverage runner executes
+    /// a bare SPM binary under an isolated CFFIXED_USER_HOME, so isBundle is
+    /// false and setEnabled writes/removes the LaunchAgent plist inside the
+    /// fixture home only. The plist is a plain file: launchd never loads it,
+    /// and the SMAppService branch (real bundle registration) is never taken.
+    static func launchAtLoginHelper(_ context: CoverageContext) throws {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let agents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let plist = agents.appendingPathComponent("com.businessbar.app.plist")
+        try? FileManager.default.removeItem(at: plist)
+
+        LaunchAtLoginHelper.setEnabled(true)
+        try context.expect(FileManager.default.fileExists(atPath: plist.path), "Enable writes the LaunchAgent plist under the fixture home")
+        try context.expect(LaunchAtLoginHelper.isEnabled, "isEnabled reads the plist back")
+
+        if let data = FileManager.default.contents(atPath: plist.path),
+           let plistObject = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+           let label = plistObject["Label"] as? String {
+            try context.equal(label, "com.businessbar.app", "Plist carries the bundle label")
+        } else {
+            try context.expect(false, "Plist decodes with a Label entry")
+        }
+
+        LaunchAtLoginHelper.setEnabled(false)
+        try context.expect(FileManager.default.fileExists(atPath: plist.path) == false, "Disable removes the LaunchAgent plist")
+        try context.expect(LaunchAtLoginHelper.isEnabled == false, "isEnabled reflects removal")
     }
 }
