@@ -117,8 +117,10 @@ enum AppChatScenarios {
         )
         defer { pickerView.close() }
         await chatSettle()
-        try context.expect(pickerView.text.contains("Fixture Chat"), "Model picker lists the fixture provider")
-        try context.expect(pickerView.text.contains("Fixture Reasoner"), "Model picker lists the fixture model")
+        // A closed SwiftUI menu picker exposes only the selected item's label
+        // in AX; section headers like the provider name stay hidden until it
+        // opens. The selected model label is the truthful closed-state check.
+        try context.expect(pickerView.text.contains("Fixture Reasoner"), "Model picker shows the selected model")
         try context.expect(pickerView.text.contains("Effort"), "Reasoning model shows the effort picker")
         try context.expect(pickerView.text.contains("Working dir:"), "Working dir button renders")
         try context.expect(pickerView.text.contains("Ask anything"), "Composer placeholder renders")

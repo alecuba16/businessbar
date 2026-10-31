@@ -14,6 +14,12 @@ enum AppLoggingScenarios {
     }
 
     static func levels(_ context: CoverageContext) throws {
+        // Earlier suites in this process already wrote log files under the
+        // fixture home (production defaults loggingEnabled/fileLoggingEnabled
+        // to true), and logFileURLs() lists whatever is on disk, so the empty
+        // assertions below need a clean slate first.
+        removeFixtureLogs()
+
         let all: [(LogLevel, String)] = [
             (.debug, "DEBUG"), (.info, "INFO"), (.warning, "WARNING"), (.error, "ERROR"), (.fatal, "FATAL")
         ]
@@ -47,6 +53,7 @@ enum AppLoggingScenarios {
         defer { UserDefaults.standard.removeObject(forKey: "fileLoggingEnabled") }
         try context.expect(!AppLogger.isFileLoggingEnabled(), "File logging flag observable off")
         AppLogger.shared.error("kept out of files", category: "coverage")
+        removeFixtureLogs()
         try context.equal(AppLogger.shared.logFileURLs().count, 0, "Disabled file logging keeps directory empty")
 
         // Level threshold filtering.
@@ -55,6 +62,7 @@ enum AppLoggingScenarios {
         try context.expect(AppLogger.isFileLoggingEnabled() == false, "Flag still off while threshold set")
         UserDefaults.standard.set(true, forKey: "fileLoggingEnabled")
         AppLogger.shared.debug("below threshold", category: "coverage")
+        removeFixtureLogs()
         try context.equal(AppLogger.shared.logFileURLs().count, 0, "Below-threshold debug stays unlogged")
         AppLogger.shared.error("above threshold", category: "coverage")
         let urls = AppLogger.shared.logFileURLs()
@@ -132,5 +140,16 @@ enum AppLoggingScenarios {
 private extension FileManager {
     func files(under directory: URL) -> [URL] {
         (try? contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+    }
+}
+
+@MainActor
+private func removeFixtureLogs() {
+    let logsDirectory = FileManager.default
+        .urls(for: .libraryDirectory, in: .userDomainMask).first!
+        .appendingPathComponent("Logs", isDirectory: true)
+        .appendingPathComponent("BusinessBar", isDirectory: true)
+    for url in FileManager.default.files(under: logsDirectory) where url.lastPathComponent.hasPrefix("BusinessBar_") {
+        try? FileManager.default.removeItem(at: url)
     }
 }

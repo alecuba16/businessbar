@@ -133,11 +133,21 @@ enum AppConfigScenarios {
 
         // Legacy ACP migration: the legacy backend key plus a stored ACP
         // command seed the agent provider exactly once, then selection owns
-        // the backend and the legacy key is cleared.
+        // the backend and the legacy key is cleared. Fresh suite required:
+        // the outer scenario already seeded an agent into the shared suite,
+        // which would trip the exactly-once guard and leave the stale
+        // selection pointing at a deleted model.
         Config.setModel("")
-        let seededStore = ChatProviderStore(defaults: defaults)
-        Config.chatProviderStore = seededStore
-        defaults.removeObject(forKey: "companion.legacyFieldsAttachedToProviders")
+        let legacyDefaults = try context.defaults("legacy-acp-migration")
+        let legacyStore = ChatProviderStore(defaults: legacyDefaults)
+        let previousConfigDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        Config.defaults = legacyDefaults
+        Config.chatProviderStore = legacyStore
+        defer {
+            Config.defaults = previousConfigDefaults
+            Config.chatProviderStore = previousStore
+        }
         Config.setACPCommand("fixture-agent")
         Config.setACPArguments(["--stdio"])
         Config.setBackend(.acp)
@@ -146,15 +156,17 @@ enum AppConfigScenarios {
         let seededAgain = Config.chatProviders()
         try context.equal(seededAgain.count, legacy.count, "Legacy seeding happens exactly once")
         try context.expect(Config.selectedProvider()?.kind == .acpAgent, "Seeded agent becomes the selection")
+        Config.defaults = previousConfigDefaults
+        Config.chatProviderStore = previousStore
 
         // Local MLX provider upsert: active model id drives the provider entry.
         Config.setBackend(.openai)
         let localDefaults = try context.defaults("local-mlx-provider")
         let localStore = ChatProviderStore(defaults: localDefaults)
-        let previousConfigDefaults = Config.defaults
+        let previousMlxDefaults = Config.defaults
         Config.defaults = localDefaults
         Config.chatProviderStore = localStore
-        defer { Config.defaults = previousConfigDefaults }
+        defer { Config.defaults = previousMlxDefaults }
         try context.expect(Config.upsertLocalMLXProvider() == nil, "No active MLX model yields no provider")
         let catalog = MLXModelCatalog.entry(id: "mlx-community/Llama-3.2-1B-Instruct-4bit", defaults: localDefaults)
         try context.expect(catalog != nil, "Fixture catalog resolves a known MLX model")

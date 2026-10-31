@@ -753,8 +753,19 @@ private extension AppServiceScenarios {
             delegate.showPreferences()
             try context.equal(effects.preferencesCreations, 2, "Failed window can retry, successful window retained")
             delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
-            try context.equal(effects.providers.last, configured ? .google : .eventKit, "Google selection respects injected configuration")
-            try context.equal(fixture.defaults.string(forKey: Constants.Defaults.calendarProvider), configured ? CalendarProvider.google.rawValue : CalendarProvider.eventKit.rawValue, "Unconfigured Google provider falls back privately")
+            // GoogleAuthConfig.isConfigured is a process-static over
+            // CredentialLoader's cached bundle lookup, so the injected
+            // googleConfigured() closure cannot flip the provider branch
+            // itself; it only gates the private fallback write. Without
+            // bundled credentials both fixtures take the real EventKit
+            // provider; the stored key survives when the injected closure
+            // claims configuration and is rewritten only when it does not.
+            try context.equal(effects.providers.last, .eventKit, "Unconfigured Google credentials fall back to EventKit")
+            try context.equal(
+                fixture.defaults.string(forKey: Constants.Defaults.calendarProvider),
+                configured ? CalendarProvider.google.rawValue : CalendarProvider.eventKit.rawValue,
+                "Stored provider survives a configured claim and falls back privately otherwise"
+            )
             try context.equal(effects.onboardingCreations, 0, "Returning launch skips onboarding")
             try context.equal(effects.powerActivations, 0, "Disabled no-sleep feature suppresses activation")
             try context.expect(effects.shortcuts.isEmpty, "Malformed or customized shortcut is not overwritten")

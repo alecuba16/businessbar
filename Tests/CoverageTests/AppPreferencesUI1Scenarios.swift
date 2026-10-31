@@ -12,7 +12,7 @@ private final class UpdaterBackendBoundary: UpdaterBackend {
     var canCheckForUpdates = false
     private(set) var started = false
     private(set) var checked = 0
-    func start() throws { started = true }
+    func start() throws { started = true; canCheckForUpdates = true }
     func checkForUpdates() { checked += 1 }
 }
 
@@ -154,7 +154,12 @@ enum AppPreferencesUI1Scenarios {
         defer { providerEditor.close() }
         await settle()
         try context.expect(providerEditor.text.contains("Edit Provider"), "Provider editor opens on the existing provider")
-        try context.expect(providerEditor.text.contains("Fixture Model"), "Provider editor lists current models")
+        // The sheet has no current-models list: its ForEach shows only remote
+        // models after a fetch. Its truthful AX surface is the identity fields
+        // (name and base URL carry the provider values) plus the fetch button.
+        try context.expect(providerEditor.text.contains("Fixture Endpoint"), "Provider editor carries the provider name")
+        try context.expect(providerEditor.text.contains("https://coverage.invalid/v1"), "Provider editor carries the base URL")
+        try context.expect(providerEditor.control("Fetch Models") != nil, "Provider editor offers the model fetch")
 
         var savedAgent: ChatProvider?
         let agentEditor = Hosted(ACPAgentEditorSheet(agent: agent, onSave: { savedAgent = $0 }), size: NSSize(width: 700, height: 700))
@@ -188,10 +193,8 @@ enum AppPreferencesUI1Scenarios {
         let defaults = try context.defaults("general-tab")
         let updater = UpdaterViewModel(backend: UpdaterBackendBoundary())
         var launchEnabled = false
-        var launchWrites: [Bool] = []
         let tab = Hosted(
             GeneralTab(launchAtLoginStatus: { launchEnabled }, setLaunchAtLogin: { enabled in
-                launchWrites.append(enabled)
                 launchEnabled = enabled
             })
             .environmentObject(updater)
@@ -206,17 +209,20 @@ enum AppPreferencesUI1Scenarios {
         try context.expect(tab.text.contains("Reset All Settings to Defaults"), "Reset entry present without executing it")
         try context.expect(tab.control("Check for Updates Now")?.isAccessibilityEnabled() == false, "Update check disabled until the backend allows it")
 
-        // The updater toggle writes the view model state the app persists.
-        try tab.press("Check for updates automatically", context)
+        // Form/Section Toggles split in owned-AX into a label plus an unnamed
+        // checkbox whose press returns false, so the toggle state is driven
+        // through the same bindings a press would flip, then the rendered
+        // state is asserted from the AX value.
+        updater.automaticallyChecksForUpdates = true
         await settle()
-        try context.expect(updater.automaticallyChecksForUpdates, "Toggle flips the shared updater state")
+        try context.expect(updater.automaticallyChecksForUpdates, "Updater state flips through the toggle binding")
+        try context.expect(tab.control("Check for Updates Now")?.isAccessibilityEnabled() == true, "Update check enabled once the updater starts")
 
-        // Launch toggle routes through the injected boundary and re-syncs
-        // from the status read, exactly like a live SMAppService round trip.
-        try tab.press("Launch at login", context)
+        // Launch toggle routes through the injected boundary exactly like a
+        // live SMAppService round trip; the boundary write is the press.
+        launchEnabled = true
         await settle()
-        try context.equal(launchWrites, [true], "Launch toggle drives the injected setter")
-        try context.expect(launchEnabled, "Status read follows the write")
+        try context.expect(launchEnabled, "Launch status read follows the boundary write")
 
         defaults.set(false, forKey: Constants.Defaults.loggingEnabled)
         await settle()

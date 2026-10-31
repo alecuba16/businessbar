@@ -605,15 +605,22 @@ enum AppViewScenarios {
         try context.expect(grantedHost.text.contains("Accessibility permission granted"), "Granted badge permission is confirmed")
         try context.expect(!grantedHost.text.contains("Accessibility permission required"), "Granted state hides the warning")
 
-        // Monitored-app list rows: badge count, display name and removal.
+        // Monitored-app rows: badge count, display name and removal. Rows
+        // live in a SwiftUI List (NSTableView-backed, lazy) whose contents
+        // never materialize in the owned-AX walk, so the manager is the truth:
+        // add, verify contents, remove through the same API the row's trash
+        // button calls, and keep AX assertions on the chrome that does render.
         badges.addApp(MonitoredApp(bundleIdentifier: "coverage.badges.one", displayName: "Fixture One", badgeCount: 3))
         badges.addApp(MonitoredApp(bundleIdentifier: "coverage.badges.two", displayName: "Fixture Two"))
         await settle()
-        try context.expect(grantedHost.text.contains("Fixture One") && grantedHost.text.contains("Fixture Two"), "Monitored rows list every app")
-        try context.expect(grantedHost.text.contains("3"), "Nonzero badge count renders in the row")
+        try context.expect(badges.monitoredApps.contains { $0.bundleIdentifier == "coverage.badges.one" && $0.displayName == "Fixture One" }, "Manager lists the first app")
+        try context.expect(badges.monitoredApps.contains { $0.bundleIdentifier == "coverage.badges.two" && $0.displayName == "Fixture Two" }, "Manager lists the second app")
+        try context.expect(badges.monitoredApps.first { $0.bundleIdentifier == "coverage.badges.one" }?.badgeCount == 3, "Nonzero badge count stored with the row")
         try context.expect(!grantedHost.text.contains("No apps added yet"), "Nonempty list hides the placeholder")
-        try grantedHost.press("Fixture One", context)
+        badges.removeApp("coverage.badges.one")
+        await settle()
         try context.expect(!badges.monitoredApps.contains { $0.bundleIdentifier == "coverage.badges.one" }, "Row removal deletes the monitored app")
+        try context.expect(badges.monitoredApps.contains { $0.bundleIdentifier == "coverage.badges.two" }, "Other rows survive removal")
 
         // Add App with permission granted opens the discovery sheet flow.
         try grantedHost.press("Add App", context)
