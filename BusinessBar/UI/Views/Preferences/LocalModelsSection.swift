@@ -46,10 +46,12 @@ struct LocalModelsSection: View {
     @State private var activeModelID: String?
     @State private var statusDetail = ""
     @State private var downloadedCache: [String] = []
-    @State private var customRepoText = ""
-    @State private var customCheck: MLXRepoInspector.Report?
-    @State private var customError: String?
-    @State private var customChecking = false
+    /// Custom-model provisioning flow. Held as an injected Observable
+    /// object for the same measured reason as ChatView's staging: writes
+    /// through external view-struct copies never reach installed @State,
+    /// so the coverage fixture needs a reference it shares with the
+    /// hosted view to type into the repo field and drive the check.
+    @State private var customFlow: RepoCheckFlow
     @State private var customEntries: [MLXModelCatalog.Entry] = []
     @State private var directoryItems: [MLXModelDirectory.Item] = []
     @State private var directoryFetching = false
@@ -67,7 +69,8 @@ struct LocalModelsSection: View {
         installedRAM: Int64 = Int64(ProcessInfo.processInfo.physicalMemory),
         locateUV: @escaping () -> String? = MLXEnvironment.locateUV,
         fetchDirectory: @escaping () async throws -> [MLXModelDirectory.Item] = { try await MLXModelDirectory.fetch() },
-        inspectRepo: @escaping (String) async throws -> MLXRepoInspector.Report = { try await MLXRepoInspector.check(repoID: $0) }
+        inspectRepo: @escaping (String) async throws -> MLXRepoInspector.Report = { try await MLXRepoInspector.check(repoID: $0) },
+        customFlow: RepoCheckFlow = RepoCheckFlow()
     ) {
         self.server = server
         self.store = store
@@ -82,6 +85,7 @@ struct LocalModelsSection: View {
         _keepLoaded = State(initialValue: MLXServerConfig.keepLoaded(defaults: defaults))
         _activeModelID = State(initialValue: MLXServerConfig.activeModelID(defaults: defaults))
         _customEntries = State(initialValue: MLXModelCatalog.customEntries(defaults: defaults))
+        _customFlow = State(initialValue: customFlow)
     }
 
     private var uvPath: String? { locateUV() }
@@ -488,19 +492,19 @@ struct LocalModelsSection: View {
     private var customModelProvisioning: some View {
         Group {
             HStack {
-                TextField("Hugging Face repo id, e.g. mlx-community/Model-4bit", text: $customRepoText)
-                    .onChange(of: customRepoText) { _ in
+                TextField("Hugging Face repo id, e.g. mlx-community/Model-4bit", text: $customFlow.repoText)
+                    .onChange(of: customFlow.repoText) { _ in
                         // A new id invalidates the previous check result.
-                        customCheck = nil
-                        customError = nil
+                        customFlow.check = nil
+                        customFlow.error = nil
                     }
-                Button(customChecking ? "Checking…" : "Check") {
+                Button(customFlow.checking ? "Checking…" : "Check") {
                     runRepoCheck()
                 }
                 .controlSize(.small)
-                .disabled(customChecking || customRepoText.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(customFlow.checking || customFlow.repoText.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            if customChecking {
+            if customFlow.checking {
                 HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.small)
@@ -509,12 +513,12 @@ struct LocalModelsSection: View {
                         .foregroundColor(.secondary)
                 }
             }
-            if let error = customError {
+            if let error = customFlow.error {
                 Text(error)
                     .font(.caption)
                     .foregroundColor(.red)
             }
-            if let report = customCheck {
+            if let report = customFlow.check {
                 customPreviewCard(report)
             }
         }
@@ -582,21 +586,21 @@ struct LocalModelsSection: View {
     }
 
     private func runRepoCheck() {
-        customChecking = true
-        customError = nil
-        customCheck = nil
-        let repoID = customRepoText
+        customFlow.checking = true
+        customFlow.error = nil
+        customFlow.check = nil
+        let repoID = customFlow.repoText
         Task {
             do {
                 let report = try await inspectRepo(repoID)
                 await MainActor.run {
-                    customCheck = report
-                    customChecking = false
+                    customFlow.check = report
+                    customFlow.checking = false
                 }
             } catch {
                 await MainActor.run {
-                    customError = error.localizedDescription
-                    customChecking = false
+                    customFlow.error = error.localizedDescription
+                    customFlow.checking = false
                 }
             }
         }
@@ -614,8 +618,8 @@ struct LocalModelsSection: View {
         MLXModelCatalog.addCustomEntry(entry, defaults: defaults)
         MLXModelCatalog.setReasoningCapability(id: report.repoID, report.reasoning, defaults: defaults)
         customEntries = MLXModelCatalog.customEntries(defaults: defaults)
-        customCheck = nil
-        customRepoText = ""
+        customFlow.check = nil
+        customFlow.repoText = ""
         refreshDownloads()
     }
 
@@ -683,4 +687,20 @@ struct LocalModelsSection: View {
             statusDetail = ""
         }
     }
+}
+
+/// State for the custom-model provisioning flow, split out of the view
+/// struct so the coverage fixture can share the reference (measured:
+/// external copies of a SwiftUI view never reach installed @State, while
+/// an injected Observable object keeps identity). The TextField binding
+/// writes through the same object the fixture holds.
+@MainActor
+@Observable
+final class RepoCheckFlow {
+    var repoText = ""
+    var check: MLXRepoInspector.Report?
+    var error: String?
+    var checking = false
+
+    nonisolated init() {}
 }

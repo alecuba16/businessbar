@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import Foundation
 import SwiftUI
+import UserNotifications
 @testable import BusinessBar
 
 @MainActor
@@ -58,6 +59,25 @@ private final class UI2Hosted<Content: View> {
             throw CoverageContext.Failure(description: "UI2 control not found or disabled: \(name)")
         }
         try context.expect(element.accessibilityPerformPress(), "UI2 control press succeeds: \(name)")
+    }
+
+    /// Presses the nth control carrying the same name. Both permission
+    /// resets share the "Reset Permission" label, so the notification
+    /// reset needs the second match.
+    func pressOccurrence(_ name: String, occurrence: Int, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+        }
+        let matches = OwnedAccessibility.elements(in: host).filter {
+            $0.accessibilityLabel() == name || $0.accessibilityTitle() == name || ($0.accessibilityValue() as? String) == name
+        }
+        guard matches.count > occurrence, matches[occurrence].isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "UI2 control occurrence \(occurrence) not found or disabled: \(name) (matches: \(matches.count))")
+        }
+        try context.expect(matches[occurrence].accessibilityPerformPress(), "UI2 control press succeeds: \(name) #\(occurrence)")
     }
 
     /// Presses an unnamed switch (SwiftUI Form Toggles render as
@@ -193,6 +213,7 @@ enum AppPreferencesUI2Scenarios {
         do { try await localModelsSection(context) } catch { failures.append("localModelsSection: \(error)") }
         do { try await localModelsDeep(context) } catch { failures.append("localModelsDeep: \(error)") }
         do { try await localModelsTail(context) } catch { failures.append("localModelsTail: \(error)") }
+        do { try await localModelsCustomFlow(context) } catch { failures.append("localModelsCustomFlow: \(error)") }
         do { try await calendarsTab(context) } catch { failures.append("calendarsTab: \(error)") }
         do { try await calendarsTabDeep(context) } catch { failures.append("calendarsTabDeep: \(error)") }
         do { try await calendarsTabReset(context) } catch { failures.append("calendarsTabReset: \(error)") }
@@ -481,6 +502,234 @@ enum AppPreferencesUI2Scenarios {
         try context.equal(MLXServerConfig.port(defaults: defaults), 8765, "Port persists")
         try context.equal(MLXServerConfig.idleMinutes(defaults: defaults), 17, "Idle minutes persist")
         try context.expect(MLXServerConfig.keepLoaded(defaults: defaults), "Keep loaded persists")
+    }
+
+    /// Custom-model provisioning flow end to end through the shared
+    /// RepoCheckFlow reference: typing the repo id, the Check press
+    /// against the injected inspector, the preview card render (both
+    /// reasoning shapes and the fit pill), the Add press registering the
+    /// entry, and the delete path for a downloaded custom entry. The repo
+    /// field binding cannot be driven through AX (measured: AX writes do
+    /// not reach SwiftUI bindings), so the fixture writes the shared flow
+    /// object instead.
+    static func localModelsCustomFlow(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
+        let defaults = try context.defaults("local-models-custom")
+        defaults.registerDefaults()
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        let previousCredentials = Config.credentials
+        var secrets: [String: Data] = [:]
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        Config.credentials = .init(load: { secrets[$0] }, save: { secrets[$0] = $1 }, delete: { secrets.removeValue(forKey: $0) })
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+            Config.credentials = previousCredentials
+        }
+
+        let home = try context.temporaryDirectory("local-models-custom-home").path
+        let driver = MLXProcessDriver(run: { _ in throw CoverageContext.Failure(description: "fixture") }, isRunning: { _ in false }, terminate: { _ in }, forceKill: { _ in }, identifier: { _ in 0 }, registerForQuit: { _ in }, terminationStatus: { _ in 0 })
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.timeoutIntervalForRequest = 1
+        sessionConfig.timeoutIntervalForResource = 1
+        let session = URLSession(configuration: sessionConfig)
+        defer { session.invalidateAndCancel() }
+        let server = MLXServerManager(defaults: defaults, home: home, driver: driver, session: session, resolvePython: { _ in throw CoverageContext.Failure(description: "fixture") }, portAvailable: { _ in true }, now: Date.init, sleep: { _ in throw CancellationError() }, residentSize: { _ in 0 }, observeResources: { _ in })
+        let store = MLXModelStore(defaults: defaults, home: home, driver: driver, locateUV: { nil }, sleep: { _ in throw CancellationError() })
+
+        let flow = RepoCheckFlow()
+        var reportedRepoIDs: [String] = []
+        let section = UI2Hosted(
+            Form {
+                LocalModelsSection(
+                    server: server,
+                    store: store,
+                    defaults: defaults,
+                    home: home,
+                    installedRAM: 16_000_000_000,
+                    locateUV: { "/usr/bin/true" },
+                    fetchDirectory: { [] },
+                    inspectRepo: { repoID in
+                        reportedRepoIDs.append(repoID)
+                        return MLXRepoInspector.Report(
+                            repoID: repoID,
+                            displayName: "Fixture Effort Model",
+                            sizeBytes: 5_000_000_000,
+                            ramBytes: 8_000_000_000,
+                            kind: .text,
+                            architecture: "FixtureForCausalLM",
+                            contextLength: 131072,
+                            quantization: "4-bit",
+                            reasoning: MLXReasoningCapability(supported: true, shape: .effortLevels, effortOptions: ["low", "medium", "high"])
+                        )
+                    },
+                    customFlow: flow
+                )
+            }.defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1700)
+        )
+        defer { section.close() }
+        await ui2Settle()
+
+        // Check disabled while the repo field is empty.
+        try context.expect(section.control("Check")?.isAccessibilityEnabled() == false, "Check stays disabled with an empty repo id")
+
+        // Type the repo id through the shared flow object, then Check: the
+        // inspector answers with the effort-levels report and the preview
+        // card renders its capabilities.
+        flow.repoText = "mlx-community/Fixture-Effort-4bit"
+        await ui2Settle()
+        try section.press("Check", context)
+        for _ in 0..<40 where flow.check == nil {
+            await ui2Settle()
+        }
+        try context.equal(reportedRepoIDs, ["mlx-community/Fixture-Effort-4bit"], "Check passes the typed repo id to the inspector")
+        try context.expect(flow.checking == false, "Checking flag clears after the report lands")
+        // The display name in the AX dump proves the preview card rendered;
+        // every caption line in the card body (context, quantization, RAM,
+        // reasoning summary, fit pill) executes in the same body pass.
+        // Measured in the run15 suite: the caption texts stay out of the
+        // owned-AX dump while the medium-weight name shows.
+        try context.expect(section.text.contains("Fixture Effort Model"), "Preview card shows the display name")
+
+        // Add registers the entry and clears the flow.
+        try section.press("Add to catalog", context)
+        for _ in 0..<20 where !MLXModelCatalog.customEntries(defaults: defaults).contains(where: { $0.id == "mlx-community/Fixture-Effort-4bit" }) {
+            await ui2Settle()
+        }
+        try context.expect(
+            MLXModelCatalog.customEntries(defaults: defaults).contains { $0.id == "mlx-community/Fixture-Effort-4bit" },
+            "Add registers the custom entry"
+        )
+        try context.expect(flow.repoText.isEmpty, "Add clears the repo field")
+        try context.expect(flow.check == nil, "Add clears the preview card")
+        try context.expect(section.text.contains("Fixture Effort Model"), "Custom row appears in the catalog after Add")
+
+        // Check error path: a throwing inspector surfaces the error
+        // caption while the checking flag still clears.
+        section.close()
+
+        let failingFlow = RepoCheckFlow()
+        let failingSection = UI2Hosted(
+            Form {
+                LocalModelsSection(
+                    server: server,
+                    store: store,
+                    defaults: defaults,
+                    home: home,
+                    installedRAM: 16_000_000_000,
+                    locateUV: { "/usr/bin/true" },
+                    fetchDirectory: { [] },
+                    inspectRepo: { _ in throw CoverageContext.Failure(description: "fixture inspector refusal") },
+                    customFlow: failingFlow
+                )
+            }.defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1700)
+        )
+        defer { failingSection.close() }
+        await ui2Settle()
+        failingFlow.repoText = "mlx-community/Fixture-Broken-4bit"
+        await ui2Settle()
+        try failingSection.press("Check", context)
+        for _ in 0..<40 where failingFlow.error == nil {
+            await ui2Settle()
+        }
+        // CoverageContext.Failure carries no localizedDescription, so the
+        // caption shows the generic Error text; the flow state is the
+        // truthful check that the throw path ran.
+        try context.expect(failingFlow.error != nil, "Inspector failure surfaces in the flow error state")
+        try context.expect(failingFlow.checking == false, "Checking flag clears on failure")
+        try context.expect(failingFlow.check == nil, "Failed check leaves no report")
+
+        // Thinking-toggle reasoning shape: the summary line switches to
+        // the chat_template_kwargs wording.
+        let toggleFlow = RepoCheckFlow()
+        let toggleSection = UI2Hosted(
+            Form {
+                LocalModelsSection(
+                    server: server,
+                    store: store,
+                    defaults: defaults,
+                    home: home,
+                    installedRAM: 16_000_000_000,
+                    locateUV: { "/usr/bin/true" },
+                    fetchDirectory: { [] },
+                    inspectRepo: { repoID in
+                        MLXRepoInspector.Report(
+                            repoID: repoID,
+                            displayName: "Fixture Toggle Model",
+                            sizeBytes: 5_000_000_000,
+                            ramBytes: 8_000_000_000,
+                            kind: .textAndImages,
+                            architecture: "FixtureVLForCausalLM",
+                            contextLength: nil,
+                            quantization: nil,
+                            reasoning: MLXReasoningCapability(supported: true, shape: .thinkingToggle, effortOptions: [])
+                        )
+                    },
+                    customFlow: toggleFlow
+                )
+            }.defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1700)
+        )
+        defer { toggleSection.close() }
+        await ui2Settle()
+        toggleFlow.repoText = "mlx-community/Fixture-Toggle-4bit"
+        await ui2Settle()
+        try toggleSection.press("Check", context)
+        for _ in 0..<40 where toggleFlow.check == nil {
+            await ui2Settle()
+        }
+        // Same owned-AX caption limit as the effort card: the toggle report
+        // reaching the flow proves the body pass ran the thinking-toggle
+        // summary branch.
+        try context.expect(toggleFlow.check?.reasoning.shape == .thinkingToggle, "Toggle report lands and renders its summary branch")
+
+        // Custom entry delete: seed a downloaded custom entry, press its
+        // Delete, and confirm the entry leaves the catalog defaults.
+        let downloadedID = "mlx-community/Fixture-Custom-Downloaded-4bit"
+        let snapshot = URL(fileURLWithPath: home)
+            .appendingPathComponent(".cache/huggingface/hub")
+            .appendingPathComponent("models--mlx-community--Fixture-Custom-Downloaded-4bit")
+            .appendingPathComponent("snapshots")
+            .appendingPathComponent("fixture-snapshot")
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        for file in MLXModelCatalog.requiredFiles {
+            FileManager.default.createFile(atPath: snapshot.appendingPathComponent(file).path, contents: Data("fixture".utf8))
+        }
+        _ = MLXModelCatalog.addCustomEntry(
+            MLXModelCatalog.Entry(id: downloadedID, displayName: "Fixture Custom Downloaded", sizeBytes: 1_000, ramBytes: 2_000, kind: .text, reasoning: nil),
+            defaults: defaults
+        )
+        let deletingSection = UI2Hosted(
+            Form {
+                LocalModelsSection(
+                    server: server,
+                    store: store,
+                    defaults: defaults,
+                    home: home,
+                    installedRAM: 16_000_000_000,
+                    locateUV: { "/usr/bin/true" },
+                    fetchDirectory: { [] },
+                    inspectRepo: { _ in throw CoverageContext.Failure(description: "fixture") },
+                    customFlow: RepoCheckFlow()
+                )
+            }.defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1700)
+        )
+        defer { deletingSection.close() }
+        await ui2Settle()
+        try context.expect(deletingSection.text.contains("Fixture Custom Downloaded"), "Downloaded custom entry row renders")
+        try deletingSection.press("Delete", context)
+        for _ in 0..<20 where MLXModelCatalog.customEntries(defaults: defaults).contains(where: { $0.id == downloadedID }) {
+            await ui2Settle()
+        }
+        try context.expect(
+            MLXModelCatalog.customEntries(defaults: defaults).contains { $0.id == downloadedID } == false,
+            "Delete removes the custom entry from the catalog"
+        )
     }
 
     static func calendarsTab(_ context: CoverageContext) async throws {
@@ -788,9 +1037,11 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Calendar reset disables the feature flag")
         try context.expect(resetTab.text.contains("Resetting…") == false, "Reset flag clears after the seam completes")
 
-        // Notification reset press: same seam with the Notifications service.
+        // Notification reset press: same seam with the Notifications
+        // service. Both resets share the "Reset Permission" label, so
+        // the press targets the second occurrence (the notifications row).
         defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
-        try resetTab.press("Reset Permission", context)
+        try resetTab.pressOccurrence("Reset Permission", occurrence: 1, context)
         for _ in 0..<20 where resetServices.count < 2 {
             await Task.yield()
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
