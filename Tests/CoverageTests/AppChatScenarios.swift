@@ -155,6 +155,10 @@ private final class ChatHosted<Content: View> {
         // Drain pending CA transactions before the panel deallocs.
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
+
+    /// Window number so callers can exclude this fixture panel from
+    /// NSApp.windows walks that match by content type.
+    var fixtureWindowNumber: Int { window.windowNumber }
 }
 
 @MainActor
@@ -166,6 +170,7 @@ private func chatSettle() async {
 }
 
 private typealias Hosted = ChatHosted
+
 
 @MainActor
 enum AppChatScenarios {
@@ -522,5 +527,80 @@ enum AppChatScenarios {
         try hosted.press("Copy", context)
         try hosted.press("Close", context)
         try context.equal([replacements, copies, closes], [1, 1, 1], "Overlay buttons route to injected actions")
+
+        // Controller replace path with an injected sink: the panel's Replace
+        // button routes through performReplace, which dismisses and calls
+        // replaceSelectionInOwner when a selection is attached. The sink
+        // records the write, no AX or pasteboard is touched.
+        let sink = OverlayRecordingSink()
+        let replaceController = RewriteOverlayController(selectionService: sink)
+        replaceController.present(
+            original: "Before",
+            rewritten: "After",
+            templateName: "Fixture",
+            selection: CapturedSelectionFixture(text: "Before", ownerProcessIdentifier: 0)
+        )
+        await chatSettle()
+        // The Hosted fixture panel also wraps a RewriteOverlayView; exclude
+        // it by window number so only the controller-built panel counts.
+        let hostedWindowNumber = hosted.fixtureWindowNumber
+        let visiblePanels: [NSPanel] = NSApp.windows.compactMap { window in
+            guard let panel = window as? NSPanel,
+                  panel.isVisible,
+                  panel.windowNumber != hostedWindowNumber,
+                  panel.contentView is NSHostingView<RewriteOverlayView> else { return nil }
+            return panel
+        }
+        try context.equal(visiblePanels.count, 1, "Injected controller presents one panel")
+        visiblePanels.forEach { $0.alphaValue = 0; $0.setFrameOrigin(NSPoint(x: -100_010, y: -100_010)) }
+        replaceController.performReplace()
+        for _ in 0..<50 where sink.ownerWrites.isEmpty {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        try context.equal(sink.ownerWrites, ["After"], "Replace routes the rewritten text through the owner sink")
+        try context.expect(replaceController.panelVisible == false, "Replace dismisses the panel before writing")
+
+        // Plain replace without an attached selection routes through
+        // replaceSelection, not the owner variant.
+        let plainSink = OverlayRecordingSink()
+        let plainController = RewriteOverlayController(selectionService: plainSink)
+        plainController.present(original: "B", rewritten: "R", templateName: "F", selection: nil)
+        await chatSettle()
+        if let panel = NSApp.windows.first(where: { $0.isVisible && $0.level == .floating && $0.frame.width < 500 }) {
+            panel.alphaValue = 0
+            panel.setFrameOrigin(NSPoint(x: -100_011, y: -100_011))
+        }
+        plainController.performReplace()
+        for _ in 0..<50 where plainSink.plainWrites.isEmpty {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        try context.equal(plainSink.plainWrites, ["R"], "Replace without a selection calls the plain replace")
+        plainController.panelOrderOutAndClear()
     }
 }
+
+/// CapturedSelection for scenario use: the initializer is internal, the
+/// @testable import exposes it.
+@MainActor
+private func CapturedSelectionFixture(text: String, ownerProcessIdentifier: pid_t) -> SelectionService.CapturedSelection {
+    SelectionService.CapturedSelection(text: text, viaAccessibility: true, ownerProcessIdentifier: ownerProcessIdentifier)
+}
+
+/// Records overlay Replace writes instead of touching AX or the pasteboard.
+@MainActor
+private final class OverlayRecordingSink: OverlaySelectionSink {
+    var ownerWrites: [String] = []
+    var plainWrites: [String] = []
+    func replaceSelection(with text: String) async -> Bool {
+        plainWrites.append(text)
+        return true
+    }
+    func replaceSelectionInOwner(of selection: SelectionService.CapturedSelection, with newText: String) async -> Bool {
+        ownerWrites.append(newText)
+        return true
+    }
+}
+
+
