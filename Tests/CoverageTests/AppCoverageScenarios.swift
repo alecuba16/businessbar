@@ -43,6 +43,7 @@ enum AppCoverageScenarios {
         await run("ui-misc", failures: &failures) { try await AppUIMiscScenarios.run(context) }
         await run("logging", failures: &failures) { try await AppLoggingScenarios.run(context) }
         await run("chat-stream", failures: &failures) { try await AppChatStreamScenarios.run(context) }
+        await run("companion-deep", failures: &failures) { try await AppCompanionTabDeepScenarios.run(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
