@@ -15,6 +15,7 @@ enum CoreTailScenarios {
             ("CrashHandler pending report", crashPendingReport),
             ("MLX port probe", mlxPortProbe),
             ("MLX quit kill", mlxQuitKill),
+            ("MLX server manager tails", mlxServerManagerTails),
             ("ACP stdio transport", acpStdioTransport),
             ("ACP concurrent spawn", acpConcurrentSpawn),
             ("search tails", searchTails)
@@ -125,6 +126,27 @@ enum CoreTailScenarios {
         MLXModelStore.killAtQuit()
         try c.expect(!idle.isRunning, "Quit table drains without side effects")
         _ = idle
+    }
+
+    /// MLXServerManager plumbing that never spawns a server: the bare
+    /// convenience init wires the live driver and installs the resource
+    /// guards (a memory-pressure source and a thermal observer, both inert
+    /// while state stays stopped), rssBytes reads /bin/ps for a live pid,
+    /// and killAtQuit drains the quit table. The server itself is never
+    /// started: state stays stopped and no port is touched.
+    private static func mlxServerManagerTails(_ c: CoverageContext) throws {
+        _ = MLXServerManager.shared
+        try c.expect(MLXServerManager.shared.state == .stopped, "Shared manager stays stopped")
+
+        // rssBytes: /bin/ps on this process yields a nonzero KB figure;
+        // a bogus pid makes ps exit nonzero and the helper returns 0.
+        let own = MLXServerManager.rssBytes(pid: ProcessInfo.processInfo.processIdentifier)
+        try c.expect(own > 0, "rssBytes reads this process resident size")
+        try c.expect(MLXServerManager.rssBytes(pid: -1) == 0, "rssBytes returns zero for a dead pid")
+
+        MLXServerManager.killAtQuit()
+        MLXServerManager.killAtQuit()
+        try c.expect(MLXServerManager.shared.state == .stopped, "killAtQuit leaves the stopped state")
     }
 
     /// The stdio transport against /bin/cat: start, one echoed line,
