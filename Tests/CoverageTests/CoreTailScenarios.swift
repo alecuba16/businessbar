@@ -278,9 +278,8 @@ private final class ListenerSocket {
     let port: Int
 
     init() throws {
-        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { throw CoverageContext.Failure(description: "listener socket failed") }
-        fd = descriptor
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw CoverageContext.Failure(description: "listener socket failed") }
         var on: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
@@ -301,8 +300,10 @@ private final class ListenerSocket {
             }
         }
         guard read == 0 else { Darwin.close(fd); throw CoverageContext.Failure(description: "listener getsockname failed") }
-        port = Int(got.sin_port.bigEndian)
+        let boundPort = Int(got.sin_port.bigEndian)
         guard listen(fd, 1) == 0 else { Darwin.close(fd); throw CoverageContext.Failure(description: "listener listen failed") }
+        self.fd = fd
+        self.port = boundPort
     }
 
     func close() { Darwin.close(fd) }
@@ -314,9 +315,8 @@ private final class FreePort {
     let port: Int
 
     init() throws {
-        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { throw CoverageContext.Failure(description: "probe socket failed") }
-        fd = descriptor
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw CoverageContext.Failure(description: "probe socket failed") }
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_addr.s_addr = INADDR_LOOPBACK.bigEndian
@@ -334,7 +334,8 @@ private final class FreePort {
                 getsockname(fd, sa, &len)
             }
         }
-        port = Int(got.sin_port.bigEndian)
+        self.fd = fd
+        self.port = Int(got.sin_port.bigEndian)
     }
 
     func close() { Darwin.close(fd) }

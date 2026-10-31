@@ -65,7 +65,9 @@ public struct CalendarEvent: Identifiable, Hashable {
     }
 
     public init(from ekEvent: EKEvent, calendar: MBCalendar) {
-        self.id = ekEvent.eventIdentifier
+        // eventIdentifier is nil until EventKit persists the event; an
+        // unsaved in-memory event must not trap the mapping.
+        self.id = ekEvent.eventIdentifier ?? UUID().uuidString
         self.title = ekEvent.title ?? "Untitled Event"
         self.startDate = ekEvent.startDate
         self.endDate = ekEvent.endDate
