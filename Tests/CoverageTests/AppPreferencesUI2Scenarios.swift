@@ -55,6 +55,21 @@ private final class UI2Hosted<Content: View> {
         try context.expect(element.accessibilityPerformPress(), "UI2 control press succeeds: \(name)")
     }
 
+    /// Presses an unnamed switch (SwiftUI Form Toggles render as
+    /// PlatformSwitch checkboxes with no label). Measured on this host:
+    /// the switch node answers accessibilityPerformPress and flips its
+    /// value, so index-based targeting reaches the nth toggle.
+    func pressSwitch(index: Int, _ context: CoverageContext, _ label: String) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        let switches = OwnedAccessibility.elements(in: host).filter { $0.className().contains("PlatformSwitch") }
+        guard switches.count > index, switches[index].isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Switch not found or disabled at index \(index): \(label)")
+        }
+        try context.expect(switches[index].accessibilityPerformPress(), "Switch press succeeds at index \(index): \(label)")
+    }
+
     func close() {
         window.orderOut(nil)
         window.contentView = nil
@@ -76,7 +91,9 @@ enum AppPreferencesUI2Scenarios {
         var failures: [String] = []
         do { try await toolsSection(context) } catch { failures.append("toolsSection: \(error)") }
         do { try await localModelsSection(context) } catch { failures.append("localModelsSection: \(error)") }
+        do { try await localModelsDeep(context) } catch { failures.append("localModelsDeep: \(error)") }
         do { try await calendarsTab(context) } catch { failures.append("calendarsTab: \(error)") }
+        do { try await calendarsTabDeep(context) } catch { failures.append("calendarsTabDeep: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
@@ -444,10 +461,244 @@ enum AppPreferencesUI2Scenarios {
         try context.equal(defaults.integer(forKey: BusinessBar.Constants.Defaults.notificationMinutesBefore), 10, "Lead minutes persist")
     }
 
+    /// Toggle-press paths, default init closures, grant request flows, and
+    /// the provider-flip onChange that the rendering-focused calendarsTab
+    /// scenario leaves cold. Buttons that would open System Settings or run
+    /// tccutil are intentionally not pressed: they mutate real machine state.
+    static func calendarsTabDeep(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("calendars-tab-deep")
+        defaults.registerDefaults()
+        let auth = GoogleAuth(dependencies: .init(loadCredential: { throw CoverageContext.Failure(description: "fixture") }, saveCredential: { _ in }, deleteCredential: {}, configuration: { .init(clientNumber: "YOUR_FIXTURE", clientSecret: "YOUR_FIXTURE") }, request: { _ in throw CoverageContext.Failure(description: "fixture") }, openURL: { _ in false }))
+
+        // Default init closures: EKEventStore.authorizationStatus only reads
+        // the current TCC state (no prompt), and the notification default
+        // short-circuits on the absent runtime bundle. Both default argument
+        // closures execute at this call site.
+        let meetings = MeetingManager(eventStore: UI2CalendarBoundary(), defaults: defaults, notificationCenter: NotificationCenter())
+        let defaultInit = UI2Hosted(
+            CalendarsTab(meetingManager: meetings, googleAuth: auth).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1400)
+        )
+        defer { defaultInit.close() }
+        await ui2Settle()
+        try context.expect(defaultInit.text.contains("Enable calendar functionality"), "Default init renders the feature toggle")
+
+        // Feature toggle off: the binding routes through
+        // setCalendarFeatureEnabled(false), which persists the kill-switch.
+        let deniedMeetings = MeetingManager(eventStore: UI2DeniedCalendarBoundary(), defaults: defaults, notificationCenter: NotificationCenter())
+        let deniedTab = UI2Hosted(
+            CalendarsTab(
+                meetingManager: deniedMeetings,
+                googleAuth: auth,
+                defaults: defaults,
+                calendarAuthorization: { .denied },
+                notificationAuthorization: { receive in receive(false) }
+            ).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1400)
+        )
+        defer { deniedTab.close() }
+        await ui2Settle()
+        try deniedTab.pressSwitch(index: 0, context, "Enable calendar functionality off")
+        await ui2Settle()
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar) == false, "Feature toggle press persists the disabled state")
+
+        // Feature toggle back on without permission: the eventKit branch
+        // runs the real request through the fake store, which denies, so the
+        // request-denied log branch runs and the flag stays off.
+        try deniedTab.pressSwitch(index: 0, context, "Enable calendar functionality on")
+        await ui2Settle()
+        await ui2Settle()
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar) == false, "Denied request keeps the feature disabled")
+        try context.expect(deniedTab.text.contains("Requesting…") == false, "Request flag clears after the denied round trip")
+
+        // Grant with a store that answers true: the granted branch loads the
+        // calendar list, re-selects defaults, and persists the enabled flag.
+        let grantedMeetings = MeetingManager(eventStore: UI2GrantedCalendarBoundary(), defaults: defaults, notificationCenter: NotificationCenter())
+        let grantedTab = UI2Hosted(
+            CalendarsTab(
+                meetingManager: grantedMeetings,
+                googleAuth: auth,
+                defaults: defaults,
+                calendarAuthorization: { .fullAccess },
+                notificationAuthorization: { receive in receive(true) }
+            ).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1400)
+        )
+        defer { grantedTab.close() }
+        await ui2Settle()
+        // The stored kill-switch from the denied round trips stays off until
+        // the granted press flips it through the same binding.
+        try grantedTab.pressSwitch(index: 0, context, "Enable calendar functionality granted on")
+        await ui2Settle()
+        await ui2Settle()
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Granted request persists the enabled state")
+        try context.expect(grantedTab.text.contains("Coverage calendar granted"), "Granted store calendars render in the selection list")
+
+        // Grant Notification Permission press: RuntimeBundle is absent in
+        // the scenario process, so the request short-circuits on the guard
+        // instead of touching the real notification center, and the granted
+        // status injected at onAppear stays unchanged.
+        try context.expect(grantedTab.text.contains("Notification permission granted"), "Granted boundary state renders before the press")
+        try grantedTab.press("Grant Notification Permission", context)
+        await ui2Settle()
+        try context.expect(grantedTab.text.contains("Notification permission granted"), "Absent-bundle guard leaves the granted state unchanged")
+
+        // Provider flip to Google through the stored key: onChange fires, the
+        // feature keeps enabled only while the provider can serve it, and the
+        // Google-managed caption renders.
+        defaults.set(BusinessBar.CalendarProvider.google.rawValue, forKey: BusinessBar.Constants.Defaults.calendarProvider)
+        await ui2Settle()
+        try context.expect(grantedTab.text.contains("Google provider selected."), "Google provider shows the managed caption")
+    }
+
+    /// Row-control paths the rendering scenario leaves cold: the Start press
+    /// against a stub python (failure caption), the download Cancel window,
+    /// both Delete branches, and the reasoning help on a capability-bearing
+    /// custom entry. The Check provisioning flow stays out: measured on this
+    /// host, AX value writes move the field's accessibility value but not the
+    /// SwiftUI binding, so the Check button never enables without a seam.
+    static func localModelsDeep(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("local-models-deep")
+        defaults.registerDefaults()
+
+        let home = try context.temporaryDirectory("local-models-deep-home").path
+        let downloadedID = "mlx-community/Fixture-Deep-4bit"
+        let snapshot = URL(fileURLWithPath: home)
+            .appendingPathComponent(".cache/huggingface/hub")
+            .appendingPathComponent("models--mlx-community--Fixture-Deep-4bit")
+            .appendingPathComponent("snapshots")
+            .appendingPathComponent("fixture-snapshot")
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        for file in MLXModelCatalog.requiredFiles {
+            FileManager.default.createFile(atPath: snapshot.appendingPathComponent(file).path, contents: Data("fixture".utf8))
+        }
+
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.timeoutIntervalForRequest = 1
+        sessionConfig.timeoutIntervalForResource = 1
+        let server = MLXServerManager(
+            defaults: defaults,
+            home: home,
+            driver: .live(registerForQuit: { _ in }),
+            session: URLSession(configuration: sessionConfig),
+            resolvePython: { _ in "/usr/bin/true" },
+            portAvailable: { _ in true },
+            now: Date.init,
+            sleep: { _ in },
+            residentSize: { _ in 0 },
+            observeResources: { _ in }
+        )
+        // The download progress loop sleeps for real: the window between
+        // the spawned fake downloader (/usr/bin/true) and the interrupt mark
+        // is wide enough for the Cancel press to land while the row still
+        // shows its in-flight state.
+        let store = MLXModelStore(
+            defaults: defaults,
+            home: home,
+            driver: .live(registerForQuit: { _ in }),
+            locateUV: { "/usr/bin/true" },
+            sleep: { nanoseconds in try await Task.sleep(nanoseconds: min(nanoseconds, 1_000_000_000)) }
+        )
+
+        // Custom entry with reasoning: the catalog override renders the
+        // brain help on the row without any disk probe.
+        let customEntry = MLXModelCatalog.Entry(
+            id: downloadedID,
+            displayName: "Fixture Deep",
+            sizeBytes: 2_500_000_000,
+            ramBytes: 4_000_000_000,
+            kind: .text,
+            reasoning: MLXReasoningCapability(supported: true, shape: .thinkingToggle, effortOptions: [])
+        )
+        _ = MLXModelCatalog.addCustomEntry(customEntry, defaults: defaults)
+        MLXServerConfig.setActiveModelID(downloadedID, defaults: defaults)
+
+        let section = UI2Hosted(
+            LocalModelsSection(
+                server: server,
+                store: store,
+                defaults: defaults,
+                home: home,
+                installedRAM: 64_000_000_000,
+                locateUV: { "/usr/bin/true" },
+                fetchDirectory: { [] },
+                inspectRepo: { _ in throw CoverageContext.Failure(description: "fixture") }
+            ).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1600)
+        )
+        defer { section.close() }
+        await ui2Settle()
+
+        // Reasoning-bearing row: the brain image carries the summary help.
+        let helps = OwnedAccessibility.elements(in: section.host).compactMap { $0.helpText() }
+        try context.expect(helps.contains { $0.contains("thinking") || $0.contains("Reasoning") || $0.contains("reasoning") }, "Reasoning capability renders its help on the row")
+
+        // Start press: the stub python exits immediately, the health wait
+        // observes the dead child, and the failure caption renders through
+        // the real error description path.
+        try section.press("Start", context)
+        for _ in 0..<12 { await ui2Settle() }
+        try context.expect(section.text.contains("The server exited while starting"), "Stub server start surfaces the exit failure caption")
+
+        // Download window: the first curated row starts the fake download,
+        // the row swaps to Cancel, and the press clears the in-flight state.
+        try section.press("Download", context)
+        await ui2Settle()
+        try context.expect(section.control("Cancel") != nil, "In-flight download swaps the row control to Cancel")
+        try section.press("Cancel", context)
+        await ui2Settle()
+        try context.expect(section.control("Cancel") == nil, "Cancel press clears the in-flight download")
+
+        // Custom Delete: the downloaded custom row removes its weights and
+        // its catalog entry in one press.
+        try context.expect(MLXModelCatalog.customEntries(defaults: defaults).contains { $0.id == downloadedID }, "Custom entry present before its delete")
+        try section.press("Delete", context)
+        await ui2Settle()
+        try context.expect(MLXModelCatalog.customEntries(defaults: defaults).contains { $0.id == downloadedID } == false, "Custom delete removes the catalog entry")
+
+        // Curated Delete: seed a snapshot for the first curated entry, then
+        // its row Delete removes the weights without touching the catalog.
+        let curatedID = MLXModelCatalog.entries[0].id
+        let curatedSnapshot = URL(fileURLWithPath: home)
+            .appendingPathComponent(".cache/huggingface/hub")
+            .appendingPathComponent("models--" + curatedID.replacingOccurrences(of: "/", with: "--"))
+            .appendingPathComponent("snapshots")
+            .appendingPathComponent("fixture-snapshot")
+        try FileManager.default.createDirectory(at: curatedSnapshot, withIntermediateDirectories: true)
+        for file in MLXModelCatalog.requiredFiles {
+            FileManager.default.createFile(atPath: curatedSnapshot.appendingPathComponent(file).path, contents: Data("fixture".utf8))
+        }
+        MLXServerConfig.setActiveModelID(curatedID, defaults: defaults)
+        await ui2Settle()
+        try context.expect(section.text.contains(MLXModelCatalog.entries[0].displayName), "Curated row renders after activation")
+        try section.press("Delete", context)
+        await ui2Settle()
+        try context.expect(MLXModelCatalog.isDownloaded(modelID: curatedID, home: home) == false, "Curated delete removes the seeded weights")
+        try context.expect(MLXModelCatalog.entries.contains { $0.id == curatedID }, "Curated delete keeps the catalog entry")
+    }
+
     private final class UI2CalendarBoundary: EventStoreProtocol {
         func requestAccess() async throws -> Bool { false }
         func fetchCalendars() async throws -> [MBCalendar] {
             [.init(id: "preferences", title: "Coverage calendar", color: "#227744", source: "Fixture")]
+        }
+        func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+    }
+
+    /// Store variant whose request answers denied: exercises the
+    /// request-denied branch without any TCC round trip.
+    private final class UI2DeniedCalendarBoundary: EventStoreProtocol {
+        func requestAccess() async throws -> Bool { false }
+        func fetchCalendars() async throws -> [MBCalendar] { [] }
+        func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+    }
+
+    /// Store variant whose request answers granted: exercises the granted
+    /// branch through the fake calendar list.
+    private final class UI2GrantedCalendarBoundary: EventStoreProtocol {
+        func requestAccess() async throws -> Bool { true }
+        func fetchCalendars() async throws -> [MBCalendar] {
+            [.init(id: "granted", title: "Coverage calendar granted", color: "#227744", source: "Fixture")]
         }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
     }

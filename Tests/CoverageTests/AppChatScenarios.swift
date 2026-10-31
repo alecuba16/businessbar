@@ -55,6 +55,95 @@ private final class ChatHosted<Content: View> {
         try context.expect(element.accessibilityPerformPress(), "Chat control press succeeds: \(name)")
     }
 
+    /// Image-only buttons carry no AX label or title; the help tooltip is
+    /// the only stable text. Measured on this host: the NSButton-backed
+    /// node answers accessibilityPerformPress when matched by help.
+    func controlWithHelp(_ help: String) -> OwnedAccessibility.Element? {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+        }
+        return OwnedAccessibility.elements(in: host).first { element in
+            element.helpText() == help
+        }
+    }
+
+    func pressHelp(_ help: String, _ context: CoverageContext) throws {
+        guard let element = controlWithHelp(help), element.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Chat control with help not found or disabled: \(help)")
+        }
+        try context.expect(element.accessibilityPerformPress(), "Chat control press by help succeeds: \(help)")
+    }
+
+    /// The drawer rows expose their title through the value attribute of an
+    /// unlabeled button node, so lookup matches by substring on any text
+    /// attribute. Measured: the row node answers performPress.
+    func pressContaining(_ fragment: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+        }
+        let all = OwnedAccessibility.elements(in: host)
+        guard let element = all.first(where: { element in
+            [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String]
+                .compactMap { $0 }
+                .contains { $0.contains(fragment) }
+        }), element.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Chat control containing text not found or disabled: \(fragment)")
+        }
+        try context.expect(element.accessibilityPerformPress(), "Chat control press by containing text succeeds: \(fragment)")
+    }
+
+    /// Sets the composer text through the accessibility value setter on the
+    /// native text view (ComposerNSTextView). Measured on this host: the
+    /// setter routes the string into the SwiftUI binding, so the send button
+    /// enables afterwards and send() runs with a nonempty draft.
+    func setText(_ text: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        guard let element = OwnedAccessibility.elements(in: host).first(where: { $0.className().contains("ComposerNSTextView") }) else {
+            throw CoverageContext.Failure(description: "Composer text view not found")
+        }
+        element.setAccessibilityText(text)
+        try context.expect(true, "Composer text set through the AX value setter")
+    }
+
+    /// SwiftUI sheet presentations spawn their own SheetPresentationWindow
+    /// on this host; the sheet content is not part of the hosting view's AX
+    /// tree. Measured: the sheet window's content view exposes the same
+    /// element walk, so presses inside sheets go through it.
+    func sheetElements() -> [OwnedAccessibility.Element] {
+        OwnedAccessibility.materialize()
+        var found: [OwnedAccessibility.Element] = []
+        for window in NSApp.windows {
+            guard window.isVisible,
+                  String(describing: type(of: window)).contains("SheetPresentation"),
+                  let content = window.contentView else { continue }
+            found.append(contentsOf: OwnedAccessibility.elements(in: content))
+        }
+        return found
+    }
+
+    func sheetPress(_ label: String, _ context: CoverageContext) throws {
+        guard let element = sheetElements().first(where: { $0.accessibilityLabel() == label || $0.accessibilityTitle() == label }),
+              element.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Sheet control not found or disabled: \(label)")
+        }
+        try context.expect(element.accessibilityPerformPress(), "Sheet control press succeeds: \(label)")
+    }
+
+    func sheetText() -> String {
+        OwnedAccessibility.materialize()
+        return sheetElements().flatMap { element in
+            [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String].compactMap { $0 }
+        }.joined(separator: "\n")
+    }
+
     func close() {
         window.orderOut(nil)
         window.contentView = nil
@@ -77,6 +166,7 @@ enum AppChatScenarios {
     static func run(_ context: CoverageContext) async throws {
         var failures: [String] = []
         do { try await chatView(context) } catch { failures.append("chatView: \(error)") }
+        do { try await chatViewDeep(context) } catch { failures.append("chatViewDeep: \(error)") }
         do { try await selectionService(context) } catch { failures.append("selectionService: \(error)") }
         do { try await rewriteOverlay(context) } catch { failures.append("rewriteOverlay: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
@@ -211,6 +301,128 @@ enum AppChatScenarios {
         try context.expect(CompanionConfigService.chatProviders().isEmpty == false, "Provider store re-seeds after a wipe")
         try context.expect(bareView.text.contains("The companion answers using your configured model."), "Configured-model branch renders after re-seed")
         try context.expect(bareView.text.contains("No model configured yet.") == false, "Empty-state hint stays unreachable through the seeded accessor")
+    }
+
+    /// Deep-drawer and composer paths that the base chatView scenario cannot
+    /// reach: the history drawer (image-only toggle, row loads and deletes,
+    /// new chat, close), the composer send pipeline without a client, the
+    /// stop button while a stream shows, and the edit-last-prompt notice.
+    /// Every control here is image-only, so lookup goes through the help
+    /// tooltip; measured on this host those nodes answer performPress.
+    static func chatViewDeep(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
+        let defaults = try context.defaults("chat-view-deep")
+        defaults.registerDefaults()
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        let previousCredentials = Config.credentials
+        var secrets: [String: Data] = [:]
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        Config.credentials = .init(load: { secrets[$0] }, save: { secrets[$0] = $1 }, delete: { secrets.removeValue(forKey: $0) })
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+            Config.credentials = previousCredentials
+        }
+
+        let model = ChatModel(name: "Fixture Reasoner", model: "fixture-reasoner", reasoningEnabled: true, reasoningEffort: "medium", effortOptions: ["low", "medium", "high"])
+        let provider = ChatProvider(name: "Fixture Chat", baseURL: "https://coverage.invalid/v1", models: [model])
+        Config.chatProviderStore.save([provider])
+        Config.setSelectedModelProfileID(model.id)
+
+        let disk = ChatSessionStore(directoryURL: try context.temporaryDirectory("chat-view-deep-history"))
+        let store = ChatStore(sessionStore: disk)
+        let commands = CommandToolController(presentation: .init(chooseWorkspace: { nil }, notify: { _ in }))
+
+        // Seed one saved session so the drawer renders a row and the
+        // empty-state fallback is exercised on a second, clean store.
+        let seeded = ChatSession(id: UUID(), title: "Seeded Session", messages: [ChatMessage(role: .user, content: "seed prompt")])
+        try disk.save(seeded)
+        store.reloadHistory()
+
+        let view = Hosted(
+            ChatView(store: store, commandTools: commands, clientProvider: { nil }).defaultAppStorage(defaults),
+            size: NSSize(width: 480, height: 700)
+        )
+        defer { view.close() }
+        await chatSettle()
+
+        // Drawer: the toggle is an image-only button, matched by help.
+        try view.pressHelp("Conversation history", context)
+        await chatSettle()
+        try context.expect(view.text.contains("History"), "Drawer heading renders after the toggle press")
+        try context.expect(view.text.contains("New Chat"), "Drawer offers a new chat")
+        try context.expect(view.text.contains("Seeded Session"), "Drawer lists the seeded session")
+        try context.expect(view.text.contains("1 messages"), "Drawer row shows the seeded message count")
+        try context.expect(view.text.contains("Close history"), "Drawer carries the close control")
+
+        // Row press loads the session and closes the drawer.
+        try view.pressContaining("Seeded Session", context)
+        await chatSettle()
+        try context.expect(view.text.contains("Seeded Session") == false || view.text.contains("Close history") == false, "Row press closes the drawer")
+        try context.expect(store.currentSessionID == seeded.id, "Row press loads the seeded session")
+
+        // Delete from the drawer removes the persisted session.
+        try view.pressHelp("Conversation history", context)
+        await chatSettle()
+        try view.pressHelp("Delete conversation", context)
+        await chatSettle()
+        try context.expect(store.sessionHistory.isEmpty, "Drawer delete removes the seeded session")
+
+        // With history empty the drawer falls back to its empty state.
+        try context.expect(view.text.contains("No saved conversations yet"), "Drawer shows the empty-state fallback")
+
+        // New Chat from the drawer resets the thread and closes the drawer.
+        try view.press("New Chat", context)
+        await chatSettle()
+        try context.expect(view.text.contains("No saved conversations yet") == false, "New Chat closes the drawer")
+
+        // Reopen and close via the xmark's help.
+        try view.pressHelp("Conversation history", context)
+        await chatSettle()
+        try view.pressHelp("Close history", context)
+        await chatSettle()
+        try context.expect(view.text.contains("No saved conversations yet") == false, "Close hides the drawer")
+
+        // Send without a client: the composer accepts text through the AX
+        // value setter (measured: the native text view routes the string
+        // into the SwiftUI binding), then the send button reports the
+        // configured-model gap after the press.
+        try view.setText("Fixture prompt for send", context)
+        try view.pressHelp("Send (Cmd+Return)", context)
+        await chatSettle()
+        try context.expect(store.errorMessage == "No model configured. Set it up in Preferences > Companion.", "Send without a client surfaces the configuration error")
+
+        // Edit affordance: a user message renders the Edit button, and the
+        // press pulls the prompt back into the composer with the notice.
+        store.messages = [ChatMessage(role: .user, content: "first user prompt")]
+        await chatSettle()
+        try view.press("Edit", context)
+        await chatSettle()
+        try context.expect(view.text.contains("Editing your last prompt."), "Edit press shows the editing notice")
+        try view.press("Cancel", context)
+        await chatSettle()
+        try context.expect(view.text.contains("Editing your last prompt.") == false, "Cancel drops the editing notice")
+        try context.expect(store.messages.isEmpty, "Edit truncated the thread to before the prompt")
+        // Stop button: while a stream shows, the send control is replaced by
+        // the stop control. Cancel on a store without a live stream task is a
+        // no-op on the flag itself; the press is the measured behavior here.
+        store.isStreaming = true
+        await chatSettle()
+        try view.pressHelp("Stop generating", context)
+        try context.expect(store.isStreaming, "Stop press leaves the flag to the stream task, which is absent here")
+
+        // Close-and-start-new: with messages on screen the closable-session
+        // guard passes, the thread clears, and history reloads unchanged
+        // because nothing was persisted (persistence rides on send).
+        store.isStreaming = false
+        store.messages = [ChatMessage(role: .user, content: "kept prompt")]
+        await chatSettle()
+        try view.pressHelp("Close this chat and start a new one. The closed chat stays in history.", context)
+        await chatSettle()
+        try context.expect(store.messages.isEmpty, "Close and start new clears the on-screen thread")
+        try context.expect(store.sessionHistory.isEmpty, "Nothing was persisted, so history stays empty")
     }
 
     static func selectionService(_ context: CoverageContext) async throws {

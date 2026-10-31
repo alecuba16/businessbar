@@ -14,6 +14,17 @@ enum OwnedAccessibility {
         func isAccessibilityEnabled() -> Bool { boolean("isAccessibilityEnabled") }
         func accessibilityPerformPress() -> Bool { boolean("accessibilityPerformPress") }
         func accessibilityRole() -> Any? { value("accessibilityRole") }
+        func helpText() -> String? { value("accessibilityHelp") as? String }
+        func className() -> String { String(describing: type(of: object)) }
+
+        /// Routes text through the accessibility value setter. Measured on
+        /// this host: NSTextView-backed nodes persist the string into the
+        /// SwiftUI binding, which is what the composer reads on send.
+        func setAccessibilityText(_ text: String) {
+            let selector = NSSelectorFromString("setAccessibilityValue:")
+            guard object.responds(to: selector) else { return }
+            object.perform(selector, with: text)
+        }
 
         fileprivate func value(_ name: String) -> Any? {
             let selector = NSSelectorFromString(name)
