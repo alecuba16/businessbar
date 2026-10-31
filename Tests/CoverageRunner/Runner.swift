@@ -116,9 +116,9 @@ enum CoverageRuntimeIsolation {
 
 #if !BUSINESSBAR_COVERAGE_NATIVE
 @main
+@MainActor
 struct CoverageRunner {
-    @MainActor
-    static func main() async {
+    static func main() {
         setvbuf(stdout, nil, _IONBF, 0)
         setvbuf(stderr, nil, _IONBF, 0)
         CoverageRuntimeIsolation.verify()
@@ -142,19 +142,41 @@ struct CoverageRunner {
             fputs("FAIL: missing isolated coverage fixture directory\n", stderr)
             exit(1)
         }
-        do {
-            let context = try CoverageContext(root: URL(fileURLWithPath: directory, isDirectory: true))
-            defer { context.cleanup() }
-            NSApplication.shared.setActivationPolicy(.prohibited)
-            try await CoverageSuite.run(context)
-            guard context.checks > 0 else {
-                throw CoverageContext.Failure(description: "coverage suite executed no checks")
-            }
-            print("PASS: \(context.checks) coverage scenario checks")
-        } catch {
-            fputs("FAIL: coverage scenarios: \(error)\n", stderr)
-            exit(1)
+        // The suite runs in a child Task while this synchronous main pumps
+        // the main runloop. Measured failure mode of the previous async-main
+        // shape: the Swift async-main drain queue can observe the main job
+        // as completed mid-suite and call exit(0) (lldb: main ->
+        // swift_task_asyncMainDrainQueue -> _swift_exit), silently dropping
+        // every remaining suite from the merged coverage. With the child
+        // Task shape the drain queue does not exist; a frozen suite tree now
+        // holds this pump loop until the runner watchdog kills the process
+        // with a loud timeout instead of a silent exit 0.
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        final class ExitBox: @unchecked Sendable {
+            var code: Int32 = 1
         }
+        let exitBox = ExitBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task { () -> Void in
+            do {
+                let context = try CoverageContext(root: URL(fileURLWithPath: directory, isDirectory: true))
+                defer { context.cleanup() }
+                try await CoverageSuite.run(context)
+                guard context.checks > 0 else {
+                    throw CoverageContext.Failure(description: "coverage suite executed no checks")
+                }
+                print("PASS: \(context.checks) coverage scenario checks")
+                exitBox.code = 0
+            } catch {
+                fputs("FAIL: coverage scenarios: \(error)\n", stderr)
+                exitBox.code = 1
+            }
+            semaphore.signal()
+        }
+        while semaphore.wait(timeout: .now()) != .success {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        exit(exitBox.code)
         #endif
     }
 }
