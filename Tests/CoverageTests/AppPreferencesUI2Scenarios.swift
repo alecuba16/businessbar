@@ -195,6 +195,7 @@ enum AppPreferencesUI2Scenarios {
         do { try await localModelsTail(context) } catch { failures.append("localModelsTail: \(error)") }
         do { try await calendarsTab(context) } catch { failures.append("calendarsTab: \(error)") }
         do { try await calendarsTabDeep(context) } catch { failures.append("calendarsTabDeep: \(error)") }
+        do { try await calendarsTabReset(context) } catch { failures.append("calendarsTabReset: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
@@ -669,6 +670,144 @@ enum AppPreferencesUI2Scenarios {
         defaults.set(BusinessBar.CalendarProvider.google.rawValue, forKey: BusinessBar.Constants.Defaults.calendarProvider)
         await ui2Settle()
         try context.expect(grantedTab.text.contains("Google provider selected."), "Google provider shows the managed caption")
+    }
+
+    /// Permission-reset and notification-request paths the deep scenario
+    /// leaves cold. The tccutil runner, the System Settings opens, and the
+    /// notification center calls run through the tab's injected seams, so
+    /// nothing touches real machine state: the fixture runner records the
+    /// service names and answers each status branch directly.
+    static func calendarsTabReset(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("calendars-tab-reset")
+        defaults.registerDefaults()
+        let auth = GoogleAuth(dependencies: .init(loadCredential: { throw CoverageContext.Failure(description: "fixture") }, saveCredential: { _ in }, deleteCredential: {}, configuration: { .init(clientNumber: "YOUR_FIXTURE", clientSecret: "YOUR_FIXTURE") }, request: { _ in throw CoverageContext.Failure(description: "fixture") }, openURL: { _ in false }))
+        let meetings = MeetingManager(eventStore: UI2CalendarBoundary(), defaults: defaults, notificationCenter: NotificationCenter())
+
+        var openedURLs: [String] = []
+        var resetServices: [String] = []
+        var reportedStatuses: [UNAuthorizationStatus] = []
+        var requestGrants: [Bool] = []
+
+        func makeTab(
+            status: UNAuthorizationStatus?,
+            requestGranted: Bool? = nil,
+            bundlePresent: Bool
+        ) -> UI2Hosted<some View> {
+            UI2Hosted(
+                CalendarsTab(
+                    meetingManager: meetings,
+                    googleAuth: auth,
+                    defaults: defaults,
+                    calendarAuthorization: { .fullAccess },
+                    notificationAuthorization: { receive in receive(true) },
+                    openSettingsURL: { url in openedURLs.append(url.absoluteString) },
+                    resetTCCPermission: { service, completion in
+                        resetServices.append(service)
+                        completion(0)
+                    },
+                    notificationCenterAuthorizationStatus: { receive in
+                        if let status { reportedStatuses.append(status) }
+                        receive(status ?? .denied)
+                    },
+                    notificationCenterRequestAuthorization: { receive in
+                        receive(requestGranted ?? false)
+                        requestGrants.append(requestGranted ?? false)
+                    },
+                    isRuntimeBundlePresent: bundlePresent
+                ).defaultAppStorage(defaults),
+                size: NSSize(width: 900, height: 1400)
+            )
+        }
+
+        // Absent runtime bundle: the request short-circuits on the guard.
+        let guardTab = makeTab(status: nil, bundlePresent: false)
+        defer { guardTab.close() }
+        await ui2Settle()
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
+        try guardTab.press("Grant Notification Permission", context)
+        await ui2Settle()
+        try context.expect(reportedStatuses.isEmpty, "Absent bundle never reaches the notification center")
+
+        // Granted branch: the toggle flips on without a prompt round trip.
+        let grantedTab = makeTab(status: .authorized, bundlePresent: true)
+        defer { grantedTab.close() }
+        await ui2Settle()
+        try grantedTab.press("Grant Notification Permission", context)
+        for _ in 0..<20 where reportedStatuses.isEmpty {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(reportedStatuses.contains(.authorized), "Granted status branch reached")
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Granted status persists the notification toggle")
+
+        // Not-determined branch: the authorization request answers and the
+        // toggle follows the answer.
+        let requestTab = makeTab(status: .notDetermined, requestGranted: true, bundlePresent: true)
+        defer { requestTab.close() }
+        await ui2Settle()
+        defaults.set(false, forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        try requestTab.press("Grant Notification Permission", context)
+        for _ in 0..<20 where requestGrants.isEmpty {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(requestGrants == [true], "Not-determined branch asks the center")
+        for _ in 0..<20 where !defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Granted request persists the toggle")
+
+        // Denied branch: the status flip clears the toggle and opens the
+        // settings URL through the seam.
+        let deniedTab = makeTab(status: .denied, bundlePresent: true)
+        defer { deniedTab.close() }
+        await ui2Settle()
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        try deniedTab.press("Grant Notification Permission", context)
+        for _ in 0..<20 where openedURLs.isEmpty {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(openedURLs.contains { $0.contains("notifications") }, "Denied branch opens notification settings through the seam")
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Denied branch clears the stored toggle")
+
+        // Calendar reset press: the tccutil seam records the service name,
+        // the in-flight flag flips the button label, and the completion
+        // resets the flag and refreshes the status.
+        let resetTab = makeTab(status: nil, bundlePresent: false)
+        defer { resetTab.close() }
+        await ui2Settle()
+        try resetTab.press("Reset Permission", context)
+        for _ in 0..<20 where !resetServices.contains("Calendar") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(resetServices.contains("Calendar"), "Calendar reset routes through the tccutil seam")
+        await ui2Settle()
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Calendar reset disables the feature flag")
+        try context.expect(resetTab.text.contains("Resetting…") == false, "Reset flag clears after the seam completes")
+
+        // Notification reset press: same seam with the Notifications service.
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
+        try resetTab.press("Reset Permission", context)
+        for _ in 0..<20 where resetServices.count < 2 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(resetServices.contains("Notifications"), "Notification reset routes through the tccutil seam")
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Notification reset clears the stored toggle")
+
+        // Open System Settings press routes through the settings seam.
+        try resetTab.press("Open System Settings", context)
+        await ui2Settle()
+        try context.expect(openedURLs.contains { $0.contains("Privacy_Calendars") }, "Privacy open routes through the settings seam")
+
+        // Notification settings button in the granted layout: same seam,
+        // different URL.
+        try grantedTab.press("Open Notification Settings", context)
+        await ui2Settle()
+        try context.expect(openedURLs.filter { $0.contains("notifications") }.count >= 2, "Notification settings open routes through the seam")
     }
 
     /// Row-control paths the rendering scenario leaves cold: the Start press

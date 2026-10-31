@@ -13,6 +13,14 @@ struct CalendarsTab: View {
     @State private var calendarAuthStatus: EKAuthorizationStatus
     private let calendarAuthorization: () -> EKAuthorizationStatus
     private let notificationAuthorization: (@escaping (Bool) -> Void) -> Void
+    private let openSettingsURL: (URL) -> Void
+    private let resetTCCPermission: (_ service: String, _ completion: @escaping (Int) -> Void) -> Void
+    private let notificationCenterAuthorizationStatus: (@escaping (UNAuthorizationStatus) -> Void) -> Void
+    private let notificationCenterRequestAuthorization: (@escaping (Bool) -> Void) -> Void
+    /// Seamed runtime-bundle flag: the coverage fixture runs as a bare
+    /// executable, so the real check is false there and the notification
+    /// request switch stays unreachable without it.
+    private let isRuntimeBundlePresent: Bool
     private let defaults: UserDefaults
     @State private var notificationsAuthorized = false
     @State private var isRequestingAccess = false
@@ -44,13 +52,46 @@ struct CalendarsTab: View {
                 let granted = [.authorized, .provisional].contains(settings.authorizationStatus)
                 Task { @MainActor in receive(granted) }
             }
-        }
+        },
+        openSettingsURL: @escaping (URL) -> Void = { url in
+            NSWorkspace.shared.open(url)
+        },
+        resetTCCPermission: @escaping (_ service: String, _ completion: @escaping (Int) -> Void) -> Void = { service, completion in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", service, Constants.bundleIdentifier]
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try task.run()
+                    task.waitUntilExit()
+                    completion(Int(task.terminationStatus))
+                } catch {
+                    completion(-1)
+                }
+            }
+        },
+        notificationCenterAuthorizationStatus: @escaping (@escaping (UNAuthorizationStatus) -> Void) -> Void = { receive in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                receive(settings.authorizationStatus)
+            }
+        },
+        notificationCenterRequestAuthorization: @escaping (@escaping (Bool) -> Void) -> Void = { receive in
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                receive(granted)
+            }
+        },
+        isRuntimeBundlePresent: Bool = RuntimeBundle.isPresent
     ) {
         self.meetingManager = meetingManager
         self.googleAuth = googleAuth
         self.defaults = defaults
         self.calendarAuthorization = calendarAuthorization
         self.notificationAuthorization = notificationAuthorization
+        self.openSettingsURL = openSettingsURL
+        self.resetTCCPermission = resetTCCPermission
+        self.notificationCenterAuthorizationStatus = notificationCenterAuthorizationStatus
+        self.notificationCenterRequestAuthorization = notificationCenterRequestAuthorization
+        self.isRuntimeBundlePresent = isRuntimeBundlePresent
         _calendarAuthStatus = State(initialValue: calendarAuthorization())
     }
 
@@ -332,13 +373,13 @@ struct CalendarsTab: View {
 
     private func openCalendarPrivacySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
-            NSWorkspace.shared.open(url)
+            openSettingsURL(url)
         }
     }
 
     private func openNotificationSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
-            NSWorkspace.shared.open(url)
+            openSettingsURL(url)
         }
     }
 
@@ -371,12 +412,12 @@ struct CalendarsTab: View {
     }
 
     private func requestNotificationAccess() {
-        guard RuntimeBundle.isPresent else {
+        guard isRuntimeBundlePresent else {
             AppLogger.warning("Cannot request notification access — no app bundle (running outside .app bundle?)", category: "Permissions")
             return
         }
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            switch settings.authorizationStatus {
+        notificationCenterAuthorizationStatus { [openNotificationSettings] status in
+            switch status {
             case .authorized, .provisional:
                 Task { @MainActor in
                     notificationsAuthorized = true
@@ -385,7 +426,7 @@ struct CalendarsTab: View {
                     AppLogger.info("Notification access already granted", category: "Permissions")
                 }
             case .notDetermined:
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                notificationCenterRequestAuthorization { [notifyPreferencesChanged] granted in
                     Task { @MainActor in
                         notificationsAuthorized = granted
                         meetingNotificationsEnabled = granted
@@ -404,7 +445,7 @@ struct CalendarsTab: View {
                 Task { @MainActor in
                     notificationsAuthorized = false
                     meetingNotificationsEnabled = false
-                    AppLogger.warning("Unknown notification authorization status: \(settings.authorizationStatus.rawValue)", category: "Permissions")
+                    AppLogger.warning("Unknown notification authorization status: \(status.rawValue)", category: "Permissions")
                 }
             }
         }
@@ -432,20 +473,12 @@ struct CalendarsTab: View {
 
         AppLogger.info("Resetting Calendar permission via tccutil", category: "Permissions")
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            task.arguments = ["reset", "Calendar", Constants.bundleIdentifier]
-            do {
-                try task.run()
-                task.waitUntilExit()
-                AppLogger.info("Calendar permission reset completed (exit code: \(task.terminationStatus))", category: "Permissions")
-            } catch {
-                AppLogger.error("Failed to run tccutil for Calendar reset: \(error.localizedDescription)", category: "Permissions")
-            }
-            DispatchQueue.main.async {
+        resetTCCPermission("Calendar") { [notifyPreferencesChanged] exitCode in
+            Task { @MainActor in
+                AppLogger.info("Calendar permission reset completed (exit code: \(exitCode))", category: "Permissions")
                 isResettingCalendarPermission = false
                 refreshAuthStatus()
+                notifyPreferencesChanged()
             }
         }
     }
@@ -458,20 +491,12 @@ struct CalendarsTab: View {
 
         AppLogger.info("Resetting Notifications permission via tccutil", category: "Permissions")
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            task.arguments = ["reset", "Notifications", Constants.bundleIdentifier]
-            do {
-                try task.run()
-                task.waitUntilExit()
-                AppLogger.info("Notifications permission reset completed (exit code: \(task.terminationStatus))", category: "Permissions")
-            } catch {
-                AppLogger.error("Failed to run tccutil for Notifications reset: \(error.localizedDescription)", category: "Permissions")
-            }
-            DispatchQueue.main.async {
+        resetTCCPermission("Notifications") { [notifyPreferencesChanged] exitCode in
+            Task { @MainActor in
+                AppLogger.info("Notifications permission reset completed (exit code: \(exitCode))", category: "Permissions")
                 isResettingNotificationPermission = false
                 refreshAuthStatus()
+                notifyPreferencesChanged()
             }
         }
     }
