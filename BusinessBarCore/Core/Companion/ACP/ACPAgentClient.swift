@@ -277,7 +277,14 @@ public final class ACPAgentClient: LLMClient, @unchecked Sendable {
         try await ensureConnection()
         lock.lock()
         defer { lock.unlock() }
-        return transport!
+        // Shutdown or an onClose can nil the transport between the
+        // connection check and this read; measured as a run-order flake
+        // (run15 double suite, RUN 2 trap at the old force unwrap), the
+        // failure surfaces as a stream error instead of a process trap.
+        guard let transport else {
+            throw ACPError.processExited
+        }
+        return transport
     }
 
     /// First prompt of a session carries the system prompt passthrough.

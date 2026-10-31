@@ -24,8 +24,18 @@ struct ChatView: View {
     @State private var panelHeight: CGFloat = 0
     @State private var settingsRevision = 0
     /// Base64 data URIs staged for the next message. Populated from the
-    /// paperclip picker, drops, or pastes; cleared on send.
-    @State private var pendingImages: [String] = []
+    /// paperclip picker, drops, or pastes; cleared on send. Held as an
+    /// @State class reference: SwiftUI view structs get copied at render
+    /// (measured: writes through external copies never reach installed
+    /// storage), while class storage survives and is callable from the
+    /// coverage fixture.
+    @State private var staging = ChatAttachmentStaging()
+
+    /// Convenience alias for the staged URIs; the render and send paths
+    /// read through here.
+    private var pendingImages: [String] {
+        staging.stagedImageURIs
+    }
     /// True from the send button press until the stream starts (or fails
     /// to start). Covers the server warm-up window where nothing else in
     /// the panel moves, so the submit never looks dead.
@@ -49,10 +59,15 @@ struct ChatView: View {
     /// "default" means no ad-hoc effort; the profile/global default applies.
     private static let defaultEffortTag = "__default__"
 
-    init(store: ChatStore, commandTools: CommandToolController, clientProvider: @escaping () -> LLMClient?) {
+    init(store: ChatStore, commandTools: CommandToolController, clientProvider: @escaping () -> LLMClient?, staging: ChatAttachmentStaging = ChatAttachmentStaging()) {
         self.store = store
         self.commandTools = commandTools
         self.clientProvider = clientProvider
+        // Injected staging keeps its object identity: measured on this
+        // host, @State re-creates default-constructed references per view
+        // copy, so the coverage fixture must pass its own instance and
+        // read it back after the calls.
+        _staging = State(initialValue: staging)
         // An agent selection stores the provider id, a model selection the
         // model id; both live in the same picker.
         _selectedProfileID = State(initialValue: CompanionConfigService.selectedACPProvider()?.id
@@ -926,7 +941,7 @@ struct ChatView: View {
                                 .frame(width: 48, height: 48)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                             Button {
-                                pendingImages.remove(at: index)
+                                staging.removeStaged(at: index)
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.caption)
@@ -950,90 +965,21 @@ struct ChatView: View {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK else { return }
-        stageImages(from: panel.urls)
+        staging.stageFiles(panel.urls)
     }
 
-    private func stageImages(from urls: [URL]) {
-        for url in urls {
-            guard let type = UTType(filenameExtension: url.pathExtension),
-                type.conforms(to: .image)
-            else { continue }
-            if let dataURI = ChatAttachment.urlToDataURI(url) {
-                pendingImages.append(dataURI)
-            }
-        }
-    }
-
-    /// Paste path: item providers carry either raw image data or a file
-    /// URL. Both end up as staged data URIs.
-    private func stageImages(fromProviders providers: [NSItemProvider]) {
-        for provider in providers {
-            if let typeID = provider.registeredTypeIdentifiers.first(where: {
-                UTType($0)?.conforms(to: .image) == true
-            }) {
-                let mime = UTType(typeID)?.preferredMIMEType ?? "image/png"
-                provider.loadDataRepresentation(forTypeIdentifier: typeID) { data, _ in
-                    guard let data else { return }
-                    appendImageURI(data: data, mime: mime)
-                }
-            } else if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                    guard let data = item as? Data,
-                        let url = URL(dataRepresentation: data, relativeTo: nil)
-                    else { return }
-                    DispatchQueue.main.async {
-                        if let dataURI = ChatAttachment.urlToDataURI(url) {
-                            pendingImages.append(dataURI)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func appendImageURI(data: Data, mime: String) {
-        let uri = "data:\(mime);base64,\(data.base64EncodedString())"
-        DispatchQueue.main.async {
-            pendingImages.append(uri)
-        }
+    /// Drop and picker path entry point. Kept on the view so callers do
+    /// not care where the staging state lives.
+    func stageImages(from urls: [URL]) {
+        staging.stageFiles(urls)
     }
 
     /// Paste hook for the native composer. Items carrying image bytes or
     /// a file URL wrap into providers and stage as attachments when the
     /// model takes images; any other paste stays plain text.
-    private func handleComposerPaste(_ pasteboard: NSPasteboard) {
+    func handleComposerPaste(_ pasteboard: NSPasteboard) {
         guard selectedModelAcceptsImages else { return }
-        var providers: [NSItemProvider] = []
-        for item in pasteboard.pasteboardItems ?? [] {
-            if let provider = provider(forPasteboardItem: item) {
-                providers.append(provider)
-            }
-        }
-        guard !providers.isEmpty else { return }
-        stageImages(fromProviders: providers)
-    }
-
-    /// Wraps a pasteboard item into a provider for the staging
-    /// pipeline, preferring image types so `loadDataRepresentation`
-    /// yields the image bytes directly.
-    private func provider(forPasteboardItem item: NSPasteboardItem) -> NSItemProvider? {
-        let typeIDs = item.types.map(\.rawValue)
-        guard let typeID = typeIDs.first(where: { UTType($0)?.conforms(to: .image) == true })
-            ?? typeIDs.first(where: { $0 == UTType.fileURL.identifier }) else { return nil }
-        // Image bytes are registered as-is; a file URL item carries
-        // the serialized URL, which the staging pipeline parses back.
-        guard let data = item.data(forType: NSPasteboard.PasteboardType(typeID)) else {
-            return nil
-        }
-        let provider = NSItemProvider()
-        provider.registerDataRepresentation(
-            forTypeIdentifier: typeID,
-            visibility: .all
-        ) { completion in
-            completion(data, nil)
-            return nil
-        }
-        return provider
+        staging.stagePasteboard(pasteboard)
     }
 
     private func send() {
@@ -1041,7 +987,7 @@ struct ChatView: View {
         let images = pendingImages
         guard !text.isEmpty || !images.isEmpty, !store.isStreaming, !submitting else { return }
         draft = ""
-        pendingImages = []
+        staging.clear()
         isEditingLastPrompt = false
         // Cover the warm-up window (server start, first model load) with
         // visible progress; the stream takes over the label once it starts.
@@ -1054,14 +1000,14 @@ struct ChatView: View {
             } catch {
                 store.errorMessage = error.localizedDescription
                 draft = text
-                pendingImages = images
+                staging.restore(images)
                 submitting = false
                 return
             }
             guard let client = clientProvider() else {
                 store.errorMessage = "No model configured. Set it up in Preferences > Companion."
                 draft = text
-                pendingImages = images
+                staging.restore(images)
                 submitting = false
                 return
             }
@@ -1390,5 +1336,114 @@ enum ChatAttachment {
         let base64 = String(dataURI[dataURI.index(after: comma)...])
         guard let data = Data(base64Encoded: base64) else { return nil }
         return NSImage(data: data)
+    }
+}
+
+// MARK: - ChatAttachmentStaging
+
+/// Staging pipeline for image attachments, split out of ChatView so the
+/// coverage fixture can drive it directly. Measured on this host: writes
+/// through external copies of a SwiftUI view struct never reach the
+/// installed @State storage, so a scenario cannot drive a @State array
+/// from outside the hosting view. A class held as @State keeps the same
+/// render behavior (Observable mutations re-render the panel) while its
+/// methods stay callable on the fixture's own reference.
+@MainActor
+@Observable
+final class ChatAttachmentStaging {
+    /// Staged data URIs for the next message.
+    private(set) var stagedImageURIs: [String] = []
+
+    /// Nonisolated so a default argument in ChatView.init compiles under
+    /// Swift 6 checking; the body only touches main-actor state once the
+    /// instance exists.
+    nonisolated init() {}
+
+    /// File path entry (picker, drops): every URL whose type reads as an
+    /// image becomes a staged data URI; anything else is skipped.
+    func stageFiles(_ urls: [URL]) {
+        for url in urls {
+            guard let type = UTType(filenameExtension: url.pathExtension),
+                type.conforms(to: .image)
+            else { continue }
+            if let dataURI = ChatAttachment.urlToDataURI(url) {
+                append(dataURI)
+            }
+        }
+    }
+
+    /// Paste path: item providers carry either raw image data or a file
+    /// URL. Both end up as staged data URIs.
+    func stageProviders(_ providers: [NSItemProvider]) {
+        for provider in providers {
+            if let typeID = provider.registeredTypeIdentifiers.first(where: {
+                UTType($0)?.conforms(to: .image) == true
+            }) {
+                let mime = UTType(typeID)?.preferredMIMEType ?? "image/png"
+                provider.loadDataRepresentation(forTypeIdentifier: typeID) { [weak self] data, _ in
+                    guard let data else { return }
+                    let uri = "data:\(mime);base64,\(data.base64EncodedString())"
+                    Task { @MainActor [weak self] in
+                        self?.append(uri)
+                    }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { [weak self] item, _ in
+                    guard let data = item as? Data,
+                        let url = URL(dataRepresentation: data, relativeTo: nil)
+                    else { return }
+                    Task { @MainActor [weak self] in
+                        if let dataURI = ChatAttachment.urlToDataURI(url) {
+                            self?.append(dataURI)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Composer paste hook: wraps pasteboard items into providers and
+    /// stages them. Prefers image types so `loadDataRepresentation` yields
+    /// the image bytes directly; a file URL item carries the serialized
+    /// URL, which the staging pipeline parses back.
+    func stagePasteboard(_ pasteboard: NSPasteboard) {
+        var providers: [NSItemProvider] = []
+        for item in pasteboard.pasteboardItems ?? [] {
+            let typeIDs = item.types.map(\.rawValue)
+            guard let typeID = typeIDs.first(where: { UTType($0)?.conforms(to: .image) == true })
+                ?? typeIDs.first(where: { $0 == UTType.fileURL.identifier })
+            else { continue }
+            guard let data = item.data(forType: NSPasteboard.PasteboardType(typeID)) else { continue }
+            let provider = NSItemProvider()
+            provider.registerDataRepresentation(
+                forTypeIdentifier: typeID,
+                visibility: .all
+            ) { completion in
+                completion(data, nil)
+                return nil
+            }
+            providers.append(provider)
+        }
+        guard !providers.isEmpty else { return }
+        stageProviders(providers)
+    }
+
+    func removeStaged(at index: Int) {
+        guard stagedImageURIs.indices.contains(index) else { return }
+        stagedImageURIs.remove(at: index)
+    }
+
+    func clear() {
+        stagedImageURIs = []
+    }
+
+    /// Send failed before anything went out: put the attachments back so
+    /// the user does not lose them with the restored draft.
+    func restore(_ uris: [String]) {
+        stagedImageURIs = uris
+    }
+
+    private func append(_ uri: String) {
+        stagedImageURIs.append(uri)
     }
 }

@@ -178,6 +178,7 @@ enum AppChatScenarios {
         var failures: [String] = []
         do { try await chatView(context) } catch { failures.append("chatView: \(error)") }
         do { try await chatViewDeep(context) } catch { failures.append("chatViewDeep: \(error)") }
+        do { try await chatViewAttachments(context) } catch { failures.append("chatViewAttachments: \(error)") }
         do { try await selectionService(context) } catch { failures.append("selectionService: \(error)") }
         do { try await rewriteOverlay(context) } catch { failures.append("rewriteOverlay: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
@@ -312,6 +313,103 @@ enum AppChatScenarios {
         try context.expect(CompanionConfigService.chatProviders().isEmpty == false, "Provider store re-seeds after a wipe")
         try context.expect(bareView.text.contains("The companion answers using your configured model."), "Configured-model branch renders after re-seed")
         try context.expect(bareView.text.contains("No model configured yet.") == false, "Empty-state hint stays unreachable through the seeded accessor")
+    }
+
+    /// Image attachment staging: the picker path with fixture image
+    /// files and the composer paste hook with a private pasteboard, both
+    /// driven with fixture bytes. The real user pasteboard is never
+    /// touched: the paste hook takes the pasteboard as an argument.
+    static func chatViewAttachments(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
+        let defaults = try context.defaults("chat-view-attachments")
+        defaults.registerDefaults()
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        let previousCredentials = Config.credentials
+        var secrets: [String: Data] = [:]
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        Config.credentials = .init(load: { secrets[$0] }, save: { secrets[$0] = $1 }, delete: { secrets.removeValue(forKey: $0) })
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+            Config.credentials = previousCredentials
+        }
+
+        let model = ChatModel(name: "Fixture Vision", model: "fixture-vision", reasoningEnabled: false, acceptsImages: true)
+        let provider = ChatProvider(name: "Fixture Chat", baseURL: "https://coverage.invalid/v1", models: [model])
+        Config.chatProviderStore.save([provider])
+        Config.setSelectedModelProfileID(model.id)
+
+        let store = ChatStore(sessionStore: ChatSessionStore(directoryURL: try context.temporaryDirectory("chat-view-attachments-history")))
+        let commands = CommandToolController(presentation: .init(chooseWorkspace: { nil }, notify: { _ in }))
+
+        // Fixture 1x1 PNG, written inside the coverage home.
+        let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        let pngData = Data(base64Encoded: pngBase64)!
+        let fixtureDir = try context.temporaryDirectory("chat-view-attachments-files")
+        let imageURL = fixtureDir.appendingPathComponent("fixture.png")
+        try pngData.write(to: imageURL)
+        let nonImageURL = fixtureDir.appendingPathComponent("notes.txt")
+        try Data("not an image".utf8).write(to: nonImageURL)
+
+        let chatRoot: ChatView
+        let staging = ChatAttachmentStaging()
+        chatRoot = ChatView(store: store, commandTools: commands, clientProvider: { nil }, staging: staging)
+        let view = Hosted(
+            chatRoot,
+            size: NSSize(width: 480, height: 700)
+        )
+        defer { view.close() }
+        await chatSettle()
+
+        // Picker path: image URL stages, non-image URL is skipped. Drive
+        // the staging object directly: measured on this host, only the
+        // injected reference keeps identity between the fixture and the
+        // hosted view, so this is the one honest path to the picker and
+        // drop pipeline without NSOpenPanel.
+        staging.stageFiles([imageURL, nonImageURL])
+        try context.equal(staging.stagedImageURIs.count, 1, "Only the image file stages as an attachment")
+        try context.expect(staging.stagedImageURIs.first?.hasPrefix("data:image/png;base64,") == true, "Staged URI is a PNG data URI")
+
+        // Paste hook: private pasteboard with image bytes, never the real
+        // one. The item provider path re-reads the bytes and stages them.
+        let pasteboard = NSPasteboard(name: .init("coverage-fixture-paste"))
+        pasteboard.clearContents()
+        pasteboard.setData(pngData, forType: .png)
+        staging.stagePasteboard(pasteboard)
+        for _ in 0..<100 where staging.stagedImageURIs.count < 2 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        try context.equal(staging.stagedImageURIs.count, 2, "Pasted image bytes stage as a second attachment")
+
+        // Attachment strip renders for the staged images.
+        await chatSettle()
+        try context.expect(view.text.contains("fixture") == false, "Strip shows thumbnails, not file names")
+
+        // File-URL paste: a provider carrying a file URL stages through
+        // the URL branch instead of the raw-bytes branch.
+        let filePasteboard = NSPasteboard(name: .init("coverage-fixture-file-paste"))
+        filePasteboard.clearContents()
+        filePasteboard.writeObjects([imageURL as NSURL])
+        staging.stagePasteboard(filePasteboard)
+        for _ in 0..<100 where staging.stagedImageURIs.count < 3 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        try context.equal(staging.stagedImageURIs.count, 3, "Pasted file URL stages through the URL branch")
+
+        // Remove one, clear the rest: the strip count APIs stay honest.
+        staging.removeStaged(at: 1)
+        try context.equal(staging.stagedImageURIs.count, 2, "Remove drops one staged URI")
+        staging.clear()
+        try context.equal(staging.stagedImageURIs.count, 0, "Clear empties the staged list")
+        staging.restore(["data:image/png;base64,AAAA"])
+        try context.equal(staging.stagedImageURIs.count, 1, "Restore puts failed-send images back")
+
+        pasteboard.clearContents()
+        filePasteboard.clearContents()
     }
 
     /// Deep-drawer and composer paths that the base chatView scenario cannot
