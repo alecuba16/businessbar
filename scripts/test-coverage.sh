@@ -125,7 +125,7 @@ PY
         BUSINESSBAR_COVERAGE_HOME="$home" BUSINESSBAR_COVERAGE_SUITE=all \
         BUSINESSBAR_XCTEST_RUN_RECORD="$output/xctest/process.json" \
         LLVM_PROFILE_FILE="$output/xctest/profiles/%p-%m.profraw" \
-        swift test --no-parallel --enable-code-coverage "${flags[@]}"
+        swift test --no-parallel --enable-code-coverage ${flags[@]+"${flags[@]}"}
 fi
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$output" "$report_only" <<'PY'
