@@ -88,12 +88,14 @@ def xctest_profiles(record, product_directory, started_ns, preexisting=()):
         for part in parts
     )
     profiles = [
-        path.resolve() for path in pattern.parent.glob("*.profraw")
+        path for path in pattern.parent.glob("*.profraw")
         if re.fullmatch(expression, path.name) and path.stat().st_mtime_ns >= started_ns
     ]
     if not profiles:
         raise CoverageError("No profiles from the recorded XCTest process")
-    if set(profiles).intersection(Path(path).resolve() for path in preexisting):
+    if {Path(os.path.realpath(path)) for path in profiles}.intersection(
+        Path(os.path.realpath(path)) for path in preexisting
+    ):
         raise CoverageError("XCTest profile already existed before this run")
     return profiles
 
