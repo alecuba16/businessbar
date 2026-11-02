@@ -30,6 +30,8 @@ struct CalendarsTab: View {
     @State private var isRequestingAccess = false
     @State private var isResettingCalendarPermission = false
     @State private var isResettingNotificationPermission = false
+    @State private var showingCalendarResetConfirmation = false
+    @State private var showingNotificationResetConfirmation = false
 
     @AppStorage(Constants.Defaults.featureCalendar) private var featureCalendarEnabled = true
     @AppStorage(Constants.Defaults.notificationMinutesBefore) private var notificationMinutes = Constants.DefaultValues.notificationMinutesBefore
@@ -155,7 +157,7 @@ struct CalendarsTab: View {
                         .buttonStyle(.bordered)
 
                         Button(isResettingCalendarPermission ? "Resetting…" : "Reset Permission") {
-                            resetCalendarPermission()
+                            showingCalendarResetConfirmation = true
                         }
                         .disabled(isResettingCalendarPermission)
                         .buttonStyle(.bordered)
@@ -207,7 +209,7 @@ struct CalendarsTab: View {
                     .buttonStyle(.bordered)
 
                     Button(isResettingNotificationPermission ? "Resetting…" : "Reset Permission") {
-                        resetNotificationPermission()
+                        showingNotificationResetConfirmation = true
                     }
                     .disabled(isResettingNotificationPermission)
                     .buttonStyle(.bordered)
@@ -272,6 +274,30 @@ struct CalendarsTab: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .padding()
+        .confirmationDialog(
+            "Reset Calendar Permission?",
+            isPresented: $showingCalendarResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Permission", role: .destructive) {
+                resetCalendarPermission()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Revokes BusinessBar's calendar access. You will need to grant it again to see meetings.")
+        }
+        .confirmationDialog(
+            "Reset Notification Permission?",
+            isPresented: $showingNotificationResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Permission", role: .destructive) {
+                resetNotificationPermission()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Revokes BusinessBar's notification permission. Reminders will stop until granted again.")
+        }
         .onAppear(perform: refreshAuthStatus)
         .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
             refreshAuthStatus()

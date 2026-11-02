@@ -33,7 +33,9 @@ private final class NativeCalendarStoreBackend: CalendarStoreBackend {
     }
 
     func refreshSources() {
-        store = EKEventStore(sources: store.sources + store.delegateSources)
+        // Plain init: EKEventStore(sources:) built from the pre-grant (empty)
+        // source list yields a store whose calaccessd connection never initializes.
+        store = EKEventStore()
     }
 
     func calendars() -> [EKCalendar] {
