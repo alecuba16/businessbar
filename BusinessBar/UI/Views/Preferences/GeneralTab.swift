@@ -129,6 +129,15 @@ struct GeneralTab: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            // MARK: Version
+            Section {
+                HStack {
+                    Text("Version")
+                    Spacer()
+                    Text(appVersionLabel)
+                        .foregroundColor(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
@@ -151,6 +160,17 @@ struct GeneralTab: View {
 
     private var currentLogLevel: LogLevel {
         LogLevel(rawValue: logLevelRaw) ?? .warning
+    }
+
+    private var appVersionLabel: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let short = info["CFBundleShortVersionString"] as? String
+        let build = info["CFBundleVersion"] as? String
+        switch (short, build) {
+        case let (s?, b?): return "\(s) (\(b))"
+        case let (s?, nil):  return s
+        default:             return "Development build"
+        }
     }
 
     private var energyImpactLabel: String {

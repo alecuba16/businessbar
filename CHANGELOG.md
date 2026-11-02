@@ -5,6 +5,11 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- Sparkle update feed runs entirely on GitHub now: the appcast is served from GitHub Pages and each release entry links its DMG straight from GitHub Releases, signed with the app's EdDSA key so Sparkle accepts the download. Automatic update checks work out of the box for new installs instead of pointing at a placeholder URL
+- The General tab shows the installed version (marketing version and build number) so support conversations can name the exact build without digging into the bundle
+
 ## [1.6.1] - 2026-11-02
 ### Fixed
 - Calendar permission no longer vanishes right after it is granted. The Reset Permission buttons in Preferences > Calendars sat one button away from Grant and ran tccutil reset on a single click, so a stray click while re-granting (the app kept showing permission errors, so Grant got pressed repeatedly) silently deleted the fresh grant. Both Reset Permission buttons (calendar and notifications) now ask for confirmation first
