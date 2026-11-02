@@ -5,7 +5,7 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.2] - 2026-11-02
 ### Added
 - Sparkle update feed runs entirely on GitHub now: the appcast is served from GitHub Pages and each release entry links its DMG straight from GitHub Releases, signed with the app's EdDSA key so Sparkle accepts the download. Automatic update checks work out of the box for new installs instead of pointing at a placeholder URL
 - The General tab shows the installed version (marketing version and build number) so support conversations can name the exact build without digging into the bundle
