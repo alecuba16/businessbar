@@ -184,12 +184,25 @@ private final class UI2Hosted<Content: View> {
         try context.expect(element.accessibilityPerformPress(), "UI2 sheet control press succeeds: \(label)")
     }
 
+    /// Presses a button inside a confirmationDialog's _NSAlertPanel.
+    /// Measured on this host (UI1's Hosted.alertPress): the alert button's
+    /// performPress returns false while the action still runs (the alert
+    /// dismisses), so the helper ignores the return value.
+    func alertPress(_ label: String, _ context: CoverageContext) throws {
+        guard let element = sheetElements().first(where: { $0.accessibilityLabel() == label || $0.accessibilityTitle() == label }),
+              element.isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "UI2 alert control not found or disabled: \(label)")
+        }
+        _ = element.accessibilityPerformPress()
+    }
+
     private func sheetElements() -> [OwnedAccessibility.Element] {
         OwnedAccessibility.materialize()
         var found: [OwnedAccessibility.Element] = []
         for panel in NSApp.windows {
             guard panel.isVisible,
-                  String(describing: type(of: panel)).contains("SheetPresentation"),
+                  String(describing: type(of: panel)).contains("SheetPresentation")
+                    || String(describing: type(of: panel)).contains("NSAlertPanel"),
                   let content = panel.contentView else { continue }
             found.append(contentsOf: OwnedAccessibility.elements(in: content))
         }
@@ -1033,28 +1046,44 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(openedURLs.contains { $0.contains("notifications") }, "Denied branch opens notification settings through the seam")
         try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Denied branch clears the stored toggle")
 
-        // Calendar reset press: the tccutil seam records the service name,
-        // the in-flight flag flips the button label, and the completion
-        // resets the flag and refreshes the status.
+        // Calendar reset press: the confirmation dialog appears first; a
+        // plain press alone must NOT reset. Confirming the dialog routes
+        // through the tccutil seam, the in-flight flag flips the button
+        // label, and the completion resets the flag and refreshes the
+        // status.
         let resetTab = makeTab(status: nil, bundlePresent: false)
         defer { resetTab.close() }
         await ui2Settle()
         try resetTab.press("Reset Permission", context)
+        for _ in 0..<20 where !resetTab.sheetText().contains("Reset Calendar Permission?") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(resetServices.isEmpty, "Calendar reset waits for confirmation before touching TCC")
+        try context.expect(resetTab.sheetText().contains("Reset Calendar Permission?"), "Reset press presents the calendar confirmation dialog")
+        try resetTab.alertPress("Reset Permission", context)
         for _ in 0..<20 where !resetServices.contains("Calendar") {
             await Task.yield()
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
-        try context.expect(resetServices.contains("Calendar"), "Calendar reset routes through the tccutil seam")
+        try context.expect(resetServices.contains("Calendar"), "Confirmed calendar reset routes through the tccutil seam")
         await ui2Settle()
         try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Calendar reset disables the feature flag")
         try context.expect(resetTab.text.contains("Resetting…") == false, "Reset flag clears after the seam completes")
 
         // Notification reset press: same seam with the Notifications
         // service. Both resets share the "Reset Permission" label, so
-        // the press targets the second occurrence (the notifications row).
+        // the press targets the second occurrence (the notifications row)
+        // and confirms through its own dialog.
         defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
         try resetTab.pressOccurrence("Reset Permission", occurrence: 1, context)
-        for _ in 0..<20 where resetServices.count < 2 {
+        for _ in 0..<20 where !resetTab.sheetText().contains("Reset Notification Permission?") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!resetServices.contains("Notifications"), "Notification reset waits for confirmation before touching TCC")
+        try resetTab.alertPress("Reset Permission", context)
+        for _ in 0..<20 where !resetServices.contains("Notifications") {
             await Task.yield()
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }

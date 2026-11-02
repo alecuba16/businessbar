@@ -33,7 +33,12 @@ private final class NativeCalendarStoreBackend: CalendarStoreBackend {
     }
 
     func refreshSources() {
-        store = EKEventStore(sources: store.sources + store.delegateSources)
+        // Rebuild with a plain init after the grant. EKEventStore(sources:)
+        // built from the pre-grant (empty) source list produced a store whose
+        // calaccessd connection never initialized (EKCADError 1019), so every
+        // later request failed with an XPC error. A plain store sees all
+        // sources the now-granted process may read, delegates included.
+        store = EKEventStore()
     }
 
     func calendars() -> [EKCalendar] {
