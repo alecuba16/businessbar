@@ -30,6 +30,10 @@ final class UpdaterViewModel: ObservableObject {
     init(backend: any UpdaterBackend) {
         self.backend = backend
         automaticallyChecksForUpdates = backend.automaticallyChecksForUpdates
+        // The Sparkle controller is built with startingUpdater: false, so
+        // an enabled auto-check preference must start it here or the
+        // updater stays dormant until the first manual check or toggle.
+        if automaticallyChecksForUpdates { startUpdaterIfNeeded() }
     }
 
     func checkForUpdates() {
