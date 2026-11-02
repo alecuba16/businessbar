@@ -5,7 +5,7 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.1] - 2026-11-02
 ### Fixed
 - Calendar permission no longer vanishes right after it is granted. The Reset Permission buttons in Preferences > Calendars sat one button away from Grant and ran tccutil reset on a single click, so a stray click while re-granting (the app kept showing permission errors, so Grant got pressed repeatedly) silently deleted the fresh grant. Both Reset Permission buttons (calendar and notifications) now ask for confirmation first
 - Calendar permission requests work after the first grant. The app rebuilt its EKEventStore from the pre-grant source list after granting, which produced a store whose calaccessd connection never initialized (EKCADError 1019), so every later Grant click failed with an XPC error while the system showed the permission as granted. The store is rebuilt as a plain EKEventStore now
