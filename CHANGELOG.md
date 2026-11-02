@@ -5,7 +5,7 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.3] - 2026-11-02
 ### Fixed
 - Automatic update checks now run on launch. The updater was only started on the first toggle of the preference or the first manual Check for Updates, so with automatic checks enabled the app could sit through every launch without ever contacting the update feed
 
