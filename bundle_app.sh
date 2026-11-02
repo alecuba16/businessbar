@@ -125,7 +125,12 @@ fi
 # Fall back to .env if no .local.json or it didn't parse
 if [ -z "$GOOGLE_CLIENT_NUMBER" ] && [ -f "$ENV_FILE" ]; then
     echo "  ▶ Falling back to .env for credentials"
-    while IFS='=' read -r key value; do
+    # Split on the first '=' only: base64 secrets can end in '=' and
+    # IFS='=' read would drop that padding, corrupting the value.
+    while IFS= read -r line; do
+        key=${line%%=*}
+        value=${line#*=}
+        [ "$line" = "$value" ] && continue
         key=$(echo "$key" | xargs)
         value=$(echo "$value" | xargs)
         [ -z "$key" ] && continue
