@@ -111,10 +111,13 @@ struct LocalModelsSection: View {
             refreshStatus()
         }
         .onReceive(store.$download) { _ in
-            refreshDownloads()
+            // Store events cover download finishes; the appear pass below
+            // never mirrors, so opening the sheet alone cannot rewrite
+            // the provider list.
+            refreshDownloads(syncsProfile: true)
         }
         .onAppear {
-            refreshDownloads()
+            refreshDownloads(syncsProfile: false)
             refreshStatus()
         }
     }
@@ -285,15 +288,17 @@ struct LocalModelsSection: View {
             } else if isCustom {
                 Button("Delete") {
                     try? store.delete(modelID: entry.id)
+                    stopServerIfRunning(entry)
                     removeCustomEntry(entry)
-                    refreshDownloads()
+                    refreshDownloads(syncsProfile: true)
                 }
                 .controlSize(.small)
                 .help("Delete the downloaded weights and remove the entry")
             } else {
                 Button("Delete") {
                     try? store.delete(modelID: entry.id)
-                    refreshDownloads()
+                    stopServerIfRunning(entry)
+                    refreshDownloads(syncsProfile: true)
                 }
                 .controlSize(.small)
                 .help("Delete the downloaded weights")
@@ -481,7 +486,7 @@ struct LocalModelsSection: View {
         )
         MLXModelCatalog.addCustomEntry(entry, defaults: defaults)
         customEntries = MLXModelCatalog.customEntries(defaults: defaults)
-        refreshDownloads()
+        refreshDownloads(syncsProfile: true)
     }
 
     // MARK: Custom model provisioning
@@ -620,16 +625,15 @@ struct LocalModelsSection: View {
         customEntries = MLXModelCatalog.customEntries(defaults: defaults)
         customFlow.check = nil
         customFlow.repoText = ""
-        refreshDownloads()
+        refreshDownloads(syncsProfile: true)
     }
 
     private func removeCustomEntry(_ entry: MLXModelCatalog.Entry) {
         MLXModelCatalog.removeCustomEntry(id: entry.id, defaults: defaults)
         customEntries = MLXModelCatalog.customEntries(defaults: defaults)
-        if activeModelID == entry.id {
-            activeModelID = MLXServerConfig.activeModelID(defaults: defaults)
-            updateLocalProfile()
-        }
+        // Every removal re-mirrors: an activated-but-not-downloaded custom
+        // entry must leave the chat list together with its weights.
+        updateLocalProfile()
     }
 
     // MARK: Settings
@@ -667,14 +671,38 @@ struct LocalModelsSection: View {
     }
 
     private func updateLocalProfile() {
-        _ = CompanionConfigService.upsertLocalMLXProvider()
+        _ = CompanionConfigService.upsertLocalMLXProvider(home: home)
     }
 
-    private func refreshDownloads() {
+    /// A deleted model cannot be served: kill the server when the row
+    /// being deleted is the running one, and drop the active-model choice
+    /// when the row held it, so the port frees now instead of on the next
+    /// failed chat request. Stops the section's own server instance (the
+    /// shared manager in the app, the injected one under harnesses).
+    private func stopServerIfRunning(_ entry: MLXModelCatalog.Entry) {
+        if case .running(let running) = server.state, running == entry.id {
+            server.stop()
+            MLXServerConfig.setActiveModelID(nil, defaults: defaults)
+            activeModelID = nil
+        } else if activeModelID == entry.id {
+            MLXServerConfig.setActiveModelID(nil, defaults: defaults)
+            activeModelID = nil
+        }
+    }
+
+    private func refreshDownloads(syncsProfile: Bool) {
         let all = MLXModelCatalog.entries + customEntries
+        let previous = downloadedCache
         downloadedCache = all
             .filter { MLXModelCatalog.isDownloaded(modelID: $0.id, home: home) }
             .map(\.id)
+        // Download finishes and deletes change what can be served: mirror
+        // the change into the chat provider list so pickers update without
+        // a restart. The appear pass skips the mirror, so a fresh open
+        // never rewrites the provider list on its own.
+        if syncsProfile, downloadedCache != previous {
+            updateLocalProfile()
+        }
     }
 
     private func refreshStatus() {

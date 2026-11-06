@@ -382,9 +382,10 @@ enum CompanionConfigService {
     }
 
     /// The provider the stored selection points at: either a model's parent
-    /// or an ACP agent entry. Nil when nothing resolves.
+    /// or an ACP agent entry. Nil when nothing resolves. Disabled providers
+    /// never resolve, so chat falls to the next usable one.
     static func selectedProvider() -> ChatProvider? {
-        let providers = chatProviders()
+        let providers = selectableProviders()
         guard let storedID = defaults.string(forKey: Constants.Defaults.companionSelectedModelProfile),
               let id = UUID(uuidString: storedID) else {
             return nil
@@ -411,7 +412,7 @@ enum CompanionConfigService {
     /// so callers switch on `selectedACPProvider()` first.
     static func selectedModel() -> (provider: ChatProvider, model: ChatModel)? {
         if selectedACPProvider() != nil { return nil }
-        let providers = chatProviders()
+        let providers = selectableProviders()
         guard !providers.isEmpty else { return nil }
         let storedID = defaults.string(forKey: Constants.Defaults.companionSelectedModelProfile)
         if let storedID, let id = UUID(uuidString: storedID) {
@@ -468,11 +469,45 @@ enum CompanionConfigService {
 
     /// Deletes a provider and its Keychain key. Selection falls back to the
     /// first remaining provider and model when the deleted one held it.
+    /// Removing the local MLX provider also tears its server down: the
+    /// child holds the port and wired memory that nothing else would free.
+    @MainActor
     static func deleteProvider(id: UUID) {
-        var providers = chatProviders()
-        providers.removeAll { $0.id == id }
-        chatProviderStore.save(providers)
+        let providers = chatProviders()
+        if let provider = providers.first(where: { $0.id == id }),
+           provider.kind == .localMLX {
+            stopLocalServer()
+        }
+        var remaining = providers
+        remaining.removeAll { $0.id == id }
+        chatProviderStore.save(remaining)
         try? credentials.delete(ChatProviderStore.keychainKeyPrefix + id.uuidString)
+    }
+
+    /// Off hides a provider from pickers and chat without deleting it.
+    /// Disabling the local MLX provider stops its server for the same
+    /// reason deleting it does: a hidden server holding the port serves
+    /// nobody.
+    @MainActor
+    static func setProviderEnabled(id: UUID, _ enabled: Bool) {
+        var providers = chatProviders()
+        guard let index = providers.firstIndex(where: { $0.id == id }) else { return }
+        if !enabled, providers[index].kind == .localMLX {
+            stopLocalServer()
+        }
+        providers[index].enabled = enabled
+        chatProviderStore.save(providers)
+    }
+
+    /// Kills the managed MLX server and clears the active-model choice.
+    /// One helper so every removal path (provider delete, disable, empty
+    /// catalog) releases the port the same way. The active-model key
+    /// follows the service's defaults suite so tests inject the same way
+    /// the app reads.
+    @MainActor
+    static func stopLocalServer() {
+        MLXServerManager.shared.stop()
+        MLXServerConfig.setActiveModelID(nil, defaults: defaults)
     }
 
     /// Deletes a single model from its provider, keeping the provider.
@@ -512,59 +547,104 @@ enum CompanionConfigService {
 
     // MARK: - Local MLX provider
 
+    /// Providers visible in pickers: everything configured except ones the
+    /// user turned off. Settings screens still list all providers so the
+    /// toggle can be reached; only choice surfaces filter.
+    static func selectableProviders() -> [ChatProvider] {
+        chatProviders().filter { $0.isEnabled }
+    }
+
     /// Creates or updates the preset provider pointing at the managed MLX
-    /// server. Provider id stays stable across updates, and its single model
-    /// follows the active catalog model.
-    static func upsertLocalMLXProvider() -> ChatProvider? {
-        guard let modelID = MLXServerConfig.activeModelID(),
-              let entry = MLXModelCatalog.entry(id: modelID) else { return nil }
+    /// server. Provider id stays stable across updates, and its models
+    /// list mirrors every downloaded catalog model (curated plus custom),
+    /// active first, so new downloads appear in pickers without a restart.
+    /// The active model stays in the list before its weights land (Use
+    /// activates and creates the provider in one step; the server fails
+    /// fast on missing weights). The provider is dropped when nothing is
+    /// downloaded and nothing is active. Reads go through the service's
+    /// defaults seam; `home` decides where downloaded weights live.
+    @MainActor
+    static func upsertLocalMLXProvider(home: String = NSHomeDirectory()) -> ChatProvider? {
+        let activeID = MLXServerConfig.activeModelID(defaults: defaults)
+        let entries = (MLXModelCatalog.entries + MLXModelCatalog.customEntries(defaults: defaults))
+            .filter { MLXModelCatalog.isDownloaded(modelID: $0.id, home: home) || $0.id == activeID }
+        let ordered = entries.sorted { left, right in
+            Self.mirrorOrder(left, right, activeID: activeID)
+        }
         // Discover reasoning from the snapshot when the weights are on
         // disk; a downloaded model carries its own chat template, so no
         // guesswork from the name. The result is cached on the catalog so
         // later upserts and pickers read it without touching the disk again.
-        if MLXModelCatalog.isDownloaded(modelID: modelID),
-           entry.reasoning == nil {
-            let capability = MLXReasoningInspector.capabilityFromSnapshot(modelID: modelID)
-            MLXModelCatalog.setReasoningCapability(id: modelID, capability)
+        for entry in ordered where entry.reasoning == nil {
+            let capability = MLXReasoningInspector.capabilityFromSnapshot(modelID: entry.id, home: home)
+            MLXModelCatalog.setReasoningCapability(id: entry.id, capability, defaults: defaults)
         }
-        let capability = MLXModelCatalog.reasoningCapability(id: modelID)
-        let model = ChatModel(
+        var providers = chatProviders()
+        guard let index = providers.firstIndex(where: { $0.kind == .localMLX }) else {
+            guard !ordered.isEmpty else { return nil }
+            let provider = ChatProvider(
+                name: "Local (MLX)",
+                baseURL: MLXServerConfig.baseURLString(defaults: defaults),
+                models: ordered.map { Self.localModel(for: $0, home: home) },
+                kind: .localMLX,
+                isLocalMLX: true
+            )
+            providers.append(provider)
+            chatProviderStore.save(providers)
+            return provider
+        }
+        let existing = providers[index]
+        if ordered.isEmpty {
+            // Nothing left to serve: drop the provider and release the port
+            // its server may still hold.
+            stopLocalServer()
+            providers.remove(at: index)
+            chatProviderStore.save(providers)
+            return nil
+        }
+        var updated = existing
+        updated.baseURL = MLXServerConfig.baseURLString(defaults: defaults)
+        // Keep existing model ids by model string so a re-mirror after a
+        // download or delete keeps the selection stable. Reasoning picks
+        // stay user-owned: detection only fills them the first time.
+        updated.models = ordered.map { entry in
+            var model = Self.localModel(for: entry, home: home)
+            if let kept = existing.models.first(where: { $0.model == entry.id }) {
+                model.id = kept.id
+                model.reasoningEnabled = kept.reasoningEnabled ?? model.reasoningEnabled
+                model.reasoningEffort = kept.reasoningEffort ?? model.reasoningEffort
+            }
+            return model
+        }
+        providers[index] = updated
+        chatProviderStore.save(providers)
+        return updated
+    }
+
+    /// Sort key for the local mirror: active model first, then id.
+    private static func mirrorOrder(
+        _ left: MLXModelCatalog.Entry,
+        _ right: MLXModelCatalog.Entry,
+        activeID: String?
+    ) -> Bool {
+        let leftActive = left.id == activeID
+        let rightActive = right.id == activeID
+        if leftActive != rightActive { return leftActive }
+        return left.id < right.id
+    }
+
+    /// One chat model row for a catalog entry, reasoning already resolved.
+    private static func localModel(for entry: MLXModelCatalog.Entry, home: String) -> ChatModel {
+        let capability = MLXModelCatalog.reasoningCapability(id: entry.id, defaults: defaults, home: home)
+        return ChatModel(
             name: entry.displayName,
-            model: modelID,
+            model: entry.id,
             reasoningEnabled: capability.supported,
             reasoningEffort: capability.supported ? "medium" : nil,
             acceptsText: true,
             acceptsImages: entry.kind == .textAndImages,
             effortOptions: capability.effortOptions.isEmpty ? nil : capability.effortOptions
         )
-        let provider = ChatProvider(
-            name: "Local (MLX)",
-            baseURL: MLXServerConfig.baseURLString(),
-            models: [model],
-            kind: .localMLX,
-            isLocalMLX: true
-        )
-        var providers = chatProviders()
-        if let index = providers.firstIndex(where: { $0.kind == .localMLX }) {
-            var updated = provider
-            updated.id = providers[index].id
-            // Keep the existing model id when the catalog model has not
-            // changed so selection survives updates. Reasoning picks stay
-            // user-owned: detection only fills them in the first time.
-            if let existing = providers[index].models.first, existing.model == modelID {
-                var kept = model
-                kept.id = existing.id
-                kept.reasoningEnabled = existing.reasoningEnabled ?? kept.reasoningEnabled
-                kept.reasoningEffort = existing.reasoningEffort ?? kept.reasoningEffort
-                updated.models = [kept]
-            }
-            providers[index] = updated
-            chatProviderStore.save(providers)
-            return updated
-        }
-        providers.append(provider)
-        chatProviderStore.save(providers)
-        return provider
     }
 
     /// Starts or restarts the MLX server when the selected chat model is
@@ -577,12 +657,14 @@ enum CompanionConfigService {
 
     /// Same warm-up for a specific model id: rewrite templates that pin a
     /// local MLX companion model need the server up before their stream,
-    /// even when the chat panel's selected model is remote.
+    /// even when the chat panel's selected model is remote. Disabled
+    /// providers never resolve here, so a hidden local provider keeps its
+    /// server down.
     static func ensureLocalServer(forModelID modelID: UUID?) async throws {
         // Only the local MLX preset ever needs the server up; ACP agents
         // manage their own process and remote providers need nothing.
         if let modelID {
-            if let provider = chatProviders().first(where: { $0.model(id: modelID) != nil }),
+            if let provider = selectableProviders().first(where: { $0.model(id: modelID) != nil }),
                provider.kind != .localMLX {
                 return
             }
@@ -591,7 +673,7 @@ enum CompanionConfigService {
         }
         var pair: (provider: ChatProvider, model: ChatModel)?
         if let modelID {
-            for provider in chatProviders() {
+            for provider in selectableProviders() {
                 if let model = provider.model(id: modelID) {
                     pair = (provider, model)
                     break
@@ -674,7 +756,7 @@ enum CompanionConfigService {
     /// MLX discovery applies. Falls back to the global list when the id
     /// no longer resolves.
     static func effortOptions(forModelID id: UUID) -> [String] {
-        for provider in chatProviders() {
+        for provider in selectableProviders() {
             if let model = provider.model(id: id) {
                 return effortOptions(forModel: model, provider: provider)
             }
@@ -880,7 +962,7 @@ enum CompanionConfigService {
     /// advertises tools, mirroring the chat client's schema merge rules
     /// minus the command handler.
     static func makeClient(forModelID modelID: UUID?) -> LLMClient? {
-        let providers = chatProviders()
+        let providers = selectableProviders()
         var pair: (provider: ChatProvider, model: ChatModel)?
         if let modelID {
             for provider in providers {

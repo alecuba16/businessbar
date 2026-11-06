@@ -131,6 +131,40 @@ private final class CompanionDeepHosted<Content: View> {
         try context.expect(true, "Popup item press issued: \(title)")
     }
 
+    /// Presses the Enable switch on the nth provider row. Measured on
+    /// this host: the mini switch node (PlatformSwitch) ignores AXPress
+    /// and the AX value setter, and it is not the only switch in the tree,
+    /// so index-based targeting grabs a foreign control. The reliable
+    /// route is the row's help text (Hide/Show wording both carry "this
+    /// provider"), hitTest at the node's AX frame, then performClick on
+    /// the NSControl under it, which flips the binding with no cursor
+    /// movement.
+    func pressProviderSwitch(row: Int, _ context: CoverageContext, _ label: String) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+        }
+        let rows = OwnedAccessibility.elements(in: host)
+            .filter { $0.className().contains("PlatformSwitch") }
+            .filter { $0.helpText()?.contains("this provider") == true }
+        guard rows.count > row, rows[row].isAccessibilityEnabled() else {
+            throw CoverageContext.Failure(description: "Provider switch not found at row \(row): \(label)")
+        }
+        let frameSelector = NSSelectorFromString("accessibilityFrame")
+        guard let imp = rows[row].objectValue.method(for: frameSelector) else {
+            throw CoverageContext.Failure(description: "Provider switch carries no AX frame: \(label)")
+        }
+        typealias FrameGetter = @convention(c) (NSObject, Selector) -> NSRect
+        let frame = unsafeBitCast(imp, to: FrameGetter.self)(rows[row].objectValue, frameSelector)
+        let point = window.convertPoint(fromScreen: NSPoint(x: frame.midX, y: frame.midY))
+        guard let control = host.hitTest(point) as? NSControl else {
+            throw CoverageContext.Failure(description: "No control under the provider switch frame: \(label)")
+        }
+        control.performClick(nil)
+    }
+
     /// Row Edit buttons share the label across rows, and provider and
     /// model names also render in the Chat form pickers above the rows,
     /// so the row itself is the LAST element carrying the text and the
@@ -247,6 +281,7 @@ enum AppCompanionTabDeepScenarios {
         do { try await modelEffortEditor(context) } catch { failures.append("modelEffortEditor: \(error)") }
         do { try await templateCustomEffort(context) } catch { failures.append("templateCustomEffort: \(error)") }
         do { try await tabActions(context) } catch { failures.append("tabActions: \(error)") }
+        do { try await providerToggleAndLocalLifecycle(context) } catch { failures.append("providerToggleAndLocalLifecycle: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
@@ -701,6 +736,107 @@ enum AppCompanionTabDeepScenarios {
         try context.expect(tab.sheetText().contains("New Template"), "Add Template presents the fresh template editor")
         try tab.sheetPress("Cancel", context)
         await settle()
+    }
+
+    /// Provider enable/disable and the local MLX lifecycle: the row switch
+    /// persists `enabled`, hidden providers leave `selectableProviders`,
+    /// disabling or deleting the local provider stops the shared server
+    /// and clears the active-model key, and the provider list refreshes
+    /// on the store notification the toggle writes fire.
+    private static func providerToggleAndLocalLifecycle(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
+        let defaults = try context.defaults("companion-toggle-lifecycle")
+        defaults.registerDefaults()
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+        }
+        defaults.set(true, forKey: Constants.Defaults.featureCompanion)
+
+        // A local MLX provider with a fixture active model; the shared
+        // server sits stopped, which is what a fresh app run looks like.
+        let localModel = ChatModel(name: "Fixture Local", model: "mlx-community/Fixture-Toggle-4bit")
+        let localProvider = ChatProvider(
+            name: "Local (MLX)",
+            baseURL: "http://127.0.0.1:8790/v1",
+            models: [localModel],
+            kind: .localMLX,
+            isLocalMLX: true
+        )
+        let remoteProvider = ChatProvider(
+            name: "Fixture Remote",
+            baseURL: "https://coverage.invalid/v1",
+            models: [ChatModel(name: "Fixture Remote Model", model: "remote-fixture")]
+        )
+        Config.chatProviderStore.save([localProvider, remoteProvider])
+        MLXServerConfig.setActiveModelID("mlx-community/Fixture-Toggle-4bit", defaults: defaults)
+        Config.setSelectedModelProfileID(localModel.id)
+
+        let store = TemplateStore(defaults: defaults)
+        let tab = CompanionDeepHosted(
+            CompanionTab(templateStore: store, accessibilityStatus: { true }).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 2200)
+        )
+        defer { tab.close() }
+        await settle()
+
+        // Both providers render; the selection resolves to the local model.
+        try context.expect(tab.text.contains("Local (MLX)"), "Local provider row renders")
+        try context.expect(tab.text.contains("Fixture Remote"), "Remote provider row renders")
+        try context.equal(Config.selectedModel()?.model.id, localModel.id, "Local model selected before the toggle")
+
+        // Rows render in store order: row 0 is the local provider, 1 the
+        // remote one. (The Enable Companion toggle renders as a checkbox
+        // and the other mini switches carry no "this provider" help, so
+        // the row filter reaches only provider rows.)
+        try tab.pressProviderSwitch(row: 0, context, "local provider enable switch")
+        await settle()
+        try context.expect(
+            Config.chatProviders().first { $0.kind == .localMLX }?.isEnabled == false,
+            "Switch press persists the disabled flag"
+        )
+        try context.expect(
+            Config.selectableProviders().contains { $0.kind == .localMLX } == false,
+            "Disabled local provider leaves the selectable list"
+        )
+        try context.expect(
+            Config.selectedModel()?.provider.id == remoteProvider.id,
+            "Selection falls back to the next usable provider"
+        )
+        try context.expect(
+            MLXServerManager.shared.state.isRunning == false,
+            "Disabling the local provider leaves the shared server stopped"
+        )
+
+        // Re-enable: the row returns to the selectable list and the
+        // selection can point at the local model again.
+        try tab.pressProviderSwitch(row: 0, context, "local provider enable switch, re-enable")
+        await settle()
+        try context.expect(
+            Config.selectableProviders().contains { $0.kind == .localMLX },
+            "Re-enabled provider returns to the selectable list"
+        )
+
+        // Deleting the local provider clears the active-model key: the
+        // next chat request can never restart a server for a model whose
+        // provider is gone.
+        Config.setSelectedModelProfileID(localModel.id)
+        await settle()
+        try context.expect(Config.selectedProvider()?.kind == .localMLX, "Local provider selected before delete")
+        try tab.pressByHelp("Delete this provider and its models", context)
+        await settle()
+        try context.expect(
+            MLXServerConfig.activeModelID(defaults: defaults) == nil,
+            "Deleting the local provider clears the active model"
+        )
+        try context.expect(
+            Config.chatProviders().contains { $0.kind == .localMLX } == false,
+            "Provider trash drops the local provider"
+        )
     }
 
     private static func waitFor(_ context: CoverageContext, _ message: String, until condition: @MainActor () -> Bool) async throws {

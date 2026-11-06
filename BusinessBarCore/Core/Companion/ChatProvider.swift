@@ -111,6 +111,10 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
     /// Legacy flag kept so a stored provider decodes after downgrade; new
     /// writes leave it out.
     public var isLocalMLX: Bool?
+    /// Off hides this provider from pickers and chat without deleting it.
+    /// Nil on stored rows decodes as on: the flag is opt-out, never a
+    /// surprise kill switch users must find to get their models back.
+    public var enabled: Bool?
     /// Header pairs sent with every request to this provider. Values can be
     /// secrets, so they are stored in the Keychain as JSON next to the key,
     /// never inside this blob.
@@ -134,7 +138,8 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
         kind: ChatProviderKind = .openAICompat,
         acpCommand: String = "",
         acpArguments: [String] = [],
-        isLocalMLX: Bool? = nil
+        isLocalMLX: Bool? = nil,
+        enabled: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -144,6 +149,7 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
         self.acpCommand = acpCommand
         self.acpArguments = acpArguments
         self.isLocalMLX = isLocalMLX
+        self.enabled = enabled
     }
 
     /// Bridge for code written before kinds existed: true exactly when this
@@ -152,8 +158,14 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
         kind == .localMLX
     }
 
+    /// Stored rows predating the toggle decode as on. An explicit false is
+    /// the only way a provider is hidden.
+    public var isEnabled: Bool {
+        enabled ?? true
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case id, name, baseURL, models, kind, acpCommand, acpArguments, isLocalMLX, headers
+        case id, name, baseURL, models, kind, acpCommand, acpArguments, isLocalMLX, enabled, headers
     }
 
     public init(from decoder: Decoder) throws {
@@ -174,6 +186,7 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
         acpCommand = try container.decodeIfPresent(String.self, forKey: .acpCommand) ?? ""
         acpArguments = try container.decodeIfPresent([String].self, forKey: .acpArguments) ?? []
         isLocalMLX = try container.decodeIfPresent(Bool.self, forKey: .isLocalMLX)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
         headers = try container.decodeIfPresent([HeaderPair].self, forKey: .headers)
     }
 
@@ -187,6 +200,7 @@ public struct ChatProvider: Identifiable, Codable, Equatable, Hashable, Sendable
         try container.encodeIfPresent(acpCommand.isEmpty ? nil : acpCommand, forKey: .acpCommand)
         try container.encodeIfPresent(acpArguments.isEmpty ? nil : acpArguments, forKey: .acpArguments)
         try container.encodeIfPresent(isLocalMLX, forKey: .isLocalMLX)
+        try container.encodeIfPresent(enabled, forKey: .enabled)
     }
 
     /// The model with the given id, if this provider hosts it.
