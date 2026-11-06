@@ -89,7 +89,7 @@ struct CompanionTab: View {
                 // MARK: Default chat model
                 // Agents count too: an agents-only setup still needs the
                 // picker to select one.
-                if providers.contains(where: { !$0.models.isEmpty || $0.kind == .acpAgent }) {
+                if providers.contains(where: { $0.isEnabled && (!$0.models.isEmpty || $0.kind == .acpAgent) }) {
                     Section {
                         Picker("Default chat model", selection: Binding(
                             get: { () -> UUID? in
@@ -108,7 +108,7 @@ struct CompanionTab: View {
                                 }
                             }
                         )) {
-                            ForEach(providers) { provider in
+                            ForEach(providers.filter { $0.isEnabled }) { provider in
                                 if provider.kind == .acpAgent {
                                     Text(provider.name + " (agent)").tag(Optional(provider.id))
                                 } else {
@@ -149,6 +149,18 @@ struct CompanionTab: View {
                                     .padding(.vertical, 2)
                                     .background(Color.accentColor.opacity(0.15))
                                     .clipShape(Capsule())
+                                Toggle("Enabled", isOn: Binding(
+                                    get: { provider.isEnabled },
+                                    set: { newValue in
+                                        CompanionConfigService.setProviderEnabled(id: provider.id, newValue)
+                                        providers = CompanionConfigService.chatProviders()
+                                    }
+                                ))
+                                .toggleStyle(.switch)
+                                .controlSize(.mini)
+                                .help(provider.isEnabled
+                                      ? "Hide this provider from pickers without deleting it"
+                                      : "Show this provider in pickers again")
                                 Button("Edit") {
                                     if provider.kind == .acpAgent {
                                         editingACPProvider = provider
@@ -227,7 +239,7 @@ struct CompanionTab: View {
                 } header: {
                     Text("Providers")
                 } footer: {
-                    Text("Three kinds: OpenAI-compatible endpoints with their own key and models, the on-device Local MLX server (Add Local Models opens its setup), and ACP agents over stdio. The checkmark marks the chat default; picking an ACP agent in the Chat picker switches the panel to it.")
+                    Text("Three kinds: OpenAI-compatible endpoints with their own key and models, the on-device Local MLX server (Add Local Models opens its setup), and ACP agents over stdio. The switch hides a provider from chat without deleting it; the checkmark marks the chat default; picking an ACP agent in the Chat picker switches the panel to it.")
                 }
 
                 // MARK: Search
@@ -916,7 +928,7 @@ struct TemplateEditorSheet: View {
                 set: { template.modelID = $0 }
             )) {
                 Text("Default chat model").tag(Optional<UUID>.none)
-                ForEach(CompanionConfigService.chatProviders()) { provider in
+                ForEach(CompanionConfigService.selectableProviders()) { provider in
                     Section(provider.name) {
                         ForEach(provider.models) { model in
                             Text(model.name).tag(Optional(model.id))

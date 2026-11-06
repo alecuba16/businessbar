@@ -159,35 +159,69 @@ enum AppConfigScenarios {
         Config.defaults = previousConfigDefaults
         Config.chatProviderStore = previousStore
 
-        // Local MLX provider upsert: active model id drives the provider entry.
+        // Local MLX provider upsert: the provider mirrors every downloaded
+        // catalog model, active first, so downloads land in chat pickers.
         Config.setBackend(.openai)
         let localDefaults = try context.defaults("local-mlx-provider")
         let localStore = ChatProviderStore(defaults: localDefaults)
         let previousMlxDefaults = Config.defaults
         Config.defaults = localDefaults
         Config.chatProviderStore = localStore
-        defer { Config.defaults = previousMlxDefaults }
-        try context.expect(Config.upsertLocalMLXProvider() == nil, "No active MLX model yields no provider")
-        // upsertLocalMLXProvider reads the active-model id from the
-        // process-standard suite (its MLX calls take no injected defaults);
-        // the fixture id is in the curated catalog, so seeding the single
-        // standard key with snapshot/restore is enough to drive the upsert.
-        let standard = UserDefaults.standard
-        let previousActiveModel = standard.string(forKey: "companionMLXActiveModel")
-        defer { standard.set(previousActiveModel, forKey: "companionMLXActiveModel") }
-        MLXServerConfig.setActiveModelID("mlx-community/Llama-3.2-1B-Instruct-4bit")
-        guard let first = Config.upsertLocalMLXProvider() else {
+        defer {
+            Config.defaults = previousMlxDefaults
+            Config.chatProviderStore = previousStore
+        }
+        let localHome = try context.temporaryDirectory("local-mlx-provider-home").path
+        try context.expect(Config.upsertLocalMLXProvider(home: localHome) == nil, "Nothing downloaded yields no provider")
+        // Two downloaded fixtures: the curated entry and a custom one. The
+        // curated id drives the mirror with real catalog data; the custom
+        // entry proves custom models land too.
+        let curatedID = MLXModelCatalog.entries[0].id
+        let fixtureDirectory = MLXModelCatalog.cacheDirectory(modelID: curatedID, home: localHome)
+            .appendingPathComponent("snapshots/fixture")
+        try FileManager.default.createDirectory(at: fixtureDirectory, withIntermediateDirectories: true)
+        for file in MLXModelCatalog.requiredFiles {
+            FileManager.default.createFile(atPath: fixtureDirectory.appendingPathComponent(file).path, contents: Data("fixture".utf8))
+        }
+        let customID = "mlx-community/Fixture-Custom-Provider-4bit"
+        let customDirectory = MLXModelCatalog.cacheDirectory(modelID: customID, home: localHome)
+            .appendingPathComponent("snapshots/fixture")
+        try FileManager.default.createDirectory(at: customDirectory, withIntermediateDirectories: true)
+        for file in MLXModelCatalog.requiredFiles {
+            FileManager.default.createFile(atPath: customDirectory.appendingPathComponent(file).path, contents: Data("fixture".utf8))
+        }
+        _ = MLXModelCatalog.addCustomEntry(
+            MLXModelCatalog.Entry(id: customID, displayName: "Fixture Custom Provider", sizeBytes: 1_000, ramBytes: 2_000, kind: .text, reasoning: nil),
+            defaults: localDefaults
+        )
+        MLXServerConfig.setActiveModelID(customID, defaults: localDefaults)
+        guard let first = Config.upsertLocalMLXProvider(home: localHome) else {
             throw CoverageContext.Failure(description: "Upserting the local MLX provider failed")
         }
         try context.equal(first.name, "Local (MLX)", "Upserted provider keeps its display name")
-        try context.expect(first.isLocalMLX == true, "Upserted provider flagged local")
-        try context.equal(first.models.count, 1, "Upserted provider carries its model")
-        guard let updated = Config.upsertLocalMLXProvider() else {
+        try context.expect(first.isLocalMLXProvider, "Upserted provider is the local kind")
+        try context.equal(first.models.count, 2, "Both downloaded models mirror into the provider")
+        try context.equal(first.models.first?.model, customID, "Active model sorts first")
+        try context.expect(first.models.contains { $0.model == curatedID }, "Curated download appears alongside the custom one")
+        guard let updated = Config.upsertLocalMLXProvider(home: localHome) else {
             throw CoverageContext.Failure(description: "Second upsert failed")
         }
         try context.equal(updated.id, first.id, "Repeated upsert preserves provider identity")
+        try context.equal(updated.models.map(\.model), first.models.map(\.model), "Repeated upsert keeps the mirrored rows")
         let stored = localStore.load()
         try context.expect(stored.contains { $0.kind == .localMLX }, "Local provider persisted through upsert")
+        // Deleting the last servable model drops the provider and releases
+        // the port by clearing the active choice.
+        try? FileManager.default.removeItem(at: customDirectory)
+        MLXModelCatalog.removeCustomEntry(id: customID, defaults: localDefaults)
+        MLXServerConfig.setActiveModelID(nil, defaults: localDefaults)
+        guard let remaining = Config.upsertLocalMLXProvider(home: localHome) else {
+            throw CoverageContext.Failure(description: "Post-delete upsert should keep the curated model")
+        }
+        try context.equal(remaining.models.map(\.model), [curatedID], "Delete re-mirrors without the removed model")
+        try? FileManager.default.removeItem(at: fixtureDirectory)
+        try context.expect(Config.upsertLocalMLXProvider(home: localHome) == nil, "Empty catalog drops the provider")
+        try context.expect(!localStore.load().contains { $0.kind == .localMLX }, "Empty catalog removes the stored provider")
     }
 
     private static func fetchModels(_ context: CoverageContext) async throws {

@@ -5,6 +5,14 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- Local models can be enabled and disabled per provider row in Preferences > AI. A disabled provider leaves the chat model picker, the default model and the template pickers, and disabling a local model stops its MLX server, so the port frees without deleting the provider
+
+### Fixed
+- Removing every local MLX model now releases the server port. Deletes used to stop only the Local Models page's own server instance, never the shared one serving chat, so the port stayed bound after the last model went away. The shared stop also clears the stored active model, and deleting a local provider from the AI tab does the same
+- Local models appear in the chat providers list as soon as they finish downloading. The provider mirror ran only on preference open and on catalog changes, so a fresh download never landed in the main chat picker until something else forced a rewrite. The mirror now covers curated plus custom models, keeps the active model in the list before its weights land, preserves model ids across rewrites, and drops the provider when nothing is downloaded and nothing is active
+
 ## [1.6.3] - 2026-11-02
 ### Fixed
 - Automatic update checks now run on launch. The updater was only started on the first toggle of the preference or the first manual Check for Updates, so with automatic checks enabled the app could sit through every launch without ever contacting the update feed

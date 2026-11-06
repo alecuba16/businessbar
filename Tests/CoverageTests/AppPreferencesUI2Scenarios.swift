@@ -494,18 +494,21 @@ enum AppPreferencesUI2Scenarios {
         MLXServerConfig.setActiveModelID(downloadedID, defaults: defaults)
         await ui2Settle()
         try context.equal(MLXServerConfig.activeModelID(defaults: defaults), downloadedID, "Fixture model activation persists")
-        // upsertLocalMLXProvider resolves the active id and its catalog
-        // entry from the process-standard suite, so the upsert drive uses
-        // the curated id the Use press already activated in the injected
-        // suite; the standard key is seeded with snapshot/restore.
-        let standardDefaults = UserDefaults.standard
-        let previousStandardActive = standardDefaults.string(forKey: "companionMLXActiveModel")
-        defer { standardDefaults.set(previousStandardActive, forKey: "companionMLXActiveModel") }
-        MLXServerConfig.setActiveModelID(MLXModelCatalog.entries[0].id)
-        _ = Config.upsertLocalMLXProvider()
+        // The upsert mirrors downloaded models through the injected
+        // seams, so the drive passes the fixture home directly; the
+        // downloaded custom entry and the activated id are both in the
+        // suite the section already wrote.
+        _ = Config.upsertLocalMLXProvider(home: home)
+        guard let localProvider = Config.chatProviderStore.load().first(where: { $0.isLocalMLXProvider }) else {
+            throw CoverageContext.Failure(description: "Local MLX provider missing after upsert")
+        }
         try context.expect(
-            Config.chatProviderStore.load().contains { $0.isLocalMLXProvider },
-            "Local MLX provider upserted after activation"
+            localProvider.models.contains { $0.model == downloadedID },
+            "Downloaded fixture model mirrors into the provider"
+        )
+        try context.expect(
+            localProvider.models.first?.model == downloadedID,
+            "Active model sorts first in the mirrored list"
         )
 
         // Port and idle settings persist through the config layer.
@@ -1297,8 +1300,19 @@ enum AppPreferencesUI2Scenarios {
     /// host, AX value writes move the field's accessibility value but not the
     /// SwiftUI binding, so the Check button never enables without a seam.
     static func localModelsDeep(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
         let defaults = try context.defaults("local-models-deep")
         defaults.registerDefaults()
+        // The Delete and download paths re-mirror the chat provider list;
+        // swapping the service seams keeps those writes inside the suite.
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+        }
 
         let home = try context.temporaryDirectory("local-models-deep-home").path
         let downloadedID = "mlx-community/Fixture-Deep-4bit"

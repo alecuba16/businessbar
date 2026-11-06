@@ -161,7 +161,9 @@ struct ChatView: View {
     /// models on the same
     /// history without restarting anything.
     private var controlBar: some View {
-        let providers = CompanionConfigService.chatProviders()
+        // Disabled providers stay out of the picker: hiding one should not
+        // leave a selected-but-invisible row behind.
+        let providers = CompanionConfigService.selectableProviders()
         return HStack(spacing: 8) {
             if !providers.isEmpty {
                 Picker("Model", selection: Binding(
@@ -914,7 +916,7 @@ struct ChatView: View {
     /// saves.
     private var hasConfiguredProvider: Bool {
         _ = settingsRevision
-        return !CompanionConfigService.chatProviders().isEmpty
+        return !CompanionConfigService.selectableProviders().isEmpty
     }
 
     /// Gate refreshed on settings saves while the panel is open, so the
