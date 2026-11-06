@@ -5,7 +5,7 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.4] - 2026-11-06
 ### Added
 - Local models can be enabled and disabled per provider row in Preferences > AI. A disabled provider leaves the chat model picker, the default model and the template pickers, and disabling a local model stops its MLX server, so the port frees without deleting the provider
 
