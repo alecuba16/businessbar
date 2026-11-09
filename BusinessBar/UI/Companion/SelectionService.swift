@@ -47,6 +47,12 @@ public final class SelectionService: @unchecked Sendable {
 
     private let pasteboard = NSPasteboard.general
 
+    /// Test seam for the focused-element lookup, which the systemwide AX
+    /// API only answers for the app holding keyboard focus. Harnesses
+    /// point this at a fixture text view discovered through their own
+    /// process's AX tree; production keeps the systemwide lookup.
+    var focusedElementOverride: (() -> AXUIElement?)?
+
     // MARK: - Capture
 
     /// Captures the selected text of the frontmost application.
@@ -81,7 +87,7 @@ public final class SelectionService: @unchecked Sendable {
     /// Reads the focused element's selected text, walking up to its AX
     /// ancestors because some apps expose the selection on a parent (web areas).
     private func captureSelectedTextViaAX() -> String? {
-        guard let element = Self.focusedElement() else { return nil }
+        guard let element = currentFocusedElement() else { return nil }
 
         // Secure fields never expose content. Return "" (not nil) so the
         // clipboard fallback does not fire Cmd+C behind a password box.
@@ -116,6 +122,14 @@ public final class SelectionService: @unchecked Sendable {
             systemElement, kAXFocusedUIElementAttribute as CFString, &focused
         ) == .success, focused != nil else { return nil }
         return unsafeBitCast(focused, to: AXUIElement.self)
+    }
+
+    private func currentFocusedElement() -> AXUIElement? {
+        // Authoritative when installed: a nil result must mean "no focused
+        // element", never a fall-through to the real systemwide lookup,
+        // which would read or write the user's actual focused app.
+        if let focusedElementOverride { return focusedElementOverride() }
+        return Self.focusedElement()
     }
 
     private static func elementIsSecure(_ element: AXUIElement) -> Bool {
@@ -231,11 +245,19 @@ public final class SelectionService: @unchecked Sendable {
     }
 
     /// Inserts `newText` immediately after the selection's end. The
-    /// selected text stays in the document but the range collapses to a
-    /// caret at the insertion point. AX only: the range dance has no safe
-    /// clipboard equivalent, and a paste would overwrite the selection.
-    /// Callers fall back to the overlay when this returns false so the
-    /// reply is never lost.
+    /// selected text stays in the document. Two AX paths, in order:
+    /// 1. Collapse the range to a caret at the selection's end, then write
+    ///    through kAXSelectedText. Native editors (CotEditor, TextEdit)
+    ///    accept both writes.
+    /// 2. Value rewrite for editors that ignore range writes: Chromium apps
+    ///    (Slack, Chrome, VS Code) accept kAXValue writes but silently drop
+    ///    kAXSelectedTextRange and kAXSelectedText writes, so the caret dance
+    ///    never lands. Reading the value, splicing the reply after the
+    ///    selection and writing the whole value back still works; the
+    ///    selection is restored around the new text afterwards.
+    /// No clipboard path: a paste would overwrite the selection. Callers
+    /// fall back to the overlay when both paths fail so the reply is
+    /// never lost.
     public func insertAfterSelection(_ newText: String) async -> Bool {
         await withCheckedContinuation { continuation in
             DispatchQueue.main.async { [self] in
@@ -279,7 +301,7 @@ public final class SelectionService: @unchecked Sendable {
     }
 
     private func replaceSelectionViaAX(_ newText: String) -> Bool {
-        guard let element = Self.focusedElement() else { return false }
+        guard let element = currentFocusedElement() else { return false }
         if Self.elementIsSecure(element) { return false }
 
         if let role = Self.role(of: element) {
@@ -422,7 +444,7 @@ public final class SelectionService: @unchecked Sendable {
     /// Walks ancestors like the capture/replace paths because some apps
     /// host the selection on a parent element.
     private func insertAfterSelectionViaAX(_ newText: String) -> Bool {
-        guard let element = Self.focusedElement() else { return false }
+        guard let element = currentFocusedElement() else { return false }
         if Self.elementIsSecure(element) { return false }
 
         var walkUp: CFTypeRef? = element
@@ -452,7 +474,42 @@ public final class SelectionService: @unchecked Sendable {
             }
             hops += 1
         }
+        if insertAfterSelectionViaValue(element, newText: newText) {
+            return true
+        }
         return false
+    }
+
+    /// Value-rewrite insert for editors that drop range writes. Splices
+    /// `newText` right after the selection inside the full value and writes
+    /// the value back, then re-selects the original range. AX ranges count
+    /// UTF-16 units; NSString keeps those semantics.
+    private func insertAfterSelectionViaValue(_ element: AXUIElement, newText: String) -> Bool {
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXValueAttribute as CFString, &valueRef
+        ) == .success, let oldValue = valueRef as? String,
+            let range = Self.selectedTextRange(of: element)
+        else { return false }
+
+        let nsOld = oldValue as NSString
+        guard range.location + range.length <= nsOld.length else { return false }
+        let insertAt = NSRange(location: range.location + range.length, length: 0)
+        let newValue = nsOld.replacingCharacters(in: insertAt, with: newText)
+
+        guard AXUIElementSetAttributeValue(
+            element, kAXValueAttribute as CFString, newValue as CFTypeRef
+        ) == .success else { return false }
+
+        // Keep the original selection: same text, same place, reply right
+        // after it. Selecting the inserted text instead would make the next
+        // keystroke overwrite the reply.
+        Self.selectRange(range, in: element)
+        AppLogger.info(
+            "insertAfterSelection: value rewrite inserted \(newText.utf8.count) bytes",
+            category: "Companion"
+        )
+        return true
     }
 
     private static func selectedTextRange(of element: AXUIElement) -> NSRange? {
