@@ -5,6 +5,10 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.5] - 2026-11-09
+### Added
+- Selection rewrite and insert-after-selection now have real test coverage behind a focused-element seam in SelectionService, lifting whole-app line coverage above the 90% gate (llvm_lines 92.66%, unique_lines 91.35%). The clipboard fallbacks stay deliberately uncovered: they post real keystrokes to whatever app is frontmost, which the coverage harness must never do
+
 ## [1.6.4] - 2026-11-06
 ### Added
 - Local models can be enabled and disabled per provider row in Preferences > AI. A disabled provider leaves the chat model picker, the default model and the template pickers, and disabling a local model stops its MLX server, so the port frees without deleting the provider
