@@ -47,6 +47,12 @@ public final class SelectionService: @unchecked Sendable {
 
     private let pasteboard = NSPasteboard.general
 
+    /// Test seam for the focused-element lookup, which the systemwide AX
+    /// API only answers for the app holding keyboard focus. Harnesses
+    /// point this at a fixture text view discovered through their own
+    /// process's AX tree; production keeps the systemwide lookup.
+    var focusedElementOverride: (() -> AXUIElement?)?
+
     // MARK: - Capture
 
     /// Captures the selected text of the frontmost application.
@@ -81,7 +87,7 @@ public final class SelectionService: @unchecked Sendable {
     /// Reads the focused element's selected text, walking up to its AX
     /// ancestors because some apps expose the selection on a parent (web areas).
     private func captureSelectedTextViaAX() -> String? {
-        guard let element = Self.focusedElement() else { return nil }
+        guard let element = currentFocusedElement() else { return nil }
 
         // Secure fields never expose content. Return "" (not nil) so the
         // clipboard fallback does not fire Cmd+C behind a password box.
@@ -116,6 +122,14 @@ public final class SelectionService: @unchecked Sendable {
             systemElement, kAXFocusedUIElementAttribute as CFString, &focused
         ) == .success, focused != nil else { return nil }
         return unsafeBitCast(focused, to: AXUIElement.self)
+    }
+
+    private func currentFocusedElement() -> AXUIElement? {
+        // Authoritative when installed: a nil result must mean "no focused
+        // element", never a fall-through to the real systemwide lookup,
+        // which would read or write the user's actual focused app.
+        if let focusedElementOverride { return focusedElementOverride() }
+        return Self.focusedElement()
     }
 
     private static func elementIsSecure(_ element: AXUIElement) -> Bool {
@@ -287,7 +301,7 @@ public final class SelectionService: @unchecked Sendable {
     }
 
     private func replaceSelectionViaAX(_ newText: String) -> Bool {
-        guard let element = Self.focusedElement() else { return false }
+        guard let element = currentFocusedElement() else { return false }
         if Self.elementIsSecure(element) { return false }
 
         if let role = Self.role(of: element) {
@@ -430,7 +444,7 @@ public final class SelectionService: @unchecked Sendable {
     /// Walks ancestors like the capture/replace paths because some apps
     /// host the selection on a parent element.
     private func insertAfterSelectionViaAX(_ newText: String) -> Bool {
-        guard let element = Self.focusedElement() else { return false }
+        guard let element = currentFocusedElement() else { return false }
         if Self.elementIsSecure(element) { return false }
 
         var walkUp: CFTypeRef? = element

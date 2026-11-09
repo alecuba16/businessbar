@@ -37,6 +37,7 @@ enum AppCoverageScenarios {
         await run("views", failures: &failures) { try await AppViewScenarios.run(context) }
         await run("status", failures: &failures) { try await AppStatusScenarios.run(context) }
         await run("chat", failures: &failures) { try await AppChatScenarios.run(context) }
+        await run("selection-ax", failures: &failures) { try await AppSelectionAXScenarios.run(context) }
         await run("preferences-ui1", failures: &failures) { try await AppPreferencesUI1Scenarios.run(context) }
         await run("preferences-ui2", failures: &failures) { try await AppPreferencesUI2Scenarios.run(context) }
         await run("crash-acp", failures: &failures) { try await AppCrashAcpScenarios.run(context) }
