@@ -219,7 +219,7 @@ enum CoreMLXScenarios {
             try c.expect(error.errorDescription?.isEmpty == false, "store errors explain failure")
         }
         let knownModel = MLXModelCatalog.entries[0]
-        for error in [MLXServerManager.ServerError.modelNotDownloaded(knownModel.id), .portInUse(123), .startTimedOut(modelID: knownModel.id), .exitedDuringStart(modelID: knownModel.id)] {
+        for error in [MLXServerManager.ServerError.modelNotDownloaded(knownModel.id), .portInUse(123), .startTimedOut(modelID: knownModel.id), .exitedDuringStart(modelID: knownModel.id, stderr: [])] {
             try c.expect(error.errorDescription?.contains(knownModel.displayName) == true || error.errorDescription?.contains("123") == true, "server error includes resource")
         }
     }
@@ -738,7 +738,7 @@ enum CoreMLXScenarios {
                     try c.expect(error is CancellationError, "health sleep cancellation surfaced")
                     try c.equal(child.terminations, 1, "cancelled startup terminates fake child")
                 } else {
-                    try c.equal(error as? MLXServerManager.ServerError, .exitedDuringStart(modelID: model), "startup child death classified")
+                    try c.equal(error as? MLXServerManager.ServerError, .exitedDuringStart(modelID: model, stderr: []), "startup child death classified")
                     try c.equal(child.statusReads, 1, "starting exit callback consumed fake status")
                 }
             }
@@ -746,6 +746,7 @@ enum CoreMLXScenarios {
         }
         try await measuredPollingAndIdle(c, defaults: defaults, home: home, model: model, session: session)
         try await measuredDownloadProgress(c, defaults: defaults, home: home, model: model, directory: directory)
+        try await measuredStartupStderrSurfacing(c, defaults: defaults, home: home, model: model, session: session)
     }
 
     private static func measuredPollingAndIdle(_ c: CoverageContext, defaults: UserDefaults, home: String,
@@ -806,6 +807,38 @@ enum CoreMLXScenarios {
         try await settle { idleManager.state == .stopped }
         try c.equal(idleWakes, 2, "recent request reschedules idle timeout once")
         try c.equal(idleChild.terminations, 1, "rescheduled timeout unloads child once inactivity elapses")
+    }
+
+    /// A child that dies while starting must name the real reason from its
+    /// stderr, not the memory guess: the stub writes one failing line and
+    /// exits, and the surfaced error carries that line verbatim.
+    private static func measuredStartupStderrSurfacing(_ c: CoverageContext, defaults: UserDefaults,
+                                                        home: String, model: String, session: URLSession) async throws {
+        // /bin/sh writes the ModuleNotFoundError-style line to stderr, then
+        // exits nonzero: the same shape as a broken mlx venv.
+        let stubURL = URL(fileURLWithPath: home).appendingPathComponent("stderr-stub.sh")
+        try put("#!/bin/sh\necho 'ModuleNotFoundError: No module named mlx_vlm' >&2\nexit 1\n", at: stubURL)
+        let attributes = [FileAttributeKey.posixPermissions: 0o755]
+        try FileManager.default.setAttributes(attributes, ofItemAtPath: stubURL.path)
+
+        let server = MLXServerManager(defaults: defaults, home: home, driver: .live(registerForQuit: { _ in }),
+            session: session, resolvePython: { _ in stubURL.path }, portAvailable: { _ in true },
+            now: Date.init, sleep: { delay in try await Task.sleep(nanoseconds: min(delay, 200_000_000)) },
+            residentSize: { _ in 0 }, observeResources: { _ in })
+        defer { server.stop() }
+        MLXCoverageProtocol.serve { _ in throw URLError(.cannotConnectToHost) }
+        do {
+            try await server.start(modelID: model)
+            try c.expect(false, "stderr stub must fail startup")
+        } catch let error as MLXServerManager.ServerError {
+            guard case .exitedDuringStart(_, let stderr) = error else {
+                try c.expect(false, "dead stub classified as start exit")
+                return
+            }
+            try c.expect(stderr.contains(where: { $0.contains("ModuleNotFoundError") }), "child stderr reaches the surfaced error")
+            try c.expect(error.localizedDescription.contains("ModuleNotFoundError"), "error message names the real failure")
+            try c.expect(error.localizedDescription.contains("may not fit in memory") == false, "memory guess dropped when stderr exists")
+        }
     }
 
     private static func measuredDownloadProgress(_ c: CoverageContext, defaults: UserDefaults, home: String,

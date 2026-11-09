@@ -59,6 +59,7 @@ public final class MLXServerManager: ObservableObject {
         Notification.Name("com.businessbar.companion.mlxServerStateDidChange")
 
     private var process: Process?
+    private var stderrSink: LineBufferedPipeSink?
     private var healthPollTask: Task<Void, Never>?
     private var rssPollTask: Task<Void, Never>?
     private var idleTimer: Task<Void, Never>?
@@ -162,7 +163,16 @@ public final class MLXServerManager: ObservableObject {
             env["HF_HUB_OFFLINE"] = "1"
             child.environment = env
             child.standardOutput = Pipe()
-            child.standardError = Pipe()
+            let stderrPipe = Pipe()
+            child.standardError = stderrPipe
+            let sink = LineBufferedPipeSink()
+            sink.attach(to: stderrPipe) { line in
+                Self.log.info("mlx stderr: \(line, privacy: .public)")
+                // The sink keeps a lock-guarded tail; reading it from the
+                // health loop needs no actor hop and never races the throw.
+                sink.append(line)
+            }
+            stderrSink = sink
             driver.registerForQuit(child)
             child.terminationHandler = { [weak self] process in
                 Task { @MainActor in
@@ -183,6 +193,7 @@ public final class MLXServerManager: ObservableObject {
             refreshPeers()
         } catch {
             killChild()
+            stderrSink = nil
             state = .failed(reason: error.localizedDescription)
             resolveStartContinuations(with: error)
             refreshPeers()
@@ -235,7 +246,13 @@ public final class MLXServerManager: ObservableObject {
 
         while now() < deadline {
             guard let process, driver.isRunning(process) else {
-                throw ServerError.exitedDuringStart(modelID: modelID)
+                // The child is gone, but its last stderr lines may still be
+                // in flight on the pipe thread. The pipe hits EOF at child
+                // death and the sink flushes any partial line then, so
+                // waiting for EOF (bounded) is the deterministic point
+                // where the tail is final; a fixed sleep races under load.
+                stderrSink?.waitUntilDrained(timeout: 2)
+                throw ServerError.exitedDuringStart(modelID: modelID, stderr: stderrSink?.tailLines ?? [])
             }
             do {
                 let (_, response) = try await session.data(from: url)
@@ -318,6 +335,9 @@ public final class MLXServerManager: ObservableObject {
         guard state.isRunning || state == .starting else { return }
         cancelPolling()
         process = nil
+        // Do not clear stderrSink here: during startup the health loop is
+        // still waiting to surface the child's last stderr lines, and the
+        // sink is the only holder. start()'s catch and stop() clear it.
         residentBytes = 0
         if case .starting = state {
             // The health-wait loop observes the dead child and throws; this
@@ -345,6 +365,7 @@ public final class MLXServerManager: ObservableObject {
             child.terminationHandler = nil
             process = nil
         }
+        stderrSink = nil
     }
 
     // Quit-time kill table: applicationWillTerminate runs too late for async
@@ -465,7 +486,7 @@ public final class MLXServerManager: ObservableObject {
         case modelNotDownloaded(String)
         case portInUse(Int)
         case startTimedOut(modelID: String)
-        case exitedDuringStart(modelID: String)
+        case exitedDuringStart(modelID: String, stderr: [String])
 
         public var errorDescription: String? {
             switch self {
@@ -477,10 +498,119 @@ public final class MLXServerManager: ObservableObject {
             case .startTimedOut(let id):
                 let name = MLXModelCatalog.entry(id: id)?.displayName ?? id
                 return "\(name) took too long to start and was stopped."
-            case .exitedDuringStart(let id):
+            case .exitedDuringStart(let id, let stderr):
                 let name = MLXModelCatalog.entry(id: id)?.displayName ?? id
+                guard stderr.isEmpty else {
+                    // The child's own words beat any guess: import errors,
+                    // offline failures, missing files all land here.
+                    let tail = stderr.suffix(3).joined(separator: "\n")
+                    return "The server exited while starting. \(name): \(tail)"
+                }
                 return "The server exited while starting. \(name) may not fit in memory."
             }
         }
+    }
+}
+
+// MARK: - LineBufferedPipeSink
+
+/// Drains a child's stderr pipe line by line and keeps the last lines in a
+/// lock-guarded tail. An undrained pipe would also block the child once its
+/// 64KB buffer fills, so reading is required for correctness, not just
+/// diagnostics. The tail is the raw material for the start-failure message:
+/// the health loop reads it right after the child dies, possibly from a
+/// different thread than the pipe handler, so every access takes the lock.
+final class LineBufferedPipeSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var tail: [String] = []
+    private var reachedEOF = false
+    private var handler: ((String) -> Void)?
+    private var fileHandle: FileHandle?
+
+    func attach(to pipe: Pipe, onLine: @escaping (String) -> Void) {
+        lock.lock()
+        handler = onLine
+        fileHandle = pipe.fileHandleForReading
+        lock.unlock()
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                self?.markEOF()
+                return
+            }
+            self?.consume(chunk)
+        }
+    }
+
+    private func markEOF() {
+        lock.lock()
+        reachedEOF = true
+        // A final line without a trailing newline never passes through the
+        // newline splitter; flush it now so the tail is complete at EOF.
+        var lines: [String] = []
+        if !buffer.isEmpty {
+            let line = String(data: buffer, encoding: .utf8) ?? ""
+            buffer.removeAll()
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { lines.append(trimmed) }
+        }
+        let handler = handler
+        lock.unlock()
+        for line in lines { handler?(line) }
+    }
+
+    /// Blocks the calling thread until the pipe reached EOF (all child
+    /// stderr delivered) or the timeout expires. Returns early when EOF
+    /// already happened.
+    func waitUntilDrained(timeout seconds: TimeInterval) {
+        let deadline = DispatchTime.now() + seconds
+        lock.lock()
+        defer { lock.unlock() }
+        while !reachedEOF && DispatchTime.now() < deadline {
+            lock.unlock()
+            Thread.sleep(forTimeInterval: 0.01)
+            lock.lock()
+        }
+    }
+
+    /// Records a line in the bounded tail. Called from the pipe handler
+    /// thread and from `attach`'s callback; the lock keeps the two safe.
+    func append(_ line: String) {
+        lock.lock()
+        tail.append(line)
+        if tail.count > 50 {
+            tail.removeFirst(tail.count - 50)
+        }
+        lock.unlock()
+    }
+
+    /// The last recorded lines, oldest first.
+    var tailLines: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return tail
+    }
+
+    private func consume(_ chunk: Data) {
+        lock.lock()
+        buffer.append(chunk)
+        var lines: [String] = []
+        while let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+            let lineData = buffer[buffer.startIndex..<newlineIndex]
+            let line = String(data: Data(lineData), encoding: .utf8) ?? ""
+            buffer.removeSubrange(buffer.startIndex...newlineIndex)
+            lines.append(line.trimmingCharacters(in: .whitespaces))
+        }
+        let handler = handler
+        lock.unlock()
+        for line in lines {
+            handler?(line)
+        }
+    }
+
+    deinit {
+        fileHandle?.readabilityHandler = nil
     }
 }
