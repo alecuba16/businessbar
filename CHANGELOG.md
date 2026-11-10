@@ -5,6 +5,10 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.6] - 2026-11-10
+### Fixed
+- Insert-after-selection templates (like Improve writing) now insert the reply in Slack and other Chromium editors. Those editors answer the selected-text AX write with success and then drop it, so the rewrite reported success, skipped the value-splice fallback and left the reply nowhere; the caret collapse in the same path also destroyed the selection, which surfaced as a confusing "No text is selected" on the next trigger. Every selected-text write is now verified by re-reading the value, a no-op write restores the selection it collapsed and falls through to the value rewrite, and the overlay Replace button gets the same verification so it no longer claims a phantom success
+
 ## [1.6.5] - 2026-11-09
 ### Added
 - Selection rewrite and insert-after-selection now have real test coverage behind a focused-element seam in SelectionService, lifting whole-app line coverage above the 90% gate (llvm_lines 92.66%, unique_lines 91.35%). The clipboard fallbacks stay deliberately uncovered: they post real keystrokes to whatever app is frontmost, which the coverage harness must never do
