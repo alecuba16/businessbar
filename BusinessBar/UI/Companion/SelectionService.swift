@@ -311,13 +311,17 @@ public final class SelectionService: @unchecked Sendable {
         // Preferred: setting kAXSelectedText replaces the selection in
         // place. Some apps host the selection on a parent of the focused
         // element, so the write walks ancestors exactly like the capture.
+        // Chromium editors answer the write with .success and drop it, so
+        // the value is re-read after each write and a no-op write keeps the
+        // walk going instead of reporting a phantom success.
         var walkUp: CFTypeRef? = element
         var hops = 0
         while let current = walkUp, hops < 5 {
             let candidate = unsafeBitCast(current, to: AXUIElement.self)
+            let before = Self.value(of: candidate)
             if AXUIElementSetAttributeValue(
                 candidate, kAXSelectedTextAttribute as CFString, newText as CFTypeRef
-            ) == .success {
+            ) == .success, Self.value(of: candidate) != before {
                 return true
             }
             var parent: CFTypeRef?
@@ -337,10 +341,7 @@ public final class SelectionService: @unchecked Sendable {
 
         // Fallback for elements that only support setting the full value:
         // replace the selected range inside the value, then re-select it.
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element, kAXValueAttribute as CFString, &valueRef
-        ) == .success, let oldValue = valueRef as? String,
+        guard let oldValue = Self.value(of: element),
             let range = Self.selectedTextRange(of: element)
         else {
             AppLogger.warning("replaceSelection: element exposes no value or selected range", category: "Companion")
@@ -366,6 +367,14 @@ public final class SelectionService: @unchecked Sendable {
             element, kAXRoleAttribute as CFString, &roleRef
         ) == .success else { return nil }
         return roleRef as? String
+    }
+
+    private static func value(of element: AXUIElement) -> String? {
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXValueAttribute as CFString, &valueRef
+        ) == .success else { return nil }
+        return valueRef as? String
     }
 
     /// Last resort for editors that reject every AX write: snapshot the
@@ -439,10 +448,18 @@ public final class SelectionService: @unchecked Sendable {
         return (keyCode, flags)
     }
 
-    /// AX-only insert: collapse the selection to a caret at its end, then
+    /// AX-only insert. Collapse the selection to a caret at its end, then
     /// write the text through kAXSelectedText, which inserts at the caret.
     /// Walks ancestors like the capture/replace paths because some apps
     /// host the selection on a parent element.
+    ///
+    /// Chromium editors (Slack, Chrome, VS Code) answer the selected-text
+    /// write with .success and then drop it, so each write is verified by
+    /// re-reading the value: a write that changed nothing is a phantom
+    /// success and the walk continues to the next candidate, eventually
+    /// reaching `insertAfterSelectionViaValue`, which those editors honor.
+    /// The collapsed caret also destroys the user's selection, so a phantom
+    /// write restores the original range before falling through.
     private func insertAfterSelectionViaAX(_ newText: String) -> Bool {
         guard let element = currentFocusedElement() else { return false }
         if Self.elementIsSecure(element) { return false }
@@ -452,6 +469,7 @@ public final class SelectionService: @unchecked Sendable {
         while let current = walkUp, hops < 5 {
             let candidate = unsafeBitCast(current, to: AXUIElement.self)
             if let range = Self.selectedTextRange(of: candidate) {
+                let before = Self.value(of: candidate)
                 // Collapse to the end of the selection, then insert there.
                 var caret = CFRange(location: range.location + range.length, length: 0)
                 if let axValue = AXValueCreate(.cfRange, &caret),
@@ -460,9 +478,12 @@ public final class SelectionService: @unchecked Sendable {
                     ) == .success,
                     AXUIElementSetAttributeValue(
                         candidate, kAXSelectedTextAttribute as CFString, newText as CFTypeRef
-                    ) == .success {
+                    ) == .success,
+                    Self.value(of: candidate) != before {
                     return true
                 }
+                // The writes were dropped: put the user's selection back.
+                Self.selectRange(range, in: candidate)
             }
             var parent: CFTypeRef?
             if AXUIElementCopyAttributeValue(
@@ -485,10 +506,7 @@ public final class SelectionService: @unchecked Sendable {
     /// the value back, then re-selects the original range. AX ranges count
     /// UTF-16 units; NSString keeps those semantics.
     private func insertAfterSelectionViaValue(_ element: AXUIElement, newText: String) -> Bool {
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element, kAXValueAttribute as CFString, &valueRef
-        ) == .success, let oldValue = valueRef as? String,
+        guard let oldValue = Self.value(of: element),
             let range = Self.selectedTextRange(of: element)
         else { return false }
 
