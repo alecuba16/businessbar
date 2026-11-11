@@ -32,6 +32,9 @@ enum Constants {
         static let featureNoSleep = "featureNoSleep"
         static let featureNotifications = "featureNotifications"
         static let featureBadges = "featureBadges"
+        // Confirmation popups for new events / invitations (opt-in).
+        static let notifyNewEvents = "notifyNewEvents"
+        static let notifyPendingInvites = "notifyPendingInvites"
         // LLM Companion
         static let featureCompanion = "featureCompanion"
         static let companionBaseURL = "companionBaseURL"

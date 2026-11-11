@@ -35,9 +35,6 @@ private final class UI2Hosted<Content: View> {
     var text: String {
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         return OwnedAccessibility.elements(in: host).flatMap { element in
             [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String].compactMap { $0 }
         }.joined(separator: "\n")
@@ -47,9 +44,6 @@ private final class UI2Hosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         return OwnedAccessibility.elements(in: host).first { element in
             element.accessibilityLabel() == name || element.accessibilityTitle() == name || (element.accessibilityValue() as? String) == name
         }
@@ -69,9 +63,6 @@ private final class UI2Hosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         let matches = OwnedAccessibility.elements(in: host).filter {
             $0.accessibilityLabel() == name || $0.accessibilityTitle() == name || ($0.accessibilityValue() as? String) == name
         }
@@ -117,9 +108,6 @@ private final class UI2Hosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         let checkboxes = OwnedAccessibility.elements(in: host).filter {
             ($0.accessibilityRole() as? String ?? "").contains("CheckBox")
         }
@@ -127,6 +115,31 @@ private final class UI2Hosted<Content: View> {
             throw CoverageContext.Failure(description: "Checkbox not found or disabled at index \(index): \(label)")
         }
         _ = checkboxes[index].accessibilityPerformPress()
+    }
+
+    /// Presses the unnamed Form Toggle checkbox that follows the label
+    /// text in the flat element order. On this host SwiftUI rows split into
+    /// a label element then the checkbox, so pairing by order survives reflow.
+    func pressCheckbox(afterLabel label: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        let elements = OwnedAccessibility.elements(in: host)
+        guard let labelIndex = elements.firstIndex(where: {
+            ($0.accessibilityLabel() ?? "").contains(label)
+                || ($0.accessibilityTitle() ?? "").contains(label)
+                || (($0.accessibilityValue() as? String) ?? "").contains(label)
+        }),
+              let checkbox = elements[(labelIndex + 1)...].first(where: {
+                  ($0.accessibilityRole() as? String ?? "").contains("CheckBox") && $0.isAccessibilityEnabled()
+        }) else {
+            let checkboxes = elements.enumerated().compactMap { index, element -> String? in
+                guard (element.accessibilityRole() as? String ?? "").contains("CheckBox") else { return nil }
+                return "#\(index) role=\(element.accessibilityRole() ?? nil) label=\(element.accessibilityLabel() ?? "-") title=\(element.accessibilityTitle() ?? "-") enabled=\(element.isAccessibilityEnabled())"
+            }
+            throw CoverageContext.Failure(description: "Checkbox after label not found or disabled: \(label)\nCheckboxes:\n\(checkboxes.joined(separator: "\n"))")
+        }
+        _ = checkbox.accessibilityPerformPress()
     }
 
     /// Presses a borderless image button located by its help tooltip.
@@ -150,9 +163,6 @@ private final class UI2Hosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         let all = OwnedAccessibility.elements(in: host)
         guard let row = all.lastIndex(where: { element in
             [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String]
@@ -220,16 +230,26 @@ private func ui2Settle() async {
 enum AppPreferencesUI2Scenarios {
     static func run(_ context: CoverageContext) async throws {
         var failures: [String] = []
-        do { try await toolsSection(context) } catch { failures.append("toolsSection: \(error)") }
-        do { try await toolsSectionDeep(context) } catch { failures.append("toolsSectionDeep: \(error)") }
-        do { try await localModelsSection(context) } catch { failures.append("localModelsSection: \(error)") }
-        do { try await localModelsDeep(context) } catch { failures.append("localModelsDeep: \(error)") }
-        do { try await localModelsTail(context) } catch { failures.append("localModelsTail: \(error)") }
-        do { try await localModelsCustomFlow(context) } catch { failures.append("localModelsCustomFlow: \(error)") }
-        do { try await calendarsTab(context) } catch { failures.append("calendarsTab: \(error)") }
-        do { try await calendarsTabDeep(context) } catch { failures.append("calendarsTabDeep: \(error)") }
-        do { try await calendarsTabReset(context) } catch { failures.append("calendarsTabReset: \(error)") }
-        do { try await calendarsTabGoogle(context) } catch { failures.append("calendarsTabGoogle: \(error)") }
+        func timed(_ name: String, _ operation: () async throws -> Void) async {
+            let started = Date()
+            do {
+                try await operation()
+                print("BLOCK: ui2 \(name) in \(Int(Date().timeIntervalSince(started)))s")
+            } catch {
+                failures.append("\(name): \(error)")
+            }
+        }
+        await timed("toolsSection") { try await toolsSection(context) }
+        await timed("toolsSectionDeep") { try await toolsSectionDeep(context) }
+        await timed("localModelsSection") { try await localModelsSection(context) }
+        await timed("localModelsDeep") { try await localModelsDeep(context) }
+        await timed("localModelsTail") { try await localModelsTail(context) }
+        await timed("localModelsCustomFlow") { try await localModelsCustomFlow(context) }
+        await timed("calendarsTab") { try await calendarsTab(context) }
+        await timed("calendarsTabDeep") { try await calendarsTabDeep(context) }
+        await timed("calendarsTabReset") { try await calendarsTabReset(context) }
+        await timed("calendarsTabConfirmations") { try await calendarsTabConfirmations(context) }
+        await timed("calendarsTabGoogle") { try await calendarsTabGoogle(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
@@ -1098,6 +1118,124 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(openedURLs.filter { $0.contains("notifications") }.count >= 2, "Notification settings open routes through the seam")
     }
 
+    /// The opt-in confirmation toggles: enable while authorized persists
+    /// directly, disable routes through assign(false), and enable-before-auth
+    /// defers to the system request. Checkbox order on the rendered layout:
+    /// 0 feature, 1 calendar row, 2 tomorrow, 3 declined, 4 meeting
+    /// notifications, 5 end-of-event, 6 new-event confirmations,
+    /// 7 pending-invite confirmations.
+    static func calendarsTabConfirmations(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("calendars-tab-confirmations")
+        defaults.registerDefaults()
+        let auth = GoogleAuth(dependencies: .init(loadCredential: { throw CoverageContext.Failure(description: "fixture") }, saveCredential: { _ in }, deleteCredential: {}, configuration: { .init(clientNumber: "YOUR_FIXTURE", clientSecret: "YOUR_FIXTURE") }, request: { _ in throw CoverageContext.Failure(description: "fixture") }, openURL: { _ in false }))
+        let meetings = MeetingManager(eventStore: UI2CalendarBoundary(), defaults: defaults, notificationCenter: NotificationCenter())
+
+        var requestGrants: [Bool] = []
+        var reportedStatuses: [UNAuthorizationStatus] = []
+        // refreshAuthStatus answers appear-time authorization queries through
+        // this latch. The phases below hold it closed so the press lands
+        // before the async status callback, like a user beating it.
+        var appearAuthorizationAnswers: [(Bool) -> Void] = []
+        // The tab flips the notifications master flag off when the appear
+        // callback answers false, so the authorized phase must answer true.
+        func makeTab(status: UNAuthorizationStatus, granted: Bool) -> UI2Hosted<some View> {
+            UI2Hosted(
+                CalendarsTab(
+                    meetingManager: meetings,
+                    googleAuth: auth,
+                    defaults: defaults,
+                    calendarAuthorization: { .fullAccess },
+                    notificationAuthorization: { receive in
+                        appearAuthorizationAnswers.append(receive)
+                    },
+                    notificationCenterAuthorizationStatus: { receive in
+                        reportedStatuses.append(status)
+                        receive(status)
+                    },
+                    notificationCenterRequestAuthorization: { receive in
+                        requestGrants.append(granted)
+                        receive(granted)
+                    },
+                    isRuntimeBundlePresent: true
+                ).defaultAppStorage(defaults),
+                size: NSSize(width: 900, height: 1400)
+            )
+        }
+
+        // Enable while already authorized: the flag persists with no request.
+        // Release the appear latch with granted=true first so the master
+        // flag stays on and the toggles stay pressable.
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        let authorizedTab = makeTab(status: .authorized, granted: true)
+        defer { authorizedTab.close() }
+        await ui2Settle()
+        appearAuthorizationAnswers.forEach { $0(true) }
+        appearAuthorizationAnswers.removeAll()
+        await ui2Settle()
+        try authorizedTab.pressCheckbox(afterLabel: "Notify when a new event is added", context)
+        for _ in 0..<20 where !defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyNewEvents) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyNewEvents), "Authorized enable persists the new-event toggle")
+        try context.expect(reportedStatuses.isEmpty, "Authorized enable never asks the system")
+        try authorizedTab.pressCheckbox(afterLabel: "Notify when an invitation needs an answer", context)
+        for _ in 0..<20 where !defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyPendingInvites) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyPendingInvites), "Authorized enable persists the pending-invites toggle")
+
+        // Disable: the assign(false) branch runs, no request involved.
+        try authorizedTab.pressCheckbox(afterLabel: "Notify when a new event is added", context)
+        for _ in 0..<20 where defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyNewEvents) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyNewEvents), "Disable routes through the assign(false) branch")
+
+        // Enable before the appear callback lands, system answers granted:
+        // the press queues the assignment and the granted answer completes
+        // it. The latch stays closed until after the press.
+        defaults.set(false, forKey: BusinessBar.Constants.Defaults.notifyPendingInvites)
+        let requestTab = makeTab(status: .notDetermined, granted: true)
+        defer { requestTab.close() }
+        await ui2Settle()
+        try requestTab.pressCheckbox(afterLabel: "Notify when an invitation needs an answer", context)
+        appearAuthorizationAnswers.forEach { $0(true) }
+        appearAuthorizationAnswers.removeAll()
+        for _ in 0..<20 where requestGrants.isEmpty {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        for _ in 0..<20 where !defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyPendingInvites) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(requestGrants == [true], "Unauthorized enable asks the system once")
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyPendingInvites), "Granted answer completes the pending toggle")
+
+        // Enable before the appear callback lands, system answers denied:
+        // the flag stays off. The latch stays closed until after the press.
+        defaults.set(false, forKey: BusinessBar.Constants.Defaults.notifyNewEvents)
+        let deniedTab = makeTab(status: .notDetermined, granted: false)
+        defer { deniedTab.close() }
+        await ui2Settle()
+        try deniedTab.pressCheckbox(afterLabel: "Notify when a new event is added", context)
+        appearAuthorizationAnswers.forEach { $0(false) }
+        appearAuthorizationAnswers.removeAll()
+        for _ in 0..<20 where requestGrants.count < 2 {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        for _ in 0..<20 where defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyNewEvents) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyNewEvents), "Denied answer keeps the new-event toggle off")
+    }
+
     /// Google-provider and request-tail paths the deep scenarios leave
     /// cold: both signInWithGoogle outcome branches through an injected
     /// OAuth fixture, the eventKit requestAccess catch branch through a
@@ -1449,6 +1587,7 @@ enum AppPreferencesUI2Scenarios {
             [.init(id: "preferences", title: "Coverage calendar", color: "#227744", source: "Fixture")]
         }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+        func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool { false }
     }
 
     /// Store variant whose request answers denied: exercises the
@@ -1457,6 +1596,7 @@ enum AppPreferencesUI2Scenarios {
         func requestAccess() async throws -> Bool { false }
         func fetchCalendars() async throws -> [MBCalendar] { [] }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+        func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool { false }
     }
 
     /// Store variant whose request answers granted: exercises the granted
@@ -1467,6 +1607,7 @@ enum AppPreferencesUI2Scenarios {
             [.init(id: "granted", title: "Coverage calendar granted", color: "#227744", source: "Fixture")]
         }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+        func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool { false }
     }
 
     /// Store variant whose request throws: exercises the requestAccess
@@ -1479,6 +1620,7 @@ enum AppPreferencesUI2Scenarios {
         }
         func fetchCalendars() async throws -> [MBCalendar] { [] }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+        func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool { false }
     }
 
     /// Deep pass over the tools rows and the three configure sheets:

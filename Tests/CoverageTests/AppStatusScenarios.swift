@@ -213,6 +213,20 @@ enum AppStatusScenarios {
         f.controller.menuWillOpen(menu)
         try invoke("Deactivate", menu, c)
         try c.expect(!f.noSleep.isActive, "Menu deactivation releases isolated NoSleep manager")
+
+        // Pending invitations section: the row lists the invite and the
+        // answer action delegates to the injected panel effect.
+        f.store.events = [f.invite(minutes: 30)]
+        await f.meetings.refreshEvents()
+        await settle()
+        f.controller.menuWillOpen(menu)
+        guard let answerItem = menu.items.first(where: { $0.title.hasPrefix("Status invite ·") }) else {
+            throw CoverageContext.Failure(description: "Pending invitations row missing")
+        }
+        try c.equal(f.answerOpens, 0, "Answer effect not triggered yet")
+        try c.expect(NSApp.sendAction(answerItem.action!, to: answerItem.target, from: answerItem), "Answer row dispatches")
+        try c.equal(f.answerOpens, 1, "Invitation row opens the RSVP panel effect")
+
         f.controller.menuWillOpen(menu)
         guard let durations = menu.item(withTitle: "Activate for...")?.submenu else {
             throw CoverageContext.Failure(description: "Missing NoSleep duration menu")
@@ -283,6 +297,7 @@ enum AppStatusScenarios {
         func requestAccess() async throws -> Bool { false }
         func fetchCalendars() async throws -> [MBCalendar] { [.init(id: "status", title: "Status", color: "#228844", source: "Fixture")] }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { events }
+        func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool { false }
     }
 
     private final class Monitor: BadgeMonitoring {
@@ -336,6 +351,7 @@ enum AppStatusScenarios {
         var clientAvailable = false
         var rewrites: [PromptTemplate] = []
         var toastMessages: [String] = []
+        var answerOpens = 0
 
         init(_ c: CoverageContext) throws {
             defaults = try c.defaults("status")
@@ -383,6 +399,7 @@ enum AppStatusScenarios {
             effects.closePopover = { [unowned self] in closedPopovers.append($0) }
             effects.scheduleDismiss = { [unowned self] in dismissals.append($0) }
             effects.quit = { [unowned self] in quits += 1 }
+            effects.answerInvites = { [unowned self] in answerOpens += 1 }
             controller = StatusBarController(meetingManager: meetings, badgeManager: badges, noSleepManager: noSleep, defaults: defaults, notifications: notifications, effects: effects, onShowPreferences: { [unowned self] in preferenceOpens += 1 })
         }
 
@@ -390,6 +407,10 @@ enum AppStatusScenarios {
 
         func event(minutes: Int, url: URL? = URL(string: "https://zoom.us/j/123456789")) -> CalendarEvent {
             CalendarEvent(id: "status-event", title: "Status planning", startDate: now.addingTimeInterval(Double(minutes) * 60), endDate: now.addingTimeInterval(Double(minutes + 30) * 60), location: nil, notes: nil, url: url, calendar: .init(id: "status", title: "Status", color: "#228844", source: "Fixture"), organizer: nil, attendees: [])
+        }
+
+        func invite(minutes: Int) -> CalendarEvent {
+            CalendarEvent(id: "status-invite", title: "Status invite", startDate: now.addingTimeInterval(Double(minutes) * 60), endDate: now.addingTimeInterval(Double(minutes + 30) * 60), location: nil, notes: nil, url: nil, calendar: .init(id: "status", title: "Status", color: "#228844", source: "Fixture"), organizer: "Owner", attendees: ["Owner"], myRSVPStatus: .pending)
         }
     }
 }

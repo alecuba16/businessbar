@@ -7,7 +7,7 @@ import UserNotifications
 
 @MainActor
 enum AppCoverageScenarios {
-    static func run(_ context: CoverageContext) async throws {
+    static func run(_ context: CoverageContext, focused: String? = nil) async throws {
         let previousDefaults = CompanionConfigService.defaults
         let previousStore = CompanionConfigService.chatProviderStore
         let previousCredentials = CompanionConfigService.credentials
@@ -26,29 +26,31 @@ enum AppCoverageScenarios {
             CompanionConfigService.credentials = previousCredentials
         }
         var failures: [String] = []
-        await run("preferences", failures: &failures) { try preferences(context, defaults: defaults) }
-        await run("providers", failures: &failures) { try await AppConfigScenarios.run(context) }
-        await run("rewrite", failures: &failures) { try await AppRewriteScenarios.run(context) }
-        await run("commands", failures: &failures) { try await commandTools(context) }
-        await run("command execution", failures: &failures) { try await AppCommandExecutionScenarios.run(context) }
-        await run("conversations", failures: &failures) { try await conversations(context) }
-        await run("companion views", failures: &failures) { try await AppCompanionViewScenarios.run(context) }
-        await run("services", failures: &failures) { try await AppServiceScenarios.run(context) }
-        await run("views", failures: &failures) { try await AppViewScenarios.run(context) }
-        await run("status", failures: &failures) { try await AppStatusScenarios.run(context) }
-        await run("chat", failures: &failures) { try await AppChatScenarios.run(context) }
-        await run("selection-ax", failures: &failures) { try await AppSelectionAXScenarios.run(context) }
-        await run("preferences-ui1", failures: &failures) { try await AppPreferencesUI1Scenarios.run(context) }
-        await run("preferences-ui2", failures: &failures) { try await AppPreferencesUI2Scenarios.run(context) }
-        await run("crash-acp", failures: &failures) { try await AppCrashAcpScenarios.run(context) }
-        await run("ui-misc", failures: &failures) { try await AppUIMiscScenarios.run(context) }
-        await run("logging", failures: &failures) { try await AppLoggingScenarios.run(context) }
-        await run("chat-stream", failures: &failures) { try await AppChatStreamScenarios.run(context) }
-        await run("companion-deep", failures: &failures) { try await AppCompanionTabDeepScenarios.run(context) }
+        await run("preferences", focused: focused, failures: &failures) { try preferences(context, defaults: defaults) }
+        await run("providers", focused: focused, failures: &failures) { try await AppConfigScenarios.run(context) }
+        await run("rewrite", focused: focused, failures: &failures) { try await AppRewriteScenarios.run(context) }
+        await run("commands", focused: focused, failures: &failures) { try await commandTools(context) }
+        await run("command execution", focused: focused, failures: &failures) { try await AppCommandExecutionScenarios.run(context) }
+        await run("conversations", focused: focused, failures: &failures) { try await conversations(context) }
+        await run("companion views", focused: focused, failures: &failures) { try await AppCompanionViewScenarios.run(context) }
+        await run("services", focused: focused, failures: &failures) { try await AppServiceScenarios.run(context) }
+        await run("views", focused: focused, failures: &failures) { try await AppViewScenarios.run(context) }
+        await run("status", focused: focused, failures: &failures) { try await AppStatusScenarios.run(context) }
+        await run("rsvp", focused: focused, failures: &failures) { try await AppRSVPScenarios.run(context) }
+        await run("chat", focused: focused, failures: &failures) { try await AppChatScenarios.run(context) }
+        await run("selection-ax", focused: focused, failures: &failures) { try await AppSelectionAXScenarios.run(context) }
+        await run("preferences-ui1", focused: focused, failures: &failures) { try await AppPreferencesUI1Scenarios.run(context) }
+        await run("preferences-ui2", focused: focused, failures: &failures) { try await AppPreferencesUI2Scenarios.run(context) }
+        await run("crash-acp", focused: focused, failures: &failures) { try await AppCrashAcpScenarios.run(context) }
+        await run("ui-misc", focused: focused, failures: &failures) { try await AppUIMiscScenarios.run(context) }
+        await run("logging", focused: focused, failures: &failures) { try await AppLoggingScenarios.run(context) }
+        await run("chat-stream", focused: focused, failures: &failures) { try await AppChatStreamScenarios.run(context) }
+        await run("companion-deep", focused: focused, failures: &failures) { try await AppCompanionTabDeepScenarios.run(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
-    private static func run(_ name: String, failures: inout [String], body: @escaping () async throws -> Void) async {
+    private static func run(_ name: String, focused: String?, failures: inout [String], body: @escaping () async throws -> Void) async {
+        guard focused == nil || focused == name else { return }
         let started = Date()
         print("RUN: app \(name)")
         do {

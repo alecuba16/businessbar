@@ -497,6 +497,7 @@ private final class UIMiscDeniedStore: EventStoreProtocol {
     func requestAccess() async throws -> Bool { false }
     func fetchCalendars() async throws -> [MBCalendar] { [] }
     func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+    func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool { false }
 }
 
 private enum UIMiscFixtureError: Error { case discovery }
@@ -537,9 +538,6 @@ private final class UI2MiscHosted<Content: View> {
     var text: String {
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         return OwnedAccessibility.elements(in: host).flatMap { element in
             [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String].compactMap { $0 }
         }.joined(separator: "\n")
@@ -568,9 +566,6 @@ private final class UI2MiscHosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         guard let element = OwnedAccessibility.elements(in: host).first(where: { element in
             element.accessibilityLabel() == name || element.accessibilityTitle() == name
         }), element.isAccessibilityEnabled() else {

@@ -14,9 +14,10 @@ enum CoverageSuite {
         let selected = ProcessInfo.processInfo.environment["BUSINESSBAR_COVERAGE_SUITE"] ?? "all"
         try context.expect(["all", "core", "app"].contains(selected), "Unknown coverage scenario selection: \(selected)")
         var failures: [String] = []
+        let focused = ProcessInfo.processInfo.environment["BUSINESSBAR_COVERAGE_SCENARIO"]
         if selected == "all" || selected == "core" {
             do {
-                try await CoreCoverageScenarios.run(context)
+                try await CoreCoverageScenarios.run(context, focused: focused)
                 print("PASS: core behavior scenarios")
             } catch {
                 failures.append("Core: \(error)")
@@ -24,7 +25,7 @@ enum CoverageSuite {
         }
         if selected == "all" || selected == "app" {
             do {
-                try await AppCoverageScenarios.run(context)
+                try await AppCoverageScenarios.run(context, focused: focused)
                 print("PASS: app behavior scenarios")
             } catch {
                 failures.append("App: \(error)")

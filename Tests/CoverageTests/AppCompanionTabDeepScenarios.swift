@@ -37,9 +37,6 @@ private final class CompanionDeepHosted<Content: View> {
     var text: String {
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         return OwnedAccessibility.elements(in: host).flatMap { element in
             [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String].compactMap { $0 }
         }.joined(separator: "\n")
@@ -143,9 +140,6 @@ private final class CompanionDeepHosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         let rows = OwnedAccessibility.elements(in: host)
             .filter { $0.className().contains("PlatformSwitch") }
             .filter { $0.helpText()?.contains("this provider") == true }
@@ -174,9 +168,6 @@ private final class CompanionDeepHosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         let all = OwnedAccessibility.elements(in: host)
         guard let row = all.lastIndex(where: { element in
             [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String]

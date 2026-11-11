@@ -59,6 +59,7 @@ final class StatusBarController: NSObject {
         var showPopover: (NSPopover, NSButton) -> Void = { $0.show(relativeTo: $1.bounds, of: $1, preferredEdge: .minY) }
         var closePopover: (NSPopover) -> Void = { $0.close() }
         var scheduleDismiss: (DispatchWorkItem) -> Void = { DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: $0) }
+        var answerInvites: () -> Void = { RSVPPanelController.shared.present() }
         var quit: () -> Void = { NSApp.terminate(nil) }
     }
 
@@ -190,6 +191,12 @@ final class StatusBarController: NSObject {
             }
             .store(in: &cancellables)
 
+        meetingManager.$pendingRSVPEvents
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.updateMainStatusItem() }
+            }
+            .store(in: &cancellables)
+
         meetingManager.$isLoading
             .filter { !$0 }
             .sink { [weak self] _ in
@@ -235,6 +242,14 @@ final class StatusBarController: NSObject {
             .store(in: &cancellables)
     }
 
+    /// Coverage hook: materializes the persistent menu (which normally
+    /// fills only on menuWillOpen) and hands it back for assertions.
+    var mainMenuForCoverage: NSMenu? {
+        guard let menu = mainStatusItem?.menu else { return nil }
+        menuWillOpen(menu)
+        return menu
+    }
+
     // MARK: - Minute refresh timer (power-efficient)
 
     /// Starts the 60-second refresh timer only when the calendar feature is
@@ -268,6 +283,7 @@ final class StatusBarController: NSObject {
 
         let nextEventToShow = isCalendarFeatureEnabled ? meetingManager.nextEvent : nil
         let shouldShowNoSleep = noSleepManager.isActive && isNoSleepFeatureEnabled
+        let pendingRSVPCount = isCalendarFeatureEnabled ? meetingManager.pendingRSVPEvents.count : 0
 
         // ── Display logic ──────────────────────────────────────────────
         //
@@ -284,7 +300,7 @@ final class StatusBarController: NSObject {
             if let nextEvent = nextEventToShow {
                 // NoSleep + meeting: meeting text with cup icon on the right
                 button.imagePosition = .imageRight
-                button.attributedTitle = makeMeetingAttributedString(for: nextEvent)
+                button.attributedTitle = makeMeetingAttributedString(for: nextEvent, pendingRSVPCount: pendingRSVPCount)
             } else {
                 // NoSleep only: just the cup icon, no text
                 button.imagePosition = .imageOnly
@@ -292,7 +308,11 @@ final class StatusBarController: NSObject {
         } else if let nextEvent = nextEventToShow {
             // Meeting only: text, no icon
             button.imagePosition = .noImage
-            button.attributedTitle = makeMeetingAttributedString(for: nextEvent)
+            button.attributedTitle = makeMeetingAttributedString(for: nextEvent, pendingRSVPCount: pendingRSVPCount)
+        } else if pendingRSVPCount > 0 {
+            // Idle but invitations wait: calendar icon with a question badge
+            button.image = makePendingRSVPIcon(count: pendingRSVPCount)
+            button.imagePosition = .imageOnly
         } else {
             // Idle: branded calendar icon matching the AppIcon's style
             button.image = cachedAppIcon
@@ -407,6 +427,28 @@ final class StatusBarController: NSObject {
         return icon
     }
 
+    /// Branded calendar icon with a red question badge in the corner when
+    /// invitations are waiting. Reuses the SF Symbol's own badge variant so
+    /// the geometry stays consistent with the idle icon.
+    private func makePendingRSVPIcon(count: Int) -> NSImage? {
+        let brandColor = NSColor(red: 70/255, green: 80/255, blue: 170/255, alpha: 1.0)
+        let white = NSColor.white
+        let red = NSColor.systemRed
+
+        let paletteConfig = NSImage.SymbolConfiguration(paletteColors: [brandColor, white, red])
+        let sizeConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        let config = paletteConfig.applying(sizeConfig)
+
+        guard let symbol = NSImage(
+            systemSymbolName: "calendar.badge.exclamationmark",
+            accessibilityDescription: "\(count) invitations waiting"
+        )?.withSymbolConfiguration(config) else {
+            return cachedAppIcon
+        }
+        symbol.isTemplate = false
+        return symbol
+    }
+
     /// NoSleep remaining time as a compact string for tooltip or accessibility.
     /// Returns "∞" for infinite or "1h 23m" / "45m" for scheduled durations.
     private var noSleepTimeDescription: String {
@@ -424,12 +466,27 @@ final class StatusBarController: NSObject {
     }
 
     /// Truncated meeting title + countdown/remaining-time string.
-    private func makeMeetingAttributedString(for event: CalendarEvent) -> NSAttributedString {
+    private func makeMeetingAttributedString(for event: CalendarEvent, pendingRSVPCount: Int = 0) -> NSAttributedString {
         let titleMaxLength = defaults.integer(forKey: Constants.Defaults.meetingTitleMaxLength)
         let maxLength = titleMaxLength > 0 ? titleMaxLength : Constants.DefaultValues.meetingTitleMaxLength
         let title = event.title.truncated(to: maxLength)
         let timeString = formatEventTime(event)
-        return NSAttributedString(string: "\(title) \(timeString)  ")
+        let string = NSMutableAttributedString(string: "\(title) \(timeString)  ")
+        if pendingRSVPCount > 0 {
+            string.append(Self.pendingRSVPBadge(count: pendingRSVPCount))
+        }
+        return string
+    }
+
+    /// Red "N?" segment appended to the meeting text when invitations are
+    /// unanswered. Menu bar text has no semantic color roles, so the red
+    /// tint is a deliberate choice over a neutral label color.
+    private static func pendingRSVPBadge(count: Int) -> NSAttributedString {
+        let text = count == 1 ? " 1?" : " \(count)?"
+        let badge = NSMutableAttributedString(string: text)
+        badge.addAttribute(.foregroundColor, value: NSColor.systemRed, range: NSRange(location: 0, length: text.count))
+        badge.addAttribute(.font, value: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium), range: NSRange(location: 0, length: text.count))
+        return badge
     }
 
     private func formatEventTime(_ event: CalendarEvent) -> String {
@@ -756,6 +813,8 @@ extension StatusBarController: NSMenuDelegate {
             showEvents: isCalendarFeatureEnabled,
             showNoSleep: isNoSleepFeatureEnabled,
             showCompanion: isCompanionFeatureEnabled,
+            pendingRSVPEvents: meetingManager.pendingRSVPEvents,
+            onAnswerInvites: { [weak self] in self?.effects.answerInvites() },
             defaults: defaults
         )
 

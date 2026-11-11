@@ -36,8 +36,26 @@ enum AppCompanionViewScenarios {
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification, object: panel))
         try context.expect(commands.approvalRequest == nil, "Panel closing leaves no approval")
 
+        // The hint renders only with zero selectable providers, but an
+        // empty store re-seeds a Default provider from legacy constants.
+        // One saved enabled: false provider pins the store non-empty while
+        // pickers see nothing, making the hint deterministic here.
+        typealias Config = CompanionConfigService
+        let companionDefaults = try context.defaults("companion-views")
+        companionDefaults.registerDefaults()
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        Config.defaults = companionDefaults
+        Config.chatProviderStore = ChatProviderStore(defaults: companionDefaults)
+        Config.chatProviderStore.save([ChatProvider(name: "Off", baseURL: "https://coverage.invalid/v1", models: [ChatModel(name: "off-model", model: "off-model")], enabled: false)])
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+        }
         let empty = ChatView(store: store, commandTools: commands, clientProvider: { nil })
         try await render(empty, size: NSSize(width: 420, height: 560), context: context, label: "empty chat", expected: ["Ask anything", "No model configured yet."])
+        Config.chatProviderStore = previousStore
+        Config.defaults = previousDefaults
         store.messages = [ChatMessage(role: .user, content: "Fixture prompt"), ChatMessage(role: .assistant, content: "Fixture answer", thinking: "Reasoning fixture")]
         store.errorMessage = "Controlled failure"
         commands.backgroundProcesses = [.init(id: UUID(), command: "fixture", running: true, exitCode: nil, endedReason: nil), .init(id: UUID(), command: "finished fixture", running: false, exitCode: 3, endedReason: "fixture exit")]
@@ -96,8 +114,16 @@ enum AppCompanionViewScenarios {
         host.layoutSubtreeIfNeeded()
         settleOwnedView()
         host.layoutSubtreeIfNeeded()
-        let elements = OwnedAccessibility.elements(in: host)
-        let text = elements.flatMap { [$0.accessibilityLabel(), $0.accessibilityTitle(), $0.accessibilityValue() as? String].compactMap { $0 } }.joined(separator: "\n")
+        var elements = OwnedAccessibility.elements(in: host)
+        var text = elements.flatMap { [$0.accessibilityLabel(), $0.accessibilityTitle(), $0.accessibilityValue() as? String].compactMap { $0 } }.joined(separator: "\n")
+        // SwiftUI builds AX children lazily, so a cold panel's first walk
+        // can race ahead of its hierarchy; one settle-and-retry closes it.
+        if expected.contains(where: { text.contains($0) == false }) {
+            settleOwnedView()
+            host.layoutSubtreeIfNeeded()
+            elements = OwnedAccessibility.elements(in: host)
+            text = elements.flatMap { [$0.accessibilityLabel(), $0.accessibilityTitle(), $0.accessibilityValue() as? String].compactMap { $0 } }.joined(separator: "\n")
+        }
         for content in expected { try context.expect(text.contains(content), "\(label) exposes semantic content: \(content). Actual: \(text)") }
         for name in press {
             guard let control = elements.first(where: { $0.accessibilityLabel() == name || $0.accessibilityTitle() == name }) else { throw CoverageContext.Failure(description: "\(label): missing control \(name)") }

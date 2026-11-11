@@ -44,7 +44,9 @@ enum AppServiceScenarios {
         try await oauth(context)
         try updaterAndLifecycle(context)
         try await calendars(context)
+        try await gcRespond(context)
         try await notifications(context)
+        try await rsvpNotifications(context)
         try await lifecycle(context)
         try await appDelegateLiveClosures(context)
     }
@@ -214,6 +216,11 @@ enum AppServiceScenarios {
         let body = try await auth.performRequest(url: URL(string: "https://fixture.invalid/api")!)
         try context.equal(body, Data("fixture-body".utf8), "Authenticated GET returns transport data")
         try context.equal(requests.last?.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-access", "Bearer token attached")
+        let jsonBody = try await auth.performJSONRequest(url: URL(string: "https://fixture.invalid/api")!, method: "PATCH", body: Data("{\"rsvp\":true}".utf8))
+        try context.equal(jsonBody, Data("fixture-body".utf8), "Authenticated PATCH returns transport data")
+        try context.equal(requests.last?.httpMethod, "PATCH", "JSON request keeps the method")
+        try context.equal(requests.last?.value(forHTTPHeaderField: "Content-Type"), "application/json", "JSON request declares its content type")
+        try context.equal(requests.last?.httpBody, Data("{\"rsvp\":true}".utf8), "JSON request carries the body")
         auth.didChange(state)
         try context.equal(saves.count, 1, "State delegate persists archive")
         throwsSave = true
@@ -306,6 +313,7 @@ enum AppServiceScenarios {
         try await auth.signIn(forcePrompt: true)
         try context.expect(auth.isAuthenticated, "Injected OAuth response authenticates")
         try context.equal(authorizations.last?.additionalParameters?["prompt"], "consent", "Forced consent passed to OAuth")
+        try context.expect(authorizations.last?.scope?.contains(GoogleAuthConfig.scopes.last!) == true, "Authorization requests the calendar write scope")
         try context.expect(auth.present(authorizations.last!, session: session), "External agent forwards browser open result")
         try context.equal(opened.first?.host, "fixture.invalid", "Only fixture authorization URL opened through callback")
         let redirect = URL(string: "fixture:/redirect?code=fixture")!
@@ -334,6 +342,44 @@ enum AppServiceScenarios {
         try await context.expectThrowsAsync("Absent refresh token and error produce refreshFailed") {
             _ = try await missingToken.performRequest(url: URL(string: "https://fixture.invalid/api")!)
         }
+
+        // JSON transport: 200 carries the payload through, 401 clears the
+        // signed-in state, and the GC adapter's auth-based convenience init
+        // routes its PATCH through performJSONRequest.
+        var jsonStatus = 200
+        var jsonBodies: [Data?] = []
+        var jsonMethods: [String?] = []
+        let jsonDependencies = GoogleAuth.Dependencies(
+            loadCredential: { throw FixtureError.unavailable },
+            saveCredential: { _ in }, deleteCredential: {},
+            configuration: { .init(clientNumber: "fixture-client", clientSecret: "fixture-secret") },
+            request: { request in
+                jsonMethods.append(request.httpMethod)
+                jsonBodies.append(request.httpBody)
+                return (Data("{}".utf8), HTTPURLResponse(url: request.url!, statusCode: jsonStatus, httpVersion: nil, headerFields: nil)!)
+            },
+            openURL: { _ in false },
+            oauth: .init(
+                discover: { _, callback in callback(service, nil) },
+                authorize: { _, _, callback in callback(authState(expiresIn: 600), nil); return session },
+                refresh: { _, callback in callback("refreshed-fixture", nil) }
+            )
+        )
+        let jsonAuth = GoogleAuth(dependencies: jsonDependencies)
+        try await jsonAuth.signIn()
+        try context.expect(jsonAuth.isAuthenticated, "JSON transport fixture signs in")
+        let patchData = try JSONSerialization.data(withJSONObject: ["attendees": [["self": true, "responseStatus": "accepted"]]])
+        _ = try await jsonAuth.performJSONRequest(url: URL(string: "https://fixture.invalid/calendar/evt")!, method: "PATCH", body: patchData)
+        try context.equal(jsonMethods, ["PATCH"], "JSON request carries the method")
+        try context.equal(jsonBodies, [patchData], "JSON request carries the body")
+        let adapter = GCEventStoreAdapter(auth: jsonAuth)
+        var answered = await adapter.respond(toEventID: "evt", calendarID: "cal", status: .accepted)
+        try context.expect(answered && jsonMethods == ["PATCH", "PATCH"], "Auth-based adapter PATCHes the reply")
+        try context.expect(jsonMethods.last == "PATCH" && jsonBodies.last != nil, "Adapter PATCH carries a body")
+        jsonStatus = 401
+        answered = await adapter.respond(toEventID: "evt", calendarID: "cal", status: .declined)
+        try context.expect(!answered, "401 reply surfaces as failure")
+        try context.expect(!jsonAuth.isAuthenticated, "401 clears the signed-in state")
     }
 
     private static func updaterAndLifecycle(_ context: CoverageContext) throws {
@@ -381,6 +427,10 @@ enum AppServiceScenarios {
             request: { url in
                 urls.append(url)
                 return Data((url.path.hasSuffix("calendarList") ? calendarJSON : eventJSON).utf8)
+            },
+            requestJSON: { url, _, _ in
+                urls.append(url)
+                return Data(eventJSON.utf8)
             }
         ))
         let signedOutCalendars = try await adapter.fetchCalendars()
@@ -413,6 +463,49 @@ enum AppServiceScenarios {
         }
     }
 
+    /// RSVP replies against Google Calendar: guard paths and the PATCH body.
+    private static func gcRespond(_ context: CoverageContext) async throws {
+        var authenticated = true
+        var patchCalls: [(URL, String, Data)] = []
+        var transportFails = false
+        let adapter = GCEventStoreAdapter(dependencies: .init(
+            isAuthenticated: { authenticated },
+            signIn: { authenticated = true },
+            request: { url in Data("[]".utf8) },
+            requestJSON: { url, method, body in
+                patchCalls.append((url, method, body))
+                if transportFails { throw FixtureError.unavailable }
+                return Data("{}".utf8)
+            }
+        ))
+        authenticated = false
+        var answered = await adapter.respond(toEventID: "evt", calendarID: "cal", status: .accepted)
+        try context.expect(!answered, "Signed-out RSVP is rejected")
+        authenticated = true
+        answered = await adapter.respond(toEventID: "evt", calendarID: "cal", status: .pending)
+        try context.expect(!answered && patchCalls.isEmpty, "Non-answerable status never reaches transport")
+        answered = await adapter.respond(toEventID: "evt", calendarID: "cal", status: .unknown)
+        try context.expect(!answered && patchCalls.isEmpty, "Unknown status never reaches transport")
+        answered = await adapter.respond(toEventID: "evt", calendarID: "cal", status: .declined)
+        try context.expect(answered && patchCalls.count == 1, "Declined answer PATCHes Google")
+        try context.expect(patchCalls[0].0.absoluteString.contains("/calendars/cal/events/evt?"), "PATCH URL targets the event resource")
+        try context.expect(patchCalls[0].0.absoluteString.contains("sendUpdates=none"), "PATCH avoids emailing attendees")
+        try context.equal(patchCalls[0].1, "PATCH", "RSVP uses PATCH method")
+        let body = try JSONSerialization.jsonObject(with: patchCalls[0].2) as? [String: Any]
+        try context.expect((body?["attendeesOmitted"] as? Bool) == true, "PATCH omits other attendees")
+        let attendees = body?["attendees"] as? [[String: Any]]
+        try context.expect(attendees?.first?["self"] as? Bool == true, "PATCH marks the self attendee")
+        try context.expect(attendees?.first?["responseStatus"] as? String == "declined", "PATCH carries the declined status")
+        answered = await adapter.respond(toEventID: "evt", calendarID: "cal", status: .tentative)
+        try context.expect(answered && patchCalls.count == 2, "Tentative answer PATCHes Google")
+        let tentativeBody = try JSONSerialization.jsonObject(with: patchCalls[1].2) as? [String: Any]
+        let tentativeAttendees = tentativeBody?["attendees"] as? [[String: Any]]
+        try context.expect(tentativeAttendees?.first?["responseStatus"] as? String == "tentative", "PATCH carries the tentative status")
+        transportFails = true
+        answered = await adapter.respond(toEventID: "evt", calendarID: "cal", status: .accepted)
+        try context.expect(!answered, "Transport failure returns false")
+    }
+
     private static func notifications(_ context: CoverageContext) async throws {
         var enabled = true
         var available = true
@@ -427,11 +520,17 @@ enum AppServiceScenarios {
             isAvailable: { available }, isEnabled: { enabled }, now: { now },
             configure: { _, value in categories = value }, authorize: { authorizations += 1 },
             add: { requests.append($0) }, remove: { removals.append($0) },
-            removeAll: { clears += 1 }, openURL: { opened.append($0) }
+            removeAll: { clears += 1 }, openURL: { opened.append($0) },
+            isNewEventsEnabled: { false }, isPendingInvitesEnabled: { false }
         )
         let manager = NotificationManager(dependencies: dependencies)
-        try context.equal(categories.first?.identifier, "EVENT_NOTIFICATION", "Meeting category configured")
-        try context.equal(categories.first?.actions.map(\.identifier), ["JOIN_ACTION", "SNOOZE_5", "SNOOZE_10", "DISMISS_ACTION"], "Category actions configured")
+        // The configure boundary receives a Set: iteration order is not
+        // guaranteed, so assert membership per identifier instead of first.
+        try context.expect(categories.contains { $0.identifier == "EVENT_NOTIFICATION" }, "Meeting category configured")
+        try context.expect(categories.contains { $0.identifier == "EVENT_INVITE" }, "Invite category configured")
+        try context.expect(categories.contains { $0.identifier == "NEW_EVENT" }, "New-event category configured")
+        let meetingCategory = categories.first { $0.identifier == "EVENT_NOTIFICATION" }
+        try context.equal(meetingCategory?.actions.map(\.identifier), ["JOIN_ACTION", "SNOOZE_5", "SNOOZE_10", "DISMISS_ACTION"], "Category actions configured")
         manager.requestAuthorization()
         try context.equal(authorizations, 1, "Authorization uses injected boundary")
         let calendar = MBCalendar(id: "fixture", title: "Fixture", color: "#112233", source: "Fixture")
@@ -498,14 +597,22 @@ private extension AppServiceScenarios {
     final class LifecycleStore: EventStoreProtocol {
         var events: [CalendarEvent] = []
         let calendar = MBCalendar(id: "lifecycle", title: "Lifecycle", color: "#123456", source: "Fixture")
+        var receivedRSVPs: [(String, String, CalendarEvent.RSVPStatus)] = []
+        var respondResult = true
         func requestAccess() async throws -> Bool { true }
         func fetchCalendars() async throws -> [MBCalendar] { [calendar] }
         func fetchEvents(from: Date, to: Date, calendars: [String]) async throws -> [CalendarEvent] { events }
+        func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool {
+            receivedRSVPs.append((eventID, calendarID, status))
+            return respondResult
+        }
     }
 
     @MainActor
     final class LifecycleEffects {
         var order: [String] = []
+        var newEventsEnabled = false
+        var pendingInvitesEnabled = false
         var templates: [PromptTemplate] = []
         var templateLoads = 0
         var templateSaves = 0
@@ -670,7 +777,8 @@ private extension AppServiceScenarios {
                 isEnabled: { defaults.object(forKey: Constants.Defaults.featureNotifications) as? Bool ?? true },
                 now: { now }, configure: { _, _ in }, authorize: { effects.authorizations += 1 },
                 add: { effects.requests.append($0) }, remove: { effects.removals.append($0) },
-                removeAll: { effects.clears += 1 }, openURL: { _ in }, notificationCenter: center
+                removeAll: { effects.clears += 1 }, openURL: { _ in }, notificationCenter: center,
+                isNewEventsEnabled: { effects.newEventsEnabled }, isPendingInvitesEnabled: { effects.pendingInvitesEnabled }
             ))
         }
 
@@ -726,6 +834,144 @@ private extension AppServiceScenarios {
         }
     }
 
+    /// RSVP confirmation notifications: new-event and invite banners,
+    /// answer actions, dedup bookkeeping, and the failure surface.
+    private static func rsvpNotifications(_ context: CoverageContext) async throws {
+        var enabled = true
+        var available = true
+        var newEventsEnabled = false
+        var pendingInvitesEnabled = false
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var requests: [UNNotificationRequest] = []
+        var removals: [[String]] = []
+        var opened: [URL] = []
+        var deliveredIDs = Set<String>()
+        var rsvpReplies: [(String, String, CalendarEvent.RSVPStatus)] = []
+        let center = NotificationCenter()
+        let dependencies = NotificationManager.Dependencies(
+            isAvailable: { available }, isEnabled: { enabled }, now: { now },
+            configure: { _, _ in }, authorize: {},
+            add: { requests.append($0) }, remove: { removals.append($0) },
+            removeAll: {}, openURL: { opened.append($0) }, notificationCenter: center,
+            isNewEventsEnabled: { newEventsEnabled },
+            isPendingInvitesEnabled: { pendingInvitesEnabled }
+        )
+        let manager = NotificationManager(dependencies: dependencies)
+        manager.setDeliveredInviteBookkeeping(
+            delivered: { deliveredIDs },
+            mark: { deliveredIDs.insert($0) }
+        )
+        manager.setRSVPHandler { eventID, calendarID, status in
+            rsvpReplies.append((eventID, calendarID, status))
+        }
+
+        let calendar = MBCalendar(id: "rsvp-cal", title: "Fixture", color: "#112233", source: "Fixture")
+        let invite = CalendarEvent(
+            id: "invite-1", title: "Design review",
+            startDate: now.addingTimeInterval(3600), endDate: now.addingTimeInterval(7200),
+            location: nil, notes: nil, url: nil, calendar: calendar,
+            organizer: "Owner", attendees: ["Owner"], myRSVPStatus: .pending
+        )
+        let fresh = CalendarEvent(
+            id: "fresh-1", title: "Synced event",
+            startDate: now.addingTimeInterval(5400), endDate: now.addingTimeInterval(9000),
+            location: nil, notes: nil, url: nil, calendar: calendar,
+            organizer: nil, attendees: [], myRSVPStatus: .accepted
+        )
+
+        // Feature off: nothing is presented even with events flowing.
+        center.post(name: .businessBarNewEventsAppeared, object: nil, userInfo: ["events": [fresh]])
+        center.post(name: .businessBarPendingRSVPsAppeared, object: nil, userInfo: ["events": [invite]])
+        try await settleRSVP()
+        try context.equal(requests.count, 0, "Disabled confirmations present nothing")
+
+        // New events on, invite off.
+        newEventsEnabled = true
+        center.post(name: .businessBarNewEventsAppeared, object: nil, userInfo: ["events": [fresh]])
+        try await settleRSVP()
+        try context.equal(requests.count, 1, "New event posts one banner")
+        try context.equal(requests.last?.identifier, "new-event-fresh-1", "New-event identifier embeds event id")
+        try context.equal(requests.last?.content.categoryIdentifier, "NEW_EVENT", "New-event banner uses its category")
+        center.post(name: .businessBarNewEventsAppeared, object: nil, userInfo: ["events": [invite]])
+        try await settleRSVP()
+        try context.equal(requests.count, 2, "Second new event posts its own banner")
+
+        // Invites on: delivered bookkeeping suppresses duplicates while up.
+        pendingInvitesEnabled = true
+        center.post(name: .businessBarPendingRSVPsAppeared, object: nil, userInfo: ["events": [invite]])
+        try await settleRSVP()
+        try context.equal(requests.count, 3, "Pending invite posts a banner")
+        try context.equal(requests.last?.identifier, "invite-invite-1", "Invite identifier embeds event id")
+        try context.equal(requests.last?.content.categoryIdentifier, "EVENT_INVITE", "Invite banner uses its category")
+        try context.equal(requests.last?.content.userInfo["calendarID"] as? String, "rsvp-cal", "Invite banner carries calendar id")
+        try context.expect(deliveredIDs.contains("invite-1"), "Delivered invite marked in bookkeeping")
+        center.post(name: .businessBarPendingRSVPsAppeared, object: nil, userInfo: ["events": [invite]])
+        try await settleRSVP()
+        try context.equal(requests.count, 3, "Delivered-but-unanswered invite is not duplicated")
+
+        // Answer actions route through the injected handler.
+        manager.handleAction("RSVP_ACCEPT", meetingLink: nil, eventID: "invite-1", calendarID: "rsvp-cal")
+        manager.handleAction("RSVP_DECLINE", meetingLink: nil, eventID: "invite-2", calendarID: "rsvp-cal")
+        manager.handleAction("RSVP_TENTATIVE", meetingLink: nil, eventID: "invite-3", calendarID: "rsvp-cal")
+        try context.equal(rsvpReplies.map(\.2), [.accepted, .declined, .tentative], "RSVP actions map to statuses")
+        manager.handleAction("RSVP_ACCEPT", meetingLink: nil, eventID: nil, calendarID: "rsvp-cal")
+        manager.handleAction("NEW_EVENT_KEEP", meetingLink: nil, eventID: nil, calendarID: nil)
+        try context.equal(rsvpReplies.count, 3, "Missing identifiers do not reach the handler")
+
+        manager.cancelInviteNotification(for: "invite-1")
+        try context.equal(removals, [["invite-invite-1"]], "Answered invite notification removed")
+
+        manager.notifyRSVPFailure(for: "invite-1")
+        try context.equal(requests.last?.identifier, "rsvp-failed-invite-1", "Failed answer surfaces a notification")
+
+        // Handler missing: the action must not crash and drops silently.
+        manager.setRSVPHandler(nil)
+        manager.handleAction("RSVP_ACCEPT", meetingLink: nil, eventID: "invite-9", calendarID: "rsvp-cal")
+        try context.equal(rsvpReplies.count, 3, "Unset handler drops the answer without crash")
+
+        // Disabled or unavailable: no failure banner, no invite banner.
+        manager.setRSVPHandler { _, _, _ in }
+        pendingInvitesEnabled = false
+        available = false
+        manager.notifyRSVPFailure(for: "invite-1")
+        deliveredIDs.removeAll()
+        center.post(name: .businessBarPendingRSVPsAppeared, object: nil, userInfo: ["events": [invite]])
+        try await settleRSVP()
+        try context.equal(requests.count, 4, "Guards stop every later presentation path")
+
+        // The delegate-extracted dispatch entry: scenarios cannot build a
+        // UNNotificationResponse, so this is the closest drivable surface.
+        enabled = true
+        available = true
+        rsvpReplies.removeAll()
+        manager.setRSVPHandler { eventID, calendarID, status in
+            rsvpReplies.append((eventID, calendarID, status))
+        }
+        manager.dispatchAction("RSVP_ACCEPT", userInfo: ["eventID": "dispatch-1", "calendarID": "rsvp-cal"])
+        try context.equal(rsvpReplies.map(\.0), ["dispatch-1"], "Dispatch entry forwards payload fields")
+        manager.dispatchAction("JOIN_ACTION", userInfo: ["meetingLink": "https://fixture.invalid/join"])
+        try context.equal(opened.last?.absoluteString, "https://fixture.invalid/join", "Dispatch entry routes join links")
+
+        // Live dependency closures: the flag readers default to
+        // UserDefaults.standard, so seed the isolated domain and read back.
+        let liveManager = NotificationManager()
+        UserDefaults.standard.set(true, forKey: BusinessBar.Constants.Defaults.notifyNewEvents)
+        UserDefaults.standard.set(true, forKey: BusinessBar.Constants.Defaults.notifyPendingInvites)
+        try context.expect(liveManager.dependenciesForCoverage.isNewEventsEnabled(), "Live new-events flag reads the default")
+        try context.expect(liveManager.dependenciesForCoverage.isPendingInvitesEnabled(), "Live pending-invites flag reads the default")
+        UserDefaults.standard.set(false, forKey: BusinessBar.Constants.Defaults.notifyNewEvents)
+        UserDefaults.standard.set(false, forKey: BusinessBar.Constants.Defaults.notifyPendingInvites)
+        try context.expect(!liveManager.dependenciesForCoverage.isNewEventsEnabled(), "Live new-events flag follows the stored value")
+        try context.expect(!liveManager.dependenciesForCoverage.isPendingInvitesEnabled(), "Live pending-invites flag follows the stored value")
+    }
+
+    private static func settleRSVP() async {
+        for _ in 0..<8 { await Task.yield() }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
     static func lifecycle(_ context: CoverageContext) async throws {
         let fixture = try LifecycleFixture(context, label: "lifecycle-first")
         let effects = fixture.effects
@@ -772,6 +1018,7 @@ private extension AppServiceScenarios {
         delegate.showPreferences(initialTab: .general)
         try context.equal(effects.preferencesCreations, 1, "Preferences window created once")
         try context.equal(effects.preferencesShows, 2, "Repeated preferences requests show retained presentation")
+
         for _ in 0..<100 {
             await fixture.meeting.refreshEvents()
             effects.drain()
@@ -789,6 +1036,84 @@ private extension AppServiceScenarios {
         fixture.center.post(name: .businessBarPreferencesDidChange, object: nil)
         effects.drain()
         try context.expect(effects.clears > 0, "Disabled calendar clears notifications")
+
+        // RSVP routing installed at launch: notification answers reach the
+        // meeting manager, success clears bookkeeping and removes the
+        // banner, failure surfaces the retry banner. The feature flag was
+        // switched off by the clearing check above, so it goes back on for
+        // the fixture refresh to post invites.
+        effects.pendingInvitesEnabled = true
+        defaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        let inviteEvent = CalendarEvent(
+            id: "invite", title: "Launch invite",
+            startDate: fixture.now.addingTimeInterval(3600), endDate: fixture.now.addingTimeInterval(7200),
+            location: nil, notes: nil, url: nil, calendar: fixture.store.calendar,
+            organizer: "Owner", attendees: ["Owner"], myRSVPStatus: .pending
+        )
+        fixture.store.events = [inviteEvent]
+        await fixture.meeting.refreshEvents()
+        effects.drain()
+        for _ in 0..<100 {
+            if effects.requests.contains(where: { $0.identifier == "invite-invite" }) { break }
+            await settleRSVP()
+        }
+        try context.expect(effects.requests.contains { $0.identifier == "invite-invite" }, "Invite identifier embeds event id")
+        fixture.notification.handleAction("RSVP_ACCEPT", meetingLink: nil, eventID: "invite", calendarID: "lifecycle")
+        for _ in 0..<100 {
+            if !fixture.store.receivedRSVPs.isEmpty { break }
+            await settleRSVP()
+        }
+        try context.equal(fixture.store.receivedRSVPs.map(\.2), [.accepted], "Notification answer routes to the manager")
+        try context.expect(effects.removals.contains(["invite-invite"]), "Answered invite banner removed")
+        fixture.store.respondResult = false
+        fixture.notification.handleAction("RSVP_DECLINE", meetingLink: nil, eventID: "invite", calendarID: "lifecycle")
+        for _ in 0..<100 {
+            if fixture.store.receivedRSVPs.count >= 2 { break }
+            await settleRSVP()
+        }
+        try context.equal(fixture.store.receivedRSVPs.count, 2, "Failed answer still reaches the manager")
+        try context.expect(effects.requests.contains { $0.identifier == "rsvp-failed-invite" }, "Failed answer posts the retry banner")
+        let previousDelegate = NSApp.delegate
+        NSApp.delegate = delegate
+        try context.expect(AppDelegate.sharedMeetingManager() === fixture.meeting, "Shared manager accessor finds the delegate's manager")
+
+        // Shared panel against the swapped delegate: the live effects read
+        // the shared manager, and the last answer dismisses through onFinish.
+        let panelInvite = CalendarEvent(
+            id: "panel-invite", title: "Panel invite",
+            startDate: fixture.now.addingTimeInterval(3600), endDate: fixture.now.addingTimeInterval(7200),
+            location: "Fixture room", notes: nil, url: nil, calendar: fixture.store.calendar,
+            organizer: "Owner", attendees: ["Owner", "Me"], myRSVPStatus: .pending
+        )
+        fixture.store.events = [panelInvite]
+        await fixture.meeting.refreshEvents()
+        RSVPPanelController.shared.present()
+        let sharedStore = RSVPPanelController.shared.storeForCoverage
+        try context.expect(RSVPPanelController.shared.panelForCoverage != nil, "Shared panel materializes on present")
+        try context.equal(sharedStore.current?.id, "panel-invite", "Shared panel lists the pending invite")
+        NSApp.delegate = previousDelegate
+        sharedStore.answer(.accepted)
+        for _ in 0..<100 {
+            if sharedStore.lastError != nil { break }
+            await settleRSVP()
+        }
+        try context.expect(sharedStore.lastError != nil, "Answer without a live manager surfaces the failure")
+        NSApp.delegate = delegate
+        fixture.store.respondResult = true
+        sharedStore.answer(.accepted)
+        for _ in 0..<100 {
+            if fixture.store.receivedRSVPs.count >= 3 { break }
+            await settleRSVP()
+        }
+        try context.equal(fixture.store.receivedRSVPs.last?.0, "panel-invite", "Shared panel answer routes to the manager")
+        try context.expect(fixture.store.receivedRSVPs.count == 3, "Panel answers join the earlier notification answers")
+        for _ in 0..<100 {
+            if RSVPPanelController.shared.panelForCoverage?.isVisible == false { break }
+            await settleRSVP()
+        }
+        try context.expect(RSVPPanelController.shared.panelForCoverage?.isVisible == false, "Last answer closes the shared panel")
+        NSApp.delegate = previousDelegate
+
         let reply = NSAppleEventDescriptor.null()
         delegate.handleURLEvent(getURLEvent: NSAppleEventDescriptor.null(), replyEvent: reply)
         let event = NSAppleEventDescriptor(eventClass: AEEventClass(kInternetEventClass), eventID: AEEventID(kAEGetURL), targetDescriptor: nil, returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))

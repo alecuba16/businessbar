@@ -27,7 +27,11 @@ enum GoogleAuthConfig {
     static let scopes = [
         "email",
         "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-        "https://www.googleapis.com/auth/calendar.events.readonly"
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        // Write access so RSVP answers from the invite panel can PATCH the
+        // user's own attendee entry. Sessions signed in with the old
+        // read-only scope set must sign in again once.
+        "https://www.googleapis.com/auth/calendar.events"
     ]
 
     /// True only when real credentials are available (from .local.json or baked-in .json).
@@ -253,6 +257,27 @@ final class GoogleAuth: NSObject, ObservableObject,
         let token = try await validAccessToken()
         var req = URLRequest(url: url)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await dependencies.request(req)
+        if let http = response as? HTTPURLResponse,
+           !(200...299).contains(http.statusCode) {
+            if (http.statusCode == 401 || http.statusCode == 403) {
+                clearAuthState()
+                throw GoogleAuthError.notAuthenticated
+            }
+            throw GoogleAuthError.apiError("HTTP \(http.statusCode)")
+        }
+        return data
+    }
+
+    /// Performs an authenticated request with a JSON body (PATCH/POST) and
+    /// returns the raw Data. Used by the calendar adapter for RSVP replies.
+    func performJSONRequest(url: URL, method: String, body: Data) async throws -> Data {
+        let token = try await validAccessToken()
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
         let (data, response) = try await dependencies.request(req)
         if let http = response as? HTTPURLResponse,
            !(200...299).contains(http.statusCode) {
