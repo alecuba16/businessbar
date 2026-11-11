@@ -1,0 +1,247 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel>
+<title>BusinessBar</title>
+<link>https://alecuba16.github.io/businessbar/appcast.xml</link>
+<description>BusinessBar release feed</description>
+<language>en</language>
+<item>
+<title>BusinessBar 1.6.7</title>
+<description>BusinessBar 1.6.7</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>24</sparkle:version>
+<sparkle:shortVersionString>1.6.7</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.6.7/BusinessBar-1.6.7.dmg"
+sparkle:edSignature="suck2qWxfVBnVJu6phZmKN7TvIFTcQjEdPYRsPkCo7O1EfwjrqF/GXfpdSyAgeHLcE7/fcvD8fCwHesGrReiAg=="
+length="5123942"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.6.6</title>
+<description>BusinessBar 1.6.6</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>23</sparkle:version>
+<sparkle:shortVersionString>1.6.6</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.6.6/BusinessBar-1.6.6.dmg"
+sparkle:edSignature="V9yXkR+6bNlCbjCQMKA7YTygWlwSbYgrJOedTo5og9BaDfIZ/jQey0yl2Gxsan/x4lTfmPU2tuCJEe/dW1vgAQ=="
+length="5072528"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.6.5</title>
+<description>BusinessBar 1.6.5</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>22</sparkle:version>
+<sparkle:shortVersionString>1.6.5</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.6.5/BusinessBar-1.6.5.dmg"
+sparkle:edSignature="Rpr0RjJWI0fD9Kw2Th5XKIRe/uGsPO2VlZmqW0yLeynouhXTwVPTdABuheyrFKi6vpWw303WMr+BseGrvD9LDQ=="
+length="5072146"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.6.4</title>
+<description>BusinessBar 1.6.4</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>21</sparkle:version>
+<sparkle:shortVersionString>1.6.4</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.6.4/BusinessBar-1.6.4.dmg"
+sparkle:edSignature="qZQYuHoowvrZ8RpJ+BlmA8KpfxQNaTLBoqJS4kheLH8kBQgROAeD9wgunAfwgtTmBYHXNfdz9ptETEAq5LSxDw=="
+length="5065906"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.6.3</title>
+<description>BusinessBar 1.6.3</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>20</sparkle:version>
+<sparkle:shortVersionString>1.6.3</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.6.3/BusinessBar-1.6.3.dmg"
+sparkle:edSignature="fSQOQ8jVtKRPPcvFaSj2sHwrAhPlUsdA+Dut1t7K+iRUJPx5LeVi2rc/ztUgX0BVuwDE4ATe98vsTsBEdY87BQ=="
+length="5051490"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.6.2</title>
+<description>BusinessBar 1.6.2</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>19</sparkle:version>
+<sparkle:shortVersionString>1.6.2</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.6.2/BusinessBar-1.6.2.dmg"
+sparkle:edSignature="H7Yfm+8OfRiIqcsdevDYFPBSgWqMgbsKrcz8HiQaok7H6uTqQ8kITFAuvrlan8FeH+/DJ0vEvtQsAFy8WEjBDA=="
+length="5051089"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.6.1</title>
+<description>BusinessBar 1.6.1</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>16</sparkle:version>
+<sparkle:shortVersionString>1.6.1</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.6.1/BusinessBar-1.6.1.dmg"
+sparkle:edSignature="rxd0JI8oEpfWeIXBFkX2cyMiiKIQMXVSf6igh+tCYTCMUDY5bZAPDN8LDClOogwOSWy31mh8hEHttinsB7hgCA=="
+length="5050597"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.6.0</title>
+<description>BusinessBar 1.6.0</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>15</sparkle:version>
+<sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.6.0/BusinessBar-1.6.0.dmg"
+sparkle:edSignature="JsEMC/zRreaKBv+wcSXAKFQiFFkoa8Ak3YYyJN1ovXNE3SY0pkEOi2IXmRHNaqX7eNRVTsikM1tkIc39D4JsBw=="
+length="5046085"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.5.0</title>
+<description>BusinessBar 1.5.0</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>14</sparkle:version>
+<sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.5.0/BusinessBar-1.5.0.dmg"
+sparkle:edSignature="FWJE0JlnxBLxKgpOLTdJG1/lmswDqKttWoMYCPsQRM21iTSrtdASXRxNqiLse+fRskD0hGQ4nLZsztjRXYTdBw=="
+length="4903720"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.4.0</title>
+<description>BusinessBar 1.4.0</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>13</sparkle:version>
+<sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.4.0/BusinessBar-1.4.0.dmg"
+sparkle:edSignature="lPGLFd4nyG3dyQ+SNcnSZQnFEGr24SPRW/nXadLewQIIfkZV7tOGeLNLoAm5cEZX0xkr6iBw81SrH1wQDKmbCw=="
+length="4889455"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.3.2</title>
+<description>BusinessBar 1.3.2</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>12</sparkle:version>
+<sparkle:shortVersionString>1.3.2</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.3.2/BusinessBar-1.3.2.dmg"
+sparkle:edSignature="PjI8k3gJcosKJ4DQzQt+mM/gLFxsK9JjUktS3LRnCXJ7arCyGr4SKZAfA9O+uaVoEMzL7gQmDhudsjzk7zTjCg=="
+length="4761581"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.3.1</title>
+<description>BusinessBar 1.3.1</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>11</sparkle:version>
+<sparkle:shortVersionString>1.3.1</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.3.1/BusinessBar-1.3.1.dmg"
+sparkle:edSignature="fuZmSDufZUjNAA/YUQj3dwh+/Aieqv/zS3XfXVDSQNsprL5wF1LuU5Q2tduP/cy/fXHdduTNj2RGotuD5lcnBQ=="
+length="4730983"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.2.6</title>
+<description>BusinessBar 1.2.6</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>10</sparkle:version>
+<sparkle:shortVersionString>1.2.6</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.2.6/BusinessBar-1.2.6.dmg"
+sparkle:edSignature="s7XqZcXOb/jiJNSWkQpX6dvib17/Pw/fXUzEUMYCnaKvPZNotsjENBNhE3jgqXOyLRAkfw4fX4YvOehj/d1aAg=="
+length="3049528"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.2.5</title>
+<description>BusinessBar 1.2.5</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>9</sparkle:version>
+<sparkle:shortVersionString>1.2.5</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.2.5/BusinessBar-1.2.5.dmg"
+sparkle:edSignature="s+vRPWbbpWGzwIBd5mxaETRvv8U2FlNc9eJgapI/wKl3ZJDNXEI8sP87GVohggvjKKjdKZ8XML2LQvkwlSTCBA=="
+length="3048572"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.2.4</title>
+<description>BusinessBar 1.2.4</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>8</sparkle:version>
+<sparkle:shortVersionString>1.2.4</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.2.4/BusinessBar-1.2.4.dmg"
+sparkle:edSignature="UJ58R1m5bMJe6fOsT5gUM3AR2ESotUpxPyEXgwEuoaRR3LNq4riih6FaLQ9jaTESk9Sh+TRMpPfvsIXdpOazCw=="
+length="3038415"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.2.3</title>
+<description>BusinessBar 1.2.3</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>7</sparkle:version>
+<sparkle:shortVersionString>1.2.3</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.2.3/BusinessBar-1.2.3.dmg"
+sparkle:edSignature="HLT1sIKbwOCptBBMUBnfvrJaXAJNM5/ga0auTxeaUt476J2XtqfZvsh+3iQx+BrZLfrzjY7GIEhAlKf76rGbDg=="
+length="3038225"
+type="application/x-apple-diskimage"
+/>
+</item>
+<item>
+<title>BusinessBar 1.2.2</title>
+<description>BusinessBar 1.2.2</description>
+<pubDate>Wed, 11 Nov 2026 15:54:15 +0000</pubDate>
+<sparkle:version>6</sparkle:version>
+<sparkle:shortVersionString>1.2.2</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+<enclosure
+url="https://github.com/alecuba16/businessbar/releases/download/v1.2.2/BusinessBar-1.2.2.dmg"
+sparkle:edSignature="YJJkq7zYpncBMoNrAY0OSmBd0Kl9Op7h10MiyNqJNB9PFkKbwi8zB109SUFGcNfObtm8pGyKmBshiRDj3w7XDA=="
+length="4480558"
+type="application/x-apple-diskimage"
+/>
+</item>
+</channel>
+</rss>
