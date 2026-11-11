@@ -5,6 +5,10 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.7] - 2026-11-11
+### Added
+- Calendar invitations that need an answer are now visible and answerable in the menu bar. Pending invitations show a question badge on the calendar icon, a section in the status menu that opens a compact panel with the event details and Yes / Maybe / No buttons (keyboard shortcuts y / m / n, Escape closes), and optional native notifications with Accept / Decline / Tentative actions, one per invitation, enabled under Preferences > Calendars. Answers go through the shared calendar backend, so they work with both EventKit and Google Calendar, and one answer can be retried when the backend cannot save it
+
 ## [1.6.6] - 2026-11-10
 ### Fixed
 - Insert-after-selection templates (like Improve writing) now insert the reply in Slack and other Chromium editors. Those editors answer the selected-text AX write with success and then drop it, so the rewrite reported success, skipped the value-splice fallback and left the reply nowhere; the caret collapse in the same path also destroyed the selection, which surfaced as a confusing "No text is selected" on the next trigger. Every selected-text write is now verified by re-reading the value, a no-op write restores the selection it collapsed and falls through to the value rewrite, and the overlay Replace button gets the same verification so it no longer claims a phantom success
