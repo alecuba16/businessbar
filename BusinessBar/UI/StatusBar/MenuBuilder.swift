@@ -19,6 +19,8 @@ enum MenuBuilder {
         showEvents: Bool,
         showNoSleep: Bool,
         showCompanion: Bool,
+        pendingRSVPEvents: [CalendarEvent],
+        onAnswerInvites: @escaping () -> Void,
         defaults: UserDefaults = .standard
     ) -> NSMenu {
         let menu = NSMenu()
@@ -35,6 +37,10 @@ enum MenuBuilder {
             let disabledItem = NSMenuItem(title: "Calendar integration disabled", action: nil, keyEquivalent: "")
             disabledItem.isEnabled = false
             menu.addItem(disabledItem)
+        }
+
+        if showEvents, !pendingRSVPEvents.isEmpty {
+            addInvitesSection(to: menu, pendingRSVPEvents: pendingRSVPEvents, onAnswerInvites: onAnswerInvites)
         }
 
         menu.addItem(NSMenuItem.separator())
@@ -82,6 +88,32 @@ enum MenuBuilder {
         return menu
     }
     
+    /// Invitations awaiting a reply, listed with an action that opens the
+    /// RSVP panel. The header row is disabled so it works as a section
+    /// label, the answer row drives the panel.
+    @MainActor
+    private static func addInvitesSection(to menu: NSMenu, pendingRSVPEvents: [CalendarEvent], onAnswerInvites: @escaping () -> Void) {
+        menu.addItem(NSMenuItem.separator())
+
+        let header = NSMenuItem(title: "Pending invitations", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        for event in pendingRSVPEvents {
+            let item = NSMenuItem(
+                title: "\(event.title) · \(formatter.string(from: event.startDate))",
+                action: #selector(MenuActionHandler.answerInvites),
+                keyEquivalent: ""
+            )
+            item.representedObject = MenuAction.answerInvites(onAnswerInvites)
+            item.target = MenuActionHandler.shared
+            menu.addItem(item)
+        }
+    }
+
     @MainActor
     private static func addEventSection(to menu: NSMenu, events: [CalendarEvent], defaults: UserDefaults, onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void) {
         let calendar = Calendar.current
@@ -265,6 +297,7 @@ enum MenuAction {
     case showPreferences(() -> Void)
     case quit(() -> Void)
     case toggleCompanionChat(() -> Void)
+    case answerInvites(() -> Void)
 }
 
 @MainActor
@@ -315,6 +348,11 @@ final class MenuActionHandler: NSObject {
     
     @objc func toggleCompanionChat(_ sender: NSMenuItem) {
         guard case .toggleCompanionChat(let handler) = sender.representedObject as? MenuAction else { return }
+        handler()
+    }
+    
+    @objc func answerInvites(_ sender: NSMenuItem) {
+        guard case .answerInvites(let handler) = sender.representedObject as? MenuAction else { return }
         handler()
     }
     

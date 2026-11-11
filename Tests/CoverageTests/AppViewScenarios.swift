@@ -12,8 +12,10 @@ enum AppViewScenarios {
         _ = NSApplication.shared
         var failures: [String] = []
         func run(_ name: String, _ operation: () async throws -> Void) async {
+            let started = Date()
             do {
                 try await operation()
+                print("BLOCK: views \(name) in \(Int(Date().timeIntervalSince(started)))s")
             } catch {
                 failures.append("\(name): \(error)")
             }
@@ -357,22 +359,22 @@ enum AppViewScenarios {
 
     private static func appearance(_ context: CoverageContext) async throws {
         let defaults = try context.defaults("appearance")
-        for scheme in [ColorScheme.light, .dark] {
-            for (format, threshold, expected) in [("relative", 0, "in 1h31m"), ("relative", 1, "in 2h"), ("absolute", 3, "(10:00-10:30)"), ("unknown", 3, "in 1h31m")] {
-                defaults.set(format, forKey: Constants.Defaults.timeFormat)
-                defaults.set(threshold, forKey: Constants.Defaults.timeRoundingThreshold)
-                defaults.set(format == "absolute" ? "medium" : "small", forKey: Constants.Defaults.badgeIconSize)
-                defaults.set(format != "unknown", forKey: Constants.Defaults.grayscaleWhenNoNotifications)
-                let host = Hosted(AppearanceTab().defaultAppStorage(defaults).environment(\.colorScheme, scheme), size: NSSize(width: 800, height: 900))
-                defer { host.close() }
-                await settle()
-                try host.render(context)
-                try context.expect(host.text.contains(expected), "Appearance preview for \(format), threshold \(threshold), \(scheme)")
-                if format == "relative" {
-                    try context.expect(host.text.contains(threshold == 0 ? "Always exact" : "Round when"), "Rounding help follows threshold")
-                } else {
-                    try context.expect(!host.text.contains("Time rounding threshold:"), "Absolute and unknown formats hide rounding slider")
-                }
+        // Production reads no colorScheme anywhere, so one scheme covers the
+        // same Swift lines; the second scheme doubles render cost only.
+        for (format, threshold, expected) in [("relative", 0, "in 1h31m"), ("relative", 1, "in 2h"), ("absolute", 3, "(10:00-10:30)"), ("unknown", 3, "in 1h31m")] {
+            defaults.set(format, forKey: Constants.Defaults.timeFormat)
+            defaults.set(threshold, forKey: Constants.Defaults.timeRoundingThreshold)
+            defaults.set(format == "absolute" ? "medium" : "small", forKey: Constants.Defaults.badgeIconSize)
+            defaults.set(format != "unknown", forKey: Constants.Defaults.grayscaleWhenNoNotifications)
+            let host = Hosted(AppearanceTab().defaultAppStorage(defaults), size: NSSize(width: 800, height: 900))
+            defer { host.close() }
+            await settle()
+            try host.render(context)
+            try context.expect(host.text.contains(expected), "Appearance preview for \(format), threshold \(threshold)")
+            if format == "relative" {
+                try context.expect(host.text.contains(threshold == 0 ? "Always exact" : "Round when"), "Rounding help follows threshold")
+            } else {
+                try context.expect(!host.text.contains("Time rounding threshold:"), "Absolute and unknown formats hide rounding slider")
             }
         }
         for granted in [false, true] {
@@ -535,8 +537,8 @@ enum AppViewScenarios {
         var durations: [TimeInterval?] = []
         let event = makeEvent(id: "meeting", title: "Menu meeting", location: nil, url: URL(string: "https://meet.google.com/aaa-bbbb-ccc"))
         let plain = makeEvent(id: "plain", title: "No meeting URL", location: nil, url: nil)
-        func build(events: [CalendarEvent], loading: Bool = false, showEvents: Bool = true, showNoSleep: Bool = true, companion: Bool = true) -> NSMenu {
-            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, defaults: defaults)
+        func build(events: [CalendarEvent], loading: Bool = false, showEvents: Bool = true, showNoSleep: Bool = true, companion: Bool = true, pending: [CalendarEvent] = [], onAnswer: (() -> Void)? = nil) -> NSMenu {
+            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, defaults: defaults)
         }
         let menu = build(events: [event, plain])
         try context.expect(menu.items.contains(where: { $0.title.contains("Menu meeting") && $0.submenu != nil }), "Meeting gets join submenu")
@@ -596,6 +598,28 @@ enum AppViewScenarios {
         handler.toggleCompanionChat(invalid)
         handler.quit(invalid)
         try context.equal(callbacks.count, before, "Mismatched menu payloads never execute callbacks")
+
+        // Pending invitations section: header row, one row per invite, and
+        // the answer action driving the shared handler.
+        let inviteOne = makeEvent(id: "invite-1", title: "Invitation One", location: nil, url: nil)
+        let inviteTwo = makeEvent(id: "invite-2", title: "Invitation Two", location: nil, url: nil)
+        let invitesMenu = build(events: [], pending: [inviteOne, inviteTwo])
+        guard let invitesHeader = invitesMenu.item(withTitle: "Pending invitations"),
+              let answerOne = invitesMenu.items.first(where: { $0.title.hasPrefix("Invitation One ·") }),
+              let answerTwo = invitesMenu.items.first(where: { $0.title.hasPrefix("Invitation Two ·") }) else {
+            throw CoverageContext.Failure(description: "Pending invitations section missing its rows")
+        }
+        try context.expect(!invitesHeader.isEnabled, "Invitations header is a disabled label")
+        try context.expect(answerOne.representedObject is MenuAction && answerTwo.representedObject is MenuAction, "Each invite row carries a payload")
+        let beforeAnswer = callbacks.count
+        handler.answerInvites(answerOne)
+        handler.answerInvites(answerTwo)
+        try context.equal(callbacks.count, beforeAnswer + 2, "Answer rows drive the panel callback")
+        handler.answerInvites(invalid)
+        try context.equal(callbacks.count, beforeAnswer + 2, "Wrong payload never answers")
+        // Feature off or empty pending list: section omitted entirely.
+        try context.expect(build(events: []).item(withTitle: "Pending invitations") == nil, "No invites means no section")
+        try context.expect(build(events: [], showEvents: false, pending: [inviteOne]).item(withTitle: "Pending invitations") == nil, "Calendar off means no section")
     }
 
     private static func preferences(_ context: CoverageContext) async throws {
@@ -630,14 +654,14 @@ enum AppViewScenarios {
             companion: { CompanionTab(templateStore: TemplateStore(defaults: defaults), accessibilityStatus: { false }) }
         )
         let detailLabels: [PreferencesView.PreferenceTab: String] = [.general: "Launch at login", .calendars: "Enable calendar functionality", .badges: "No apps added yet", .noSleep: "Enable NoSleep functionality", .appearance: "Meeting title max length:", .companion: "Enable Companion"]
-        for scheme in [ColorScheme.light, .dark] {
-            for tab in PreferencesView.PreferenceTab.allCases {
-                let host = Hosted(PreferencesView(badgeManager: badges, meetingManager: meetings, googleAuth: auth, initialTab: tab, tabContent: content).environmentObject(updater).defaultAppStorage(defaults).environment(\.colorScheme, scheme), size: NSSize(width: 1100, height: 1100))
-                defer { host.close() }
-                await settle()
-                try host.render(context)
-                try context.expect(host.text.contains(detailLabels[tab]!), "Initial preferences tab renders its own detail: \(tab.rawValue), \(scheme)")
-            }
+        // One scheme: production reads no colorScheme, so the dark pass
+        // covered the same lines for double the render cost.
+        for tab in PreferencesView.PreferenceTab.allCases {
+            let host = Hosted(PreferencesView(badgeManager: badges, meetingManager: meetings, googleAuth: auth, initialTab: tab, tabContent: content).environmentObject(updater).defaultAppStorage(defaults), size: NSSize(width: 1100, height: 1100))
+            defer { host.close() }
+            await settle()
+            try host.render(context)
+            try context.expect(host.text.contains(detailLabels[tab]!), "Initial preferences tab renders its own detail: \(tab.rawValue)")
         }
         let general = Hosted(content.general().environmentObject(updater).defaultAppStorage(defaults), size: NSSize(width: 800, height: 1100))
         defer { general.close() }
@@ -687,13 +711,13 @@ enum AppViewScenarios {
         defer { session.invalidateAndCancel() }
         let server = MLXServerManager(defaults: defaults, home: home, driver: driver, session: session, resolvePython: { _ in throw FixtureError.discovery }, portAvailable: { _ in false }, now: Date.init, sleep: { _ in throw CancellationError() }, residentSize: { _ in 0 }, observeResources: { _ in })
         let store = MLXModelStore(defaults: defaults, home: home, driver: driver, locateUV: { nil }, sleep: { _ in throw CancellationError() })
-        for scheme in [ColorScheme.light, .dark] {
-            let missing = Hosted(Form { LocalModelsSection(server: server, store: store, defaults: defaults, home: home, locateUV: { nil }) }.environment(\.colorScheme, scheme), size: NSSize(width: 850, height: 600))
-            defer { missing.close() }
-            await settle()
-            try missing.render(context)
-            try context.expect(missing.text.contains("Install uv first:"), "Missing local-model prerequisite is explained in both themes")
-        }
+        // One scheme: LocalModelsSection reads no colorScheme, so the second
+        // theme pass covered the same lines twice.
+        let missing = Hosted(Form { LocalModelsSection(server: server, store: store, defaults: defaults, home: home, locateUV: { nil }) }, size: NSSize(width: 850, height: 600))
+        defer { missing.close() }
+        await settle()
+        try missing.render(context)
+        try context.expect(missing.text.contains("Install uv first:"), "Missing local-model prerequisite is explained")
         var fetches = 0
         let catalog = Hosted(Form {
             LocalModelsSection(server: server, store: store, defaults: defaults, home: home, installedRAM: 1_099_511_627_776, locateUV: { "/fixture/uv" }, fetchDirectory: {
@@ -875,6 +899,7 @@ enum AppViewScenarios {
             return [.init(id: "preferences", title: "Coverage calendar", color: "#227744", source: "Fixture")]
         }
         func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] { [] }
+        func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool { false }
     }
 
     private final class BadgeBoundary: BadgeMonitoring {
@@ -929,9 +954,6 @@ enum AppViewScenarios {
         var elements: [OwnedAccessibility.Element] {
             host.layoutSubtreeIfNeeded()
             host.displayIfNeeded()
-            if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-                host.cacheDisplay(in: host.bounds, to: bitmap)
-            }
             return OwnedAccessibility.elements(in: host)
         }
 
@@ -950,7 +972,8 @@ enum AppViewScenarios {
 
         func press(_ name: String, _ context: CoverageContext) throws {
             let pressableRoles: Set<String> = ["AXButton", "AXCheckBox", "AXRadioButton", "AXSwitch"]
-            let matching = elements.filter { element in
+            let snapshot = elements
+            let matching = snapshot.filter { element in
                 element.accessibilityLabel() == name || element.accessibilityTitle() == name || (element.accessibilityValue() as? String) == name
             }
             guard !matching.isEmpty else { throw CoverageContext.Failure(description: "Owned control not found: \(name). Tree: \(text)") }
@@ -969,12 +992,12 @@ enum AppViewScenarios {
             // SwiftUI checkbox nodes report failure from performPress while
             // still performing the toggle, so success is verified through the
             // control's observable value flip instead of the return value.
-            for index in elements.indices.dropLast() {
-                let element = elements[index]
+            for index in snapshot.indices.dropLast() {
+                let element = snapshot[index]
                 guard (element.accessibilityValue() as? String) == name,
                       element.isAccessibilityEnabled(),
                       (element.accessibilityRole() as? String) == "AXStaticText" else { continue }
-                let control = elements[index + 1]
+                let control = snapshot[index + 1]
                 guard let role = control.accessibilityRole() as? String, pressableRoles.contains(role),
                       control.isAccessibilityEnabled() else { continue }
                 let before = control.accessibilityValue()

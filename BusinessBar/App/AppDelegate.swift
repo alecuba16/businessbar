@@ -274,6 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         notificationManager?.requestAuthorization()
         setupNotificationScheduling()
+        setupRSVPRouting()
 
         // Activate NoSleep on start if configured
         let activateOnStart = dependencies.defaults.bool(forKey: Constants.Defaults.noSleepActivateOnStart)
@@ -336,6 +337,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Notification scheduling
 
     private var scheduledEventIDs = Set<String>()
+    /// Invite notifications already delivered in this session. Native banners
+    /// can be dropped by macOS (banner style, DND), so the re-present logic
+    /// skips only while the delivered copy is still up; a refresh after the
+    /// banner is gone adds it back until the invitation is answered.
+    private var deliveredInviteIDs = Set<String>()
+
+    /// Routes RSVP answers tapped on native notification actions to the
+    /// meeting manager, and exposes the delivered-invite bookkeeping to the
+    /// NotificationManager.
+    private func setupRSVPRouting() {
+        notificationManager?.setRSVPHandler { [weak self] eventID, calendarID, status in
+            guard let self, let meetingManager = self.meetingManager else { return }
+            Task { @MainActor in
+                let ok = await meetingManager.respond(
+                    toEventID: eventID,
+                    calendarID: calendarID,
+                    status: status
+                )
+                if ok {
+                    self.deliveredInviteIDs.remove(eventID)
+                    self.notificationManager?.cancelInviteNotification(for: eventID)
+                } else {
+                    self.notificationManager?.notifyRSVPFailure(for: eventID)
+                }
+            }
+        }
+        notificationManager?.setDeliveredInviteBookkeeping(
+            delivered: { [weak self] in self?.deliveredInviteIDs ?? [] },
+            mark: { [weak self] eventID in self?.deliveredInviteIDs.insert(eventID) }
+        )
+    }
 
     private func setupNotificationScheduling() {
         guard let meetingManager, let notificationManager else { return }
@@ -428,4 +460,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func getMeetingManager() -> MeetingManager? { meetingManager }
     func getNoSleepManager() -> NoSleepManager? { noSleepManager }
+
+    /// Meeting manager access for auxiliary UI (RSVP panel) built before the
+    /// AppDelegate instance is captured. Returns the live manager when the
+    /// app has finished launching.
+    static func sharedMeetingManager() -> MeetingManager? {
+        (NSApp.delegate as? AppDelegate)?.getMeetingManager()
+    }
 }

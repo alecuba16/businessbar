@@ -53,7 +53,8 @@ enum OwnedAccessibility {
     }
 
     static func materialize() {
-        if !preparedApplication {
+        let firstCall = !preparedApplication
+        if firstCall {
             let application = NSApplication.shared
             let environment = ProcessInfo.processInfo.environment
             let isolatedHome = environment["BUSINESSBAR_COVERAGE_HOME"]
@@ -71,7 +72,12 @@ enum OwnedAccessibility {
         guard AXUIElementGetPid(application, &actualProcess) == .success, actualProcess == process else { return }
         var children: CFTypeRef?
         _ = AXUIElementCopyAttributeValue(application, kAXChildrenAttribute as CFString, &children)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        // The run-loop pump lets AppKit settle AX lazily, but costs 100ms,
+        // so it only runs on the first materialize per process; every later
+        // call is a cheap AX-tree read.
+        if firstCall {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
     }
 
     static func elements(in root: Any) -> [Element] {

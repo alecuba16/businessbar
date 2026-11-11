@@ -27,6 +27,9 @@ struct CalendarsTab: View {
     private let isRuntimeBundlePresent: Bool
     private let defaults: UserDefaults
     @State private var notificationsAuthorized = false
+    /// Confirmation-toggle enable waiting for the system authorization
+    /// answer: requestNotificationAccess completes it once the status lands.
+    @State private var pendingConfirmationAssign: ((Bool) -> Void)?
     @State private var isRequestingAccess = false
     @State private var isResettingCalendarPermission = false
     @State private var isResettingNotificationPermission = false
@@ -44,6 +47,12 @@ struct CalendarsTab: View {
         didSet { notifyPreferencesChanged() }
     }
     @AppStorage(Constants.Defaults.featureNotifications) private var meetingNotificationsEnabled = true {
+        didSet { notifyPreferencesChanged() }
+    }
+    @AppStorage(Constants.Defaults.notifyNewEvents) private var notifyNewEvents = false {
+        didSet { notifyPreferencesChanged() }
+    }
+    @AppStorage(Constants.Defaults.notifyPendingInvites) private var notifyPendingInvites = false {
         didSet { notifyPreferencesChanged() }
     }
 
@@ -269,6 +278,22 @@ struct CalendarsTab: View {
 
                 Toggle("End-of-event notification", isOn: $endOfEventNotification)
                     .disabled(!featureCalendarEnabled || !meetingNotificationsEnabled)
+
+                Toggle("Notify when a new event is added", isOn: Binding(
+                    get: { notifyNewEvents },
+                    set: { setConfirmationEnabled($0) { notifyNewEvents = $0 } }
+                ))
+                .disabled(!featureCalendarEnabled || !meetingNotificationsEnabled)
+
+                Toggle("Notify when an invitation needs an answer", isOn: Binding(
+                    get: { notifyPendingInvites },
+                    set: { setConfirmationEnabled($0) { notifyPendingInvites = $0 } }
+                ))
+                .disabled(!featureCalendarEnabled || !meetingNotificationsEnabled)
+
+                Text("Unanswered invitations also show a count in the menu bar and a section in the menu, independent of these toggles.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -403,6 +428,26 @@ struct CalendarsTab: View {
         notifyPreferencesChanged()
     }
 
+    /// The confirmation toggles piggyback on the notification permission:
+    /// enabling either one first ensures the system authorization exists.
+    private func setConfirmationEnabled(
+        _ enabled: Bool,
+        assign: @escaping (Bool) -> Void
+    ) {
+        guard enabled else {
+            assign(false)
+            notifyPreferencesChanged()
+            return
+        }
+        guard notificationsAuthorized else {
+            pendingConfirmationAssign = assign
+            requestNotificationAccess()
+            return
+        }
+        assign(true)
+        notifyPreferencesChanged()
+    }
+
     private func openCalendarPrivacySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
             openSettingsURL(url)
@@ -443,6 +488,14 @@ struct CalendarsTab: View {
         }
     }
 
+    /// Finishes the confirmation-toggle enable that triggered the
+    /// authorization request: without this the flag stays off even when
+    /// the system answers granted, and the toggle reads back off.
+    private func completePendingConfirmation(_ enabled: Bool) {
+        pendingConfirmationAssign?(enabled)
+        pendingConfirmationAssign = nil
+    }
+
     private func requestNotificationAccess() {
         guard isRuntimeBundlePresent else {
             AppLogger.warning("Cannot request notification access — no app bundle (running outside .app bundle?)", category: "Permissions")
@@ -454,6 +507,7 @@ struct CalendarsTab: View {
                 Task { @MainActor in
                     notificationsAuthorized = true
                     meetingNotificationsEnabled = true
+                    completePendingConfirmation(true)
                     notifyPreferencesChanged()
                     AppLogger.info("Notification access already granted", category: "Permissions")
                 }
@@ -462,6 +516,7 @@ struct CalendarsTab: View {
                     Task { @MainActor in
                         notificationsAuthorized = granted
                         meetingNotificationsEnabled = granted
+                        completePendingConfirmation(granted)
                         notifyPreferencesChanged()
                         AppLogger.info("Notification access request result: \(granted ? "granted" : "denied")", category: "Permissions")
                     }
@@ -470,6 +525,7 @@ struct CalendarsTab: View {
                 Task { @MainActor in
                     notificationsAuthorized = false
                     meetingNotificationsEnabled = false
+                    completePendingConfirmation(false)
                     AppLogger.warning("Notification access denied — opening System Settings", category: "Permissions")
                     openNotificationSettings()
                 }
@@ -477,6 +533,7 @@ struct CalendarsTab: View {
                 Task { @MainActor in
                     notificationsAuthorized = false
                     meetingNotificationsEnabled = false
+                    completePendingConfirmation(false)
                     AppLogger.warning("Unknown notification authorization status: \(status.rawValue)", category: "Permissions")
                 }
             }

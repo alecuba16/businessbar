@@ -11,6 +11,7 @@ final class GCEventStoreAdapter: EventStoreProtocol {
         var isAuthenticated: () -> Bool
         var signIn: () async throws -> Void
         var request: (URL) async throws -> Data
+        var requestJSON: (URL, String, Data) async throws -> Data
     }
     private let dependencies: Dependencies
 
@@ -18,7 +19,10 @@ final class GCEventStoreAdapter: EventStoreProtocol {
         self.init(dependencies: Dependencies(
             isAuthenticated: { auth.isAuthenticated },
             signIn: { try await auth.signIn() },
-            request: { try await auth.performRequest(url: $0) }
+            request: { try await auth.performRequest(url: $0) },
+            requestJSON: { url, method, body in
+                try await auth.performJSONRequest(url: url, method: method, body: body)
+            }
         ))
     }
 
@@ -49,6 +53,42 @@ final class GCEventStoreAdapter: EventStoreProtocol {
             allEvents.append(contentsOf: events)
         }
         return allEvents
+    }
+
+    // MARK: - RSVP
+
+    @discardableResult
+    func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool {
+        guard dependencies.isAuthenticated() else { return false }
+        let googleStatus: String
+        switch status {
+        case .accepted: googleStatus = "accepted"
+        case .declined: googleStatus = "declined"
+        case .tentative: googleStatus = "tentative"
+        case .pending, .unknown: return false
+        }
+
+        // The PATCH body lists only the caller's own attendee entry with
+        // the new responseStatus, so the server updates just that response.
+        guard let encodedCalendar = calendarID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let encodedEvent = eventID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+            return false
+        }
+        let url = URL(string: "https://www.googleapis.com/calendar/v3/calendars/\(encodedCalendar)/events/\(encodedEvent)?sendUpdates=none")!
+
+        let body: [String: Any] = [
+            "attendees": [["self": true, "responseStatus": googleStatus]],
+            "attendeesOmitted": true
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+
+        do {
+            _ = try await dependencies.requestJSON(url, "PATCH", data)
+            return true
+        } catch {
+            AppLogger.error("RSVP reply failed: \(error.localizedDescription)", category: "Calendar")
+            return false
+        }
     }
 
     // MARK: - Private helpers
@@ -156,6 +196,19 @@ final class GCEventStoreAdapter: EventStoreProtocol {
                 $0["displayName"] as? String ?? $0["email"] as? String
             } ?? []
 
+            // Google marks the signed-in user's own attendee entry with
+            // "self": true; its responseStatus is their RSVP state.
+            let selfAttendee = (item["attendees"] as? [[String: Any]])?
+                .first { ($0["self"] as? Bool) == true }
+            let rsvpStatus: CalendarEvent.RSVPStatus
+            switch selfAttendee?["responseStatus"] as? String {
+            case "needsAction": rsvpStatus = .pending
+            case "accepted": rsvpStatus = .accepted
+            case "declined": rsvpStatus = .declined
+            case "tentative": rsvpStatus = .tentative
+            default: rsvpStatus = .accepted
+            }
+
             let statusRaw = item["status"] as? String
             let status: CalendarEvent.EventStatus = (statusRaw == "cancelled") ? .canceled : .confirmed
 
@@ -171,7 +224,8 @@ final class GCEventStoreAdapter: EventStoreProtocol {
                 organizer: organizer,
                 attendees: attendees,
                 isAllDay: isAllDay,
-                status: status
+                status: status,
+                myRSVPStatus: rsvpStatus
             )
         }
     }

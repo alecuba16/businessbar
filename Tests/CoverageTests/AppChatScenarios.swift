@@ -32,9 +32,6 @@ private final class ChatHosted<Content: View> {
     var text: String {
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         return OwnedAccessibility.elements(in: host).flatMap { element in
             [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String].compactMap { $0 }
         }.joined(separator: "\n")
@@ -44,9 +41,6 @@ private final class ChatHosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         return OwnedAccessibility.elements(in: host).first { element in
             element.accessibilityLabel() == name || element.accessibilityTitle() == name || (element.accessibilityValue() as? String) == name
         }
@@ -66,9 +60,6 @@ private final class ChatHosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         return OwnedAccessibility.elements(in: host).first { element in
             element.helpText() == help
         }
@@ -88,9 +79,6 @@ private final class ChatHosted<Content: View> {
         OwnedAccessibility.materialize()
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-        }
         let all = OwnedAccessibility.elements(in: host)
         guard let element = all.first(where: { element in
             [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String]

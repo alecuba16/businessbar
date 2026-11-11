@@ -3,6 +3,12 @@ import Foundation
 public extension Notification.Name {
     static let noSleepSimulateActivityChanged = Notification.Name("com.businessbar.noSleepSimulateActivityChanged")
     static let businessBarPreferencesDidChange = Notification.Name("com.businessbar.preferencesDidChange")
+    /// Posted after a refresh when events appear that no previous fetch saw.
+    /// userInfo["events"] holds the newly seen [CalendarEvent].
+    static let businessBarNewEventsAppeared = Notification.Name("com.businessbar.newEventsAppeared")
+    /// Posted after a refresh while at least one invitation is unanswered.
+    /// userInfo["events"] holds the pending [CalendarEvent].
+    static let businessBarPendingRSVPsAppeared = Notification.Name("com.businessbar.pendingRSVPsAppeared")
 }
 
 /// Runtime bundle checks shared by notification and permission entry points.
@@ -53,6 +59,9 @@ enum Constants {
         static let featureNoSleep = "featureNoSleep"
         static let featureNotifications = "featureNotifications"
         static let featureBadges = "featureBadges"
+        // Confirmation popups for new events / invitations (opt-in).
+        static let notifyNewEvents = "notifyNewEvents"
+        static let notifyPendingInvites = "notifyPendingInvites"
     }
     
     enum DefaultValues {

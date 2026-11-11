@@ -331,6 +331,9 @@ private final class TailCalendarBackend: CalendarStoreBackend {
     func refreshSources() {}
     func calendars() -> [EKCalendar] { fixtureCalendars }
     func events(from startDate: Date, to endDate: Date, calendars: [EKCalendar]) -> [EKEvent] { fixtureEvents }
+    func event(withID eventID: String) -> EKEvent? { nil }
+    @discardableResult
+    func save(_ event: EKEvent) throws -> Bool { false }
 }
 
 /// Close-event counter for a transport attempt. The close callback can

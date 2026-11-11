@@ -29,6 +29,8 @@ import Foundation
         static let featureNoSleep = Constants.Defaults.featureNoSleep
         static let featureNotifications = Constants.Defaults.featureNotifications
         static let featureBadges = Constants.Defaults.featureBadges
+        static let notifyNewEvents = Constants.Defaults.notifyNewEvents
+        static let notifyPendingInvites = Constants.Defaults.notifyPendingInvites
         static let featureCompanion = Constants.Defaults.featureCompanion
         static let companionBaseURL = Constants.Defaults.companionBaseURL
         static let companionModel = Constants.Defaults.companionModel
@@ -74,6 +76,8 @@ extension UserDefaults {
             DefaultsKeys.timeRoundingThreshold: Constants.DefaultValues.timeRoundingThreshold,
             DefaultsKeys.calendarProvider: CalendarProvider.eventKit.rawValue,
             DefaultsKeys.featureCalendar: true,
+            DefaultsKeys.notifyNewEvents: false,
+            DefaultsKeys.notifyPendingInvites: false,
             DefaultsKeys.featureNoSleep: true,
             DefaultsKeys.featureNotifications: true,
             DefaultsKeys.featureBadges: true,

@@ -97,6 +97,31 @@ not rewritten production sources. It substitutes only its own executable
 entry point. Coverage is exported from the complete app executable, so
 the original application entry remains in the denominator.
 
+A few production lines cannot execute under the scenario harness because
+they require system-owned objects or host state the harness cannot provide.
+They stay intentionally uncovered, each reduced to the minimum shell:
+
+- `NotificationManager.userNotificationCenter(_:didReceive:...)`: the
+  Task hop to the main actor. `UNNotificationResponse` instances are built
+  only by the system when the user taps a notification; the payload
+  extraction and dispatch live in `dispatchAction(_:userInfo:)`, which
+  scenarios drive directly.
+- `CalendarEvent.rsvpStatus(of:)` (EKEvent form): the current-user attendee
+  read. `EKEvent.attendees` is populated only by EventKit when fetching
+  from a real store, and `EKParticipant` cannot be constructed outside
+  one, so the branch needs a store-fetched event. The status mapping it
+  calls is covered through `rsvpStatus(of:)` with all participant statuses.
+- `NativeCalendarStoreBackend.save(_:)` success return: a real write
+  needs a writable calendar with granted TCC access. The throwing path is
+  covered through the coverage seam
+  (`EKEventStoreAdapter.nativeBackendForCoverage`).
+- `StatusBarController.makePendingRSVPIcon` symbol fallback: triggers
+  only when the SF Symbol `calendar.badge.exclamationmark` is missing,
+  which cannot be forced on a supported macOS.
+- `GCEventStoreAdapter.respond` percent-encoding guard: Swift strings are
+  valid Unicode, so `addingPercentEncoding` never returns nil for them;
+  the guard is defensive against Foundation behavior changes.
+
 ### Building the Project
 
 #### Option 1: Using Make (Recommended)

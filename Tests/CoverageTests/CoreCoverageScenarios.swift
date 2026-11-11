@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor
 enum CoreCoverageScenarios {
-    static func run(_ context: CoverageContext) async throws {
+    static func run(_ context: CoverageContext, focused: String? = nil) async throws {
         let suites: [(String, @MainActor (CoverageContext) async throws -> Void)] = [
             ("command/persistence", CoreCommandPersistenceScenarios.run),
             ("network/ACP", CoreNetworkScenarios.run),
@@ -12,7 +12,7 @@ enum CoreCoverageScenarios {
             ("tail/mapping", CoreTailScenarios.run)
         ]
         var failures: [String] = []
-        for (name, scenario) in suites {
+        for (name, scenario) in suites where focused == nil || focused == name {
             let before = context.checks
             let started = Date()
             print("RUN: Core \(name)")

@@ -45,9 +45,6 @@ private extension AppPreferencesUI1Scenarios {
         var text: String {
             host.layoutSubtreeIfNeeded()
             host.displayIfNeeded()
-            if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-                host.cacheDisplay(in: host.bounds, to: bitmap)
-            }
             return OwnedAccessibility.elements(in: host).flatMap { element in
                 [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String].compactMap { $0 }
             }.joined(separator: "\n")
@@ -57,9 +54,6 @@ private extension AppPreferencesUI1Scenarios {
             OwnedAccessibility.materialize()
             host.layoutSubtreeIfNeeded()
             host.displayIfNeeded()
-            if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-                host.cacheDisplay(in: host.bounds, to: bitmap)
-            }
             return OwnedAccessibility.elements(in: host).first { element in
                 element.accessibilityLabel() == name || element.accessibilityTitle() == name || (element.accessibilityValue() as? String) == name
             }
@@ -79,9 +73,6 @@ private extension AppPreferencesUI1Scenarios {
             OwnedAccessibility.materialize()
             host.layoutSubtreeIfNeeded()
             host.displayIfNeeded()
-            if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-                host.cacheDisplay(in: host.bounds, to: bitmap)
-            }
             guard let element = OwnedAccessibility.elements(in: host).first(where: { element in
                 [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String]
                     .compactMap { $0 }
@@ -101,9 +92,6 @@ private extension AppPreferencesUI1Scenarios {
             OwnedAccessibility.materialize()
             host.layoutSubtreeIfNeeded()
             host.displayIfNeeded()
-            if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-                host.cacheDisplay(in: host.bounds, to: bitmap)
-            }
             let all = OwnedAccessibility.elements(in: host)
             guard let row = all.lastIndex(where: { element in
                 [element.accessibilityLabel(), element.accessibilityTitle(), element.accessibilityValue() as? String]
@@ -199,11 +187,20 @@ private extension AppPreferencesUI1Scenarios {
 enum AppPreferencesUI1Scenarios {
     static func run(_ context: CoverageContext) async throws {
         var failures: [String] = []
-        do { try await companionTab(context) } catch { failures.append("companionTab: \(error)") }
-        do { try await companionTabSheets(context) } catch { failures.append("companionTabSheets: \(error)") }
-        do { try await generalTab(context) } catch { failures.append("generalTab: \(error)") }
-        do { try await generalTabReset(context) } catch { failures.append("generalTabReset: \(error)") }
-        do { try launchAtLoginHelper(context) } catch { failures.append("launchAtLoginHelper: \(error)") }
+        func timed(_ name: String, _ operation: () async throws -> Void) async {
+            let started = Date()
+            do {
+                try await operation()
+                print("BLOCK: ui1 \(name) in \(Int(Date().timeIntervalSince(started)))s")
+            } catch {
+                failures.append("\(name): \(error)")
+            }
+        }
+        await timed("companionTab") { try await companionTab(context) }
+        await timed("companionTabSheets") { try await companionTabSheets(context) }
+        await timed("generalTab") { try await generalTab(context) }
+        await timed("generalTabReset") { try await generalTabReset(context) }
+        await timed("launchAtLoginHelper") { try launchAtLoginHelper(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 

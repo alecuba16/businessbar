@@ -12,6 +12,9 @@ private final class CoverageEventStore: EventStoreProtocol {
     var events: [CalendarEvent] = []
     var requests: [(Date, Date, [String])] = []
     var duringFetch: (() async -> Void)?
+    /// RSVP answers received through respond(toEventID:calendarID:status:).
+    var receivedRSVPs: [(eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus)] = []
+    var respondResult = true
 
     func requestAccess() async throws -> Bool {
         if fail { throw Failure.unavailable }
@@ -29,6 +32,11 @@ private final class CoverageEventStore: EventStoreProtocol {
         if fail { throw Failure.unavailable }
         return events
     }
+
+    func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool {
+        receivedRSVPs.append((eventID, calendarID, status))
+        return respondResult
+    }
 }
 
 @MainActor
@@ -39,6 +47,12 @@ private final class CoverageCalendarBackend: CalendarStoreBackend {
     var fail = false
     var refreshes = 0
     var calendarReads = 0
+    /// Event the RSVP path finds through event(withID:).
+    var storedEvents: [String: EKEvent] = [:]
+    var saveResults: [String: Bool] = [:]
+    var saveCalls: [String] = []
+    /// When set, save(_:) throws instead of returning.
+    var saveError: Error?
     func requestAccess() async throws -> Bool {
         if fail { throw Failure.unavailable }
         return grant
@@ -46,6 +60,14 @@ private final class CoverageCalendarBackend: CalendarStoreBackend {
     func refreshSources() { refreshes += 1 }
     func calendars() -> [EKCalendar] { calendarReads += 1; return [] }
     func events(from startDate: Date, to endDate: Date, calendars: [EKCalendar]) -> [EKEvent] { [] }
+    func event(withID eventID: String) -> EKEvent? { storedEvents[eventID] }
+    @discardableResult
+    func save(_ event: EKEvent) throws -> Bool {
+        saveCalls.append(event.eventIdentifier ?? "")
+        if let saveError { throw saveError }
+        if let forced = saveResults[event.eventIdentifier ?? ""] { return forced }
+        return true
+    }
 }
 
 @MainActor
@@ -65,6 +87,12 @@ enum CoreMeetingUtilitiesScenarios {
         catch { failures.append("calendar adapter: \(error)") }
         do { try await manager(context) }
         catch { failures.append("meeting manager: \(error)") }
+        do { try await rsvp(context) }
+        catch { failures.append("rsvp flow: \(error)") }
+        do { try ekParticipantMapping(context) }
+        catch { failures.append("participant mapping: \(error)") }
+        do { try await ekRespond(context) }
+        catch { failures.append("ek respond: \(error)") }
         try context.expect(failures.isEmpty, failures.joined(separator: "\n"))
     }
 
@@ -317,6 +345,138 @@ enum CoreMeetingUtilitiesScenarios {
         await manager.refreshEvents()
         await manager.loadCalendars()
         try context.expect(manager.events.isEmpty && manager.calendars.isEmpty, "Explicit refresh observes disabled preference")
+    }
+
+    private static func rsvp(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("meeting-rsvp")
+        defaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        defaults.set(try JSONEncoder().encode([calendar.id]), forKey: Constants.Defaults.selectedCalendars)
+        let notifications = NotificationCenter()
+        let store = CoverageEventStore()
+        store.calendars = [calendar]
+        let manager = MeetingManager(eventStore: store, nowProvider: { instant }, defaults: defaults, notificationCenter: notifications)
+        await Task.yield()
+
+        var newEventPosts: [[CalendarEvent]] = []
+        var pendingPosts: [[CalendarEvent]] = []
+        let newObserver = notifications.publisher(for: .businessBarNewEventsAppeared).sink { note in
+            if let events = note.userInfo?["events"] as? [CalendarEvent] { newEventPosts.append(events) }
+        }
+        let pendingObserver = notifications.publisher(for: .businessBarPendingRSVPsAppeared).sink { note in
+            if let events = note.userInfo?["events"] as? [CalendarEvent] { pendingPosts.append(events) }
+        }
+        defer { newObserver.cancel(); pendingObserver.cancel() }
+
+        let invited = CalendarEvent(id: "invited", title: "Invited", startDate: instant.addingTimeInterval(600), endDate: instant.addingTimeInterval(1200), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Boss", attendees: ["Boss", "Me"], myRSVPStatus: .pending)
+        let personal = CalendarEvent(id: "personal", title: "Personal", startDate: instant.addingTimeInterval(300), endDate: instant.addingTimeInterval(900), location: nil, notes: nil, url: nil, calendar: calendar, organizer: nil, attendees: [], myRSVPStatus: .accepted)
+
+        store.events = [invited, personal]
+        await manager.refreshEvents()
+        try context.equal(manager.pendingRSVPEvents.map(\.id), ["invited"], "Only pending RSVP events surface")
+        try context.equal(newEventPosts.count, 1, "First refresh posts newly seen events")
+        try context.equal(newEventPosts.last?.map(\.id).sorted(), ["invited", "personal"], "Both events are new on first refresh")
+        try context.equal(pendingPosts.count, 1, "First refresh posts pending invites")
+
+        store.events = [invited, personal]
+        await manager.refreshEvents()
+        try context.equal(newEventPosts.count, 1, "Known events are not re-announced")
+        try context.equal(pendingPosts.count, 2, "Unanswered invite re-announced on every refresh")
+
+        let late = CalendarEvent(id: "late", title: "Late", startDate: instant.addingTimeInterval(1500), endDate: instant.addingTimeInterval(2000), location: nil, notes: nil, url: nil, calendar: calendar, organizer: nil, attendees: [], myRSVPStatus: .accepted)
+        store.events = [invited, personal, late]
+        await manager.refreshEvents()
+        try context.equal(newEventPosts.last?.map(\.id), ["late"], "Only the new event is announced")
+
+        store.respondResult = true
+        let accepted = await manager.respond(to: invited, status: .accepted)
+        try context.expect(accepted, "Successful answer returns true")
+        try context.equal(store.receivedRSVPs.map(\.0), ["invited"], "Answer reaches the store")
+        try context.equal(store.receivedRSVPs.map(\.2), [.accepted], "Status passes through unchanged")
+
+        store.respondResult = false
+        let failed = await manager.respond(toEventID: "invited", calendarID: calendar.id, status: .declined)
+        try context.expect(!failed, "Rejected answer returns false")
+        try context.equal(store.receivedRSVPs.map(\.2), [.accepted, .declined], "Both answer variants reach the store")
+    }
+
+    private static func ekParticipantMapping(_ context: CoverageContext) throws {
+        let store = EKEventStore()
+        let ekEvent = EKEvent(eventStore: store)
+        ekEvent.title = "Mapping"
+        ekEvent.startDate = instant
+        ekEvent.endDate = instant.addingTimeInterval(600)
+        try context.equal(CalendarEvent(from: ekEvent, calendar: calendar).myRSVPStatus, .accepted, "Event without attendees reads as accepted")
+        // Direct status mapping: EKParticipant instances cannot be built
+        // outside a real event store, so the switch is exercised by status.
+        try context.equal(CalendarEvent.rsvpStatus(of: .pending), .pending, "Pending participant maps to pending")
+        try context.equal(CalendarEvent.rsvpStatus(of: .accepted), .accepted, "Accepted participant maps to accepted")
+        try context.equal(CalendarEvent.rsvpStatus(of: .declined), .declined, "Declined participant maps to declined")
+        try context.equal(CalendarEvent.rsvpStatus(of: .tentative), .tentative, "Tentative participant maps to tentative")
+        try context.equal(CalendarEvent.rsvpStatus(of: .unknown), .unknown, "Unknown participant maps to unknown")
+        try context.equal(CalendarEvent.rsvpStatus(of: .delegated), .unknown, "Delegated participant maps to unknown")
+        try context.equal(CalendarEvent.rsvpStatus(of: .completed), .unknown, "Completed participant maps to unknown")
+    }
+
+    /// RSVP replies through the EventKit adapter: the private participation
+    /// status setter stays guarded, and every reject path returns false.
+    private static func ekRespond(_ context: CoverageContext) async throws {
+        let backend = CoverageCalendarBackend()
+        let adapter = EKEventStoreAdapter(backend: backend)
+        let ekStore = EKEventStore()
+        let ekEvent = EKEvent(eventStore: ekStore)
+        ekEvent.title = "Local invite"
+        ekEvent.startDate = instant
+        ekEvent.endDate = instant.addingTimeInterval(600)
+        backend.storedEvents["ek-invite"] = ekEvent
+        let identifier = ekEvent.eventIdentifier ?? "ek-invite"
+        backend.storedEvents[identifier] = ekEvent
+
+        var answered = await adapter.respond(toEventID: "ek-invite", calendarID: "work", status: .accepted)
+        try context.expect(!answered && backend.saveCalls.isEmpty, "Denied access rejects the answer")
+
+        backend.hasAccess = true
+        answered = await adapter.respond(toEventID: "missing", calendarID: "work", status: .accepted)
+        try context.expect(!answered && backend.saveCalls.isEmpty, "Missing event rejects the answer")
+
+        answered = await adapter.respond(toEventID: "ek-invite", calendarID: "work", status: .pending)
+        try context.expect(!answered && backend.saveCalls.isEmpty, "Pending status is not written back")
+        answered = await adapter.respond(toEventID: "ek-invite", calendarID: "work", status: .unknown)
+        try context.expect(!answered && backend.saveCalls.isEmpty, "Unknown status is not written back")
+
+        answered = await adapter.respond(toEventID: "ek-invite", calendarID: "work", status: .accepted)
+        try context.expect(answered && backend.saveCalls.count == 1, "Accepted answer saves the event")
+
+        answered = await adapter.respond(toEventID: "ek-invite", calendarID: "work", status: .declined)
+        try context.expect(answered && backend.saveCalls.count == 2, "Declined answer saves the event")
+
+        answered = await adapter.respond(toEventID: "ek-invite", calendarID: "work", status: .tentative)
+        try context.expect(answered && backend.saveCalls.count == 3, "Tentative answer saves the event")
+
+        backend.saveResults[""] = false
+        answered = await adapter.respond(toEventID: "ek-invite", calendarID: "work", status: .accepted)
+        try context.expect(!answered && backend.saveCalls.count == 4, "Save failure returns false after the attempt")
+
+        backend.saveError = CoverageCalendarBackend.Failure.unavailable
+        answered = await adapter.respond(toEventID: "ek-invite", calendarID: "work", status: .accepted)
+        try context.expect(!answered && backend.saveCalls.count == 5, "Throwing save lands in the catch and reports failure")
+        backend.saveError = nil
+
+        // Native backend through the coverage seam: real store, injected
+        // access flag. The unfiled event makes save throw, so no state is touched.
+        let nativeBackend = EKEventStoreAdapter.nativeBackendForCoverage(hasAccess: true)
+        let nativeAdapter = EKEventStoreAdapter(backend: nativeBackend)
+        answered = await nativeAdapter.respond(toEventID: "native-missing", calendarID: "work", status: .accepted)
+        try context.expect(!answered, "Native lookup miss rejects the answer")
+        let unfiled = EKEvent(eventStore: EKEventStore())
+        unfiled.title = "Unfiled"
+        unfiled.startDate = instant
+        unfiled.endDate = instant.addingTimeInterval(600)
+        do {
+            _ = try nativeBackend.save(unfiled)
+            try context.expect(false, "Unfiled event save should not succeed")
+        } catch {
+            try context.expect(true, "Native save surfaces EventKit errors to the caller")
+        }
     }
 
     private static func wait(_ context: CoverageContext, _ message: String, until condition: () -> Bool) async throws {

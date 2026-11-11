@@ -9,6 +9,10 @@ public final class MeetingManager: ObservableObject {
     @Published public private(set) var nextEvent: CalendarEvent?
     @Published public private(set) var calendars: [MBCalendar] = []
     @Published public private(set) var isLoading = false
+    /// Events whose invitation is still waiting for the user's answer.
+    /// Drives the status-bar pending badge, the menu invites section, and
+    /// the RSVP panel.
+    @Published public private(set) var pendingRSVPEvents: [CalendarEvent] = []
 
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "Meeting")
 
@@ -29,13 +33,20 @@ public final class MeetingManager: ObservableObject {
     /// periodic tick to detect midnight rollover and trigger a full refresh
     /// so the fetch window advances to the new day.
     private var lastFetchDayStart: Date?
+    /// IDs of events already seen in a previous fetch. First-seen events
+    /// feed the new-event confirmation notification. Survives refreshes,
+    /// resets when the calendar feature turns off so a later re-enable does
+    /// not replay the whole day as "new".
+    private var seenEventIDs = Set<String>()
     private var lastFeatureState: Bool {
         didSet {
             if !lastFeatureState {
                 events = []
                 nextEvent = nil
                 calendars = []
+                pendingRSVPEvents = []
                 dismissedEventIDs.removeAll()
+                seenEventIDs.removeAll()
                 lastFetchDayStart = nil
             }
         }
@@ -68,6 +79,7 @@ public final class MeetingManager: ObservableObject {
                 events = []
                 nextEvent = nil
                 calendars = []
+                pendingRSVPEvents = []
                 return
             }
             await loadCalendars()
@@ -97,6 +109,7 @@ public final class MeetingManager: ObservableObject {
         guard calendarFeatureEnabled() else {
             events = []
             nextEvent = nil
+            pendingRSVPEvents = []
             lastFetchDayStart = nil
             return
         }
@@ -135,9 +148,30 @@ public final class MeetingManager: ObservableObject {
             }
             fetchedEvents.sort { $0.startDate < $1.startDate }
 
+            let newlySeenEvents = fetchedEvents.filter { !seenEventIDs.contains($0.id) }
+            for event in fetchedEvents {
+                seenEventIDs.insert(event.id)
+            }
+
             events = fetchedEvents
+            pendingRSVPEvents = fetchedEvents.filter { $0.myRSVPStatus == .pending }
             nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs, now: nowProvider())
             lastFetchDayStart = window.start
+
+            if !newlySeenEvents.isEmpty {
+                notificationCenter.post(
+                    name: .businessBarNewEventsAppeared,
+                    object: nil,
+                    userInfo: ["events": newlySeenEvents]
+                )
+            }
+            if !pendingRSVPEvents.isEmpty {
+                notificationCenter.post(
+                    name: .businessBarPendingRSVPsAppeared,
+                    object: nil,
+                    userInfo: ["events": pendingRSVPEvents]
+                )
+            }
         } catch {
             Self.logger.error("Failed to refresh events: \(error.localizedDescription)")
         }
@@ -146,6 +180,29 @@ public final class MeetingManager: ObservableObject {
     public func dismissEvent(_ eventID: String) {
         dismissedEventIDs.insert(eventID)
         nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs, now: nowProvider())
+    }
+
+    /// Sends the user's RSVP answer for one event through the active store
+    /// and refreshes so the badge, menu, and next-event pick up the change.
+    /// Returns false when the store rejected the answer.
+    @discardableResult
+    public func respond(to event: CalendarEvent, status: CalendarEvent.RSVPStatus) async -> Bool {
+        let ok = await eventStore.respond(toEventID: event.id, calendarID: event.calendar.id, status: status)
+        if ok {
+            await refreshEvents()
+        }
+        return ok
+    }
+
+    /// Same as `respond(to:status:)` for callers that only carry the event
+    /// and calendar identifiers (notification action routing).
+    @discardableResult
+    public func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool {
+        let ok = await eventStore.respond(toEventID: eventID, calendarID: calendarID, status: status)
+        if ok {
+            await refreshEvents()
+        }
+        return ok
     }
 
     /// Recalculation of `nextEvent` from the cached events array, plus day
