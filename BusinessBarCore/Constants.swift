@@ -62,6 +62,9 @@ enum Constants {
         // Confirmation popups for new events / invitations (opt-in).
         static let notifyNewEvents = "notifyNewEvents"
         static let notifyPendingInvites = "notifyPendingInvites"
+        // Recently added events region in the menu.
+        static let recentEventsLimit = "recentEventsLimit"
+        static let recentEventsWindowDays = "recentEventsWindowDays"
     }
     
     enum DefaultValues {
@@ -72,5 +75,7 @@ enum Constants {
         static let badgePollInterval = 3             // seconds between badge polls
         static let activityCheckInterval = 30       // seconds between idle checks
         static let activityIdleMultiplier = 3       // fire after N × checkInterval seconds idle
+        static let recentEventsLimit = 5             // rows in the Recently added menu region
+        static let recentEventsWindowDays = 1       // first-seen window for that region
     }
 }

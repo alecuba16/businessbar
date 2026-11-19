@@ -21,6 +21,7 @@ enum MenuBuilder {
         showCompanion: Bool,
         pendingRSVPEvents: [CalendarEvent],
         onAnswerInvites: @escaping () -> Void,
+        recentEvents: [CalendarEvent] = [],
         defaults: UserDefaults = .standard
     ) -> NSMenu {
         let menu = NSMenu()
@@ -39,8 +40,9 @@ enum MenuBuilder {
             menu.addItem(disabledItem)
         }
 
-        if showEvents, !pendingRSVPEvents.isEmpty {
+        if showEvents {
             addInvitesSection(to: menu, pendingRSVPEvents: pendingRSVPEvents, onAnswerInvites: onAnswerInvites)
+            addRecentSection(to: menu, recentEvents: recentEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
         }
 
         menu.addItem(NSMenuItem.separator())
@@ -88,11 +90,15 @@ enum MenuBuilder {
         return menu
     }
     
-    /// Invitations awaiting a reply, listed with an action that opens the
-    /// RSVP panel. The header row is disabled so it works as a section
-    /// label, the answer row drives the panel.
+    /// Invitations awaiting a reply. The header row is disabled so it works
+    /// as a section label; each invite row opens the RSVP panel, where
+    /// Yes / Maybe / No are answered with the keyboard shortcuts y / m / n.
+    /// Every invite row carries the same action because the panel walks the
+    /// whole pending list, so clicking any row starts the same flow.
     @MainActor
     private static func addInvitesSection(to menu: NSMenu, pendingRSVPEvents: [CalendarEvent], onAnswerInvites: @escaping () -> Void) {
+        guard !pendingRSVPEvents.isEmpty else { return }
+
         menu.addItem(NSMenuItem.separator())
 
         let header = NSMenuItem(title: "Pending invitations", action: nil, keyEquivalent: "")
@@ -103,13 +109,48 @@ enum MenuBuilder {
         formatter.dateStyle = .none
         formatter.timeStyle = .short
         for event in pendingRSVPEvents {
+            var title = "\(event.title) \u{00b7} \(formatter.string(from: event.startDate))"
+            if let organizer = event.organizer, !organizer.isEmpty {
+                title += " \u{00b7} \(organizer)"
+            }
             let item = NSMenuItem(
-                title: "\(event.title) · \(formatter.string(from: event.startDate))",
+                title: title,
                 action: #selector(MenuActionHandler.answerInvites),
                 keyEquivalent: ""
             )
             item.representedObject = MenuAction.answerInvites(onAnswerInvites)
             item.target = MenuActionHandler.shared
+            menu.addItem(item)
+        }
+    }
+
+    /// Events the app saw appear for the first time in the last 24 h.
+    /// Rows behave like the event rows above: click joins when a meeting
+    /// link exists, submenu offers Join and Dismiss.
+    @MainActor
+    private static func addRecentSection(to menu: NSMenu, recentEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void) {
+        guard !recentEvents.isEmpty else { return }
+
+        menu.addItem(NSMenuItem.separator())
+
+        let header = NSMenuItem(title: "Recently added", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        for event in recentEvents {
+            let item = NSMenuItem(
+                title: "\(event.title) \u{00b7} \(formatter.string(from: event.startDate))",
+                action: #selector(MenuActionHandler.eventClicked),
+                keyEquivalent: ""
+            )
+            item.representedObject = MenuAction.eventClicked(event, onJoinMeeting, onDismissEvent)
+            item.target = MenuActionHandler.shared
+            if event.meetingLink != nil {
+                item.submenu = createEventSubmenu(for: event, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
+            }
             menu.addItem(item)
         }
     }

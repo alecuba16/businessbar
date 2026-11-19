@@ -35,6 +35,9 @@ enum Constants {
         // Confirmation popups for new events / invitations (opt-in).
         static let notifyNewEvents = "notifyNewEvents"
         static let notifyPendingInvites = "notifyPendingInvites"
+        // Recently added events region in the menu.
+        static let recentEventsLimit = "recentEventsLimit"
+        static let recentEventsWindowDays = "recentEventsWindowDays"
         // LLM Companion
         static let featureCompanion = "featureCompanion"
         static let companionBaseURL = "companionBaseURL"
@@ -71,6 +74,8 @@ enum Constants {
         static let logLevelRaw = 2                   // LogLevel.warning.rawValue — only warnings and above by default
         static let activityCheckInterval = 30       // seconds between idle checks
         static let activityIdleMultiplier = 3       // fire after N × checkInterval seconds idle
+        static let recentEventsLimit = 5             // rows in the Recently added menu region
+        static let recentEventsWindowDays = 1       // first-seen window for that region
         static let companionBaseURL = "https://api.openai.com/v1"
         static let companionModel = "gpt-4o-mini"
         static let companionBackend = "openai"

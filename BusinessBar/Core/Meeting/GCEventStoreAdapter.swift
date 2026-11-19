@@ -47,9 +47,18 @@ final class GCEventStoreAdapter: EventStoreProtocol {
 
     func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] {
         guard dependencies.isAuthenticated() else { return [] }
+        // One calendarList call feeds every per-calendar fetch: the event
+        // mapping needs the calendar object, and N calendars used to mean
+        // N+1 identical list requests per refresh.
+        let calendarObjects = try await fetchCalendars()
         var allEvents: [CalendarEvent] = []
         for calendarID in calendars {
-            let events = try await fetchEventsForCalendar(calendarID: calendarID, from: startDate, to: endDate)
+            let events = try await fetchEventsForCalendar(
+                calendarID: calendarID,
+                from: startDate,
+                to: endDate,
+                calendarObjects: calendarObjects
+            )
             allEvents.append(contentsOf: events)
         }
         return allEvents
@@ -93,7 +102,12 @@ final class GCEventStoreAdapter: EventStoreProtocol {
 
     // MARK: - Private helpers
 
-    private func fetchEventsForCalendar(calendarID: String, from startDate: Date, to endDate: Date) async throws -> [CalendarEvent] {
+    private func fetchEventsForCalendar(
+        calendarID: String,
+        from startDate: Date,
+        to endDate: Date,
+        calendarObjects: [MBCalendar]
+    ) async throws -> [CalendarEvent] {
         let isoFormatter = ISO8601DateFormatter()
         isoFormatter.formatOptions = [.withInternetDateTime]
 
@@ -115,11 +129,8 @@ final class GCEventStoreAdapter: EventStoreProtocol {
         guard let url = components.url else { return [] }
         let data = try await dependencies.request(url)
 
-        // We need the calendar object for each event. Fetch it from the list.
-        let calendarObjects = try await fetchCalendars()
         let calendarObj = calendarObjects.first(where: { $0.id == calendarID })
             ?? MBCalendar(id: calendarID, title: calendarID, color: "#1a73e8", source: "Google")
-
 
         return try parseEventList(data, calendar: calendarObj)
     }

@@ -275,6 +275,33 @@ final class MeetingManagerRSVPTests: XCTestCase {
         XCTAssertEqual(manager.pendingRSVPEvents.map(\.id), ["inv1"])
     }
 
+    func test_endedPendingInvitesAreIgnored() async throws {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = MockEventStore()
+        let calendar = MBCalendar(id: "cal1", title: "Work", color: "#FF0000", source: "iCloud")
+        store.stubbedCalendars = [calendar]
+
+        let now = Date()
+        let ended = CalendarEvent(
+            id: "ended", title: "Invite",
+            startDate: now.addingTimeInterval(-3600), endDate: now.addingTimeInterval(-1800),
+            location: nil, notes: nil, url: nil,
+            calendar: calendar, organizer: "Boss", attendees: ["Boss", "Me"],
+            myRSVPStatus: .pending
+        )
+        let upcoming = pendingEvent(id: "upcoming", calendar: calendar)
+        store.stubbedEvents = [ended, upcoming]
+
+        let calendarData = try JSONEncoder().encode(["cal1"])
+        defaults.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
+
+        let manager = MeetingManager(eventStore: store, nowProvider: { now }, defaults: defaults, notificationCenter: NotificationCenter())
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(manager.pendingRSVPEvents.map(\.id), ["upcoming"], "Already-ended invites never surface as pending")
+    }
+
     func test_answeredInviteLeavesPendingList() async throws {
         let (defaults, suiteName) = isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

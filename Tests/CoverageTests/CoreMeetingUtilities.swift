@@ -118,6 +118,17 @@ enum CoreMeetingUtilitiesScenarios {
         try context.expect(EventDisplayPlanner.nextEvent(from: [live], dismissedIDs: ["live"], now: instant) == nil, "Dismissal wins over ongoing event")
         try context.equal(EventDisplayPlanner.filter([live, declined], dismissedIDs: [], showDeclined: false).map(\.id), ["live"], "Declined events hidden")
         try context.equal(EventDisplayPlanner.filter([live, declined], dismissedIDs: ["live"], showDeclined: true).map(\.id), ["declined"], "Visibility does not restore dismissed event")
+        let pendingLive = CalendarEvent(id: "pending-live", title: "pending-live", startDate: instant.addingTimeInterval(-60), endDate: instant.addingTimeInterval(600), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Boss", attendees: ["Boss"], myRSVPStatus: .pending)
+        let pendingEnded = CalendarEvent(id: "pending-ended", title: "pending-ended", startDate: instant.addingTimeInterval(-4200), endDate: instant.addingTimeInterval(-60), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Boss", attendees: ["Boss"], myRSVPStatus: .pending)
+        try context.equal(EventDisplayPlanner.pendingInvites(from: [pendingLive, pendingEnded], now: instant).map(\.id), ["pending-live"], "Ended invitations stay out of the pending set")
+        let recentSoon = event("recent-soon", start: 3600, end: 4200)
+        let recentOld = event("recent-old", start: 7200, end: 7800)
+        let firstSeen: [String: Date] = [
+            recentSoon.id: instant.addingTimeInterval(-3600),
+            recentOld.id: instant.addingTimeInterval(-48 * 3600)
+        ]
+        try context.equal(EventDisplayPlanner.recentEvents(firstSeen: firstSeen, from: [recentSoon, recentOld], now: instant).map(\.id), ["recent-soon"], "Only events first seen inside the window are recent")
+        try context.equal(EventDisplayPlanner.recentEvents(firstSeen: [:], from: [recentSoon], now: instant).map(\.id), [], "Events without first-seen memory are not recent")
         try context.equal(live.duration, 660, "Model duration retains start and end")
         try context.equal(live.organizer, "Organizer", "Organizer retained")
         try context.equal(live.attendees, ["Attendee"], "Attendees retained")

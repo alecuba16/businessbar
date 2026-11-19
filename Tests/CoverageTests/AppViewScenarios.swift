@@ -537,8 +537,8 @@ enum AppViewScenarios {
         var durations: [TimeInterval?] = []
         let event = makeEvent(id: "meeting", title: "Menu meeting", location: nil, url: URL(string: "https://meet.google.com/aaa-bbbb-ccc"))
         let plain = makeEvent(id: "plain", title: "No meeting URL", location: nil, url: nil)
-        func build(events: [CalendarEvent], loading: Bool = false, showEvents: Bool = true, showNoSleep: Bool = true, companion: Bool = true, pending: [CalendarEvent] = [], onAnswer: (() -> Void)? = nil) -> NSMenu {
-            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, defaults: defaults)
+        func build(events: [CalendarEvent], loading: Bool = false, showEvents: Bool = true, showNoSleep: Bool = true, companion: Bool = true, pending: [CalendarEvent] = [], recent: [CalendarEvent] = [], onAnswer: (() -> Void)? = nil) -> NSMenu {
+            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, recentEvents: recent, defaults: defaults)
         }
         let menu = build(events: [event, plain])
         try context.expect(menu.items.contains(where: { $0.title.contains("Menu meeting") && $0.submenu != nil }), "Meeting gets join submenu")
@@ -569,6 +569,19 @@ enum AppViewScenarios {
         try context.equal(durations.compactMap { $0 }, [900, 1800, 3600, 7200, 10800, 14400, 18000, 21600, 25200, 28800, 43200, 57600], "Menu durations retain exact seconds")
         try context.expect(build(events: [], loading: true).item(withTitle: "Loading events...")?.isEnabled == false, "Loading menu is not actionable")
         try context.expect(build(events: []).item(withTitle: "No upcoming events")?.isEnabled == false, "Empty menu is explicit")
+
+        // Recently added region: rows only when events were provided, join
+        // and dismiss route through the same menu actions as event rows.
+        let recentMenu = build(events: [], recent: [event])
+        try context.expect(recentMenu.item(withTitle: "Recently added") != nil, "Recent region appears with recent events")
+        try context.expect(recentMenu.items.contains(where: { $0.title.contains("Menu meeting") }), "Recent rows list the event")
+        try context.expect(build(events: []).item(withTitle: "Recently added") == nil, "No recent events means no region")
+        if let recentRow = recentMenu.items.first(where: { $0.title.contains("Menu meeting") }), let recentJoin = recentRow.submenu?.item(withTitle: "Join Meeting") {
+            handler.joinMeeting(recentJoin)
+            try context.equal(joined.last, event.id, "Recent row join routes through the join callback")
+        } else {
+            throw CoverageContext.Failure(description: "Recent row missing join submenu")
+        }
         let tomorrowStart = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date()))!.addingTimeInterval(3600)
         let tomorrow = CalendarEvent(id: "tomorrow", title: "Tomorrow fixture", startDate: tomorrowStart, endDate: tomorrowStart.addingTimeInterval(1800), location: nil, notes: nil, url: nil, calendar: event.calendar, organizer: nil, attendees: [])
         defaults.set(true, forKey: Constants.Defaults.showTomorrowEvents)

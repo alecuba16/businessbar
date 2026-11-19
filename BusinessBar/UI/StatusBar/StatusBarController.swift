@@ -815,6 +815,7 @@ extension StatusBarController: NSMenuDelegate {
             showCompanion: isCompanionFeatureEnabled,
             pendingRSVPEvents: meetingManager.pendingRSVPEvents,
             onAnswerInvites: { [weak self] in self?.effects.answerInvites() },
+            recentEvents: meetingManager.recentEvents,
             defaults: defaults
         )
 

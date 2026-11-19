@@ -72,9 +72,10 @@ enum AppRSVPScenarios {
         invite(id, in: calendar, startingIn: 600)
     }
 
-    /// Negative offsets build already-ended invites: pendingRSVPEvents keeps
-    /// them (no time filter) while nextEvent drops them (endDate > now),
-    /// which is exactly the idle-with-badge state.
+    /// Offsets pick the invite's slot relative to `now`: positive offsets
+    /// build upcoming invites, negative offsets already-ended ones. The
+    /// pending filter drops ended invites (endDate > now), so only
+    /// upcoming ones drive the badge.
     private static func invite(_ id: String, in calendar: MBCalendar, startingIn offset: TimeInterval) -> CalendarEvent {
         CalendarEvent(
             id: id, title: "Invite \(id)",
@@ -98,7 +99,10 @@ enum AppRSVPScenarios {
         defaults.set(try JSONEncoder().encode([calendar.id]), forKey: Constants.Defaults.selectedCalendars)
         let notifications = NotificationCenter()
         let store = Store()
-        store.events = [invite("one", in: calendar, startingIn: -1200), invite("two", in: calendar, startingIn: -900)]
+        // Ended invites no longer count as pending, so the badge needs
+        // upcoming ones; their meeting rows must be dismissed below to
+        // reach the idle-with-invites state.
+        store.events = [invite("badge-one", in: calendar, startingIn: 1200), invite("badge-two", in: calendar, startingIn: 1800)]
         let meetings = MeetingManager(eventStore: store, nowProvider: { now }, defaults: defaults, notificationCenter: notifications)
         let unscheduled: (TimeInterval, @escaping () -> Void) -> Timer = { interval, action in
             Timer(timeInterval: interval, repeats: true) { _ in action() }
@@ -120,9 +124,24 @@ enum AppRSVPScenarios {
         await settle()
         let button = items[0].ownedButton
 
-        // Idle with two pending invites: badge icon, no meeting text.
-        try c.expect(button.imagePosition == .imageOnly, "Idle pending invites show the icon layout")
+        // Upcoming invites are live meetings, so the bar shows the
+        // next-event text, not the badge.
+        try c.expect(button.imagePosition == .noImage, "Upcoming pending invites surface as the next meeting")
+
+        // Dismissing their rows leaves the invites pending: the idle
+        // badge takes over.
+        meetings.dismissEvent("badge-one")
+        meetings.dismissEvent("badge-two")
+        await settle()
+        try c.expect(button.imagePosition == .imageOnly, "Dismissed rows with pending invites show the icon layout")
         try c.expect(button.image?.tiffRepresentation != nil, "Pending icon renders")
+
+        // Ended pending invite stays out of the count while an upcoming one stays in.
+        store.events = [invite("past", in: calendar, startingIn: -1200), invite("soon", in: calendar, startingIn: 1200)]
+        await meetings.refreshEvents()
+        await settle()
+        let titleWithEnded = button.attributedTitle.string
+        try c.expect(titleWithEnded.contains("1?") && !titleWithEnded.contains("2?"), "Ended pending invite does not add to the pending count")
 
         // Current meeting plus invites: text plus "2?" suffix.
         let current = CalendarEvent(

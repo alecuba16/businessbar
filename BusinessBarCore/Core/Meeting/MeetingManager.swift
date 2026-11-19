@@ -11,8 +11,13 @@ public final class MeetingManager: ObservableObject {
     @Published public private(set) var isLoading = false
     /// Events whose invitation is still waiting for the user's answer.
     /// Drives the status-bar pending badge, the menu invites section, and
-    /// the RSVP panel.
+    /// the RSVP panel. Events that already ended are excluded: a pending
+    /// status on a past invitation is stale bookkeeping, not a question.
     @Published public private(set) var pendingRSVPEvents: [CalendarEvent] = []
+    /// Events first observed within the last 24 h, newest first. Drives
+    /// the menu's recently-added region. Session memory only: it starts
+    /// empty on launch and empties when the calendar feature turns off.
+    @Published public private(set) var recentEvents: [CalendarEvent] = []
 
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "Meeting")
 
@@ -38,6 +43,9 @@ public final class MeetingManager: ObservableObject {
     /// resets when the calendar feature turns off so a later re-enable does
     /// not replay the whole day as "new".
     private var seenEventIDs = Set<String>()
+    /// When each event was first observed, for the recently-added region.
+    /// Keyed by event ID and pruned with the same lifecycle as `seenEventIDs`.
+    private var firstSeenAt = [String: Date]()
     private var lastFeatureState: Bool {
         didSet {
             if !lastFeatureState {
@@ -45,8 +53,10 @@ public final class MeetingManager: ObservableObject {
                 nextEvent = nil
                 calendars = []
                 pendingRSVPEvents = []
+                recentEvents = []
                 dismissedEventIDs.removeAll()
                 seenEventIDs.removeAll()
+                firstSeenAt.removeAll()
                 lastFetchDayStart = nil
             }
         }
@@ -57,6 +67,19 @@ public final class MeetingManager: ObservableObject {
             return value
         }
         return true
+    }
+
+    /// Row cap for the menu's Recently added region.
+    private var recentEventsLimit: Int {
+        let value = defaults.integer(forKey: Constants.Defaults.recentEventsLimit)
+        return value > 0 ? value : Constants.DefaultValues.recentEventsLimit
+    }
+
+    /// First-seen window for the same region, in days.
+    private var recentEventsWindow: TimeInterval {
+        let days = defaults.object(forKey: Constants.Defaults.recentEventsWindowDays) as? Int
+            ?? Constants.DefaultValues.recentEventsWindowDays
+        return TimeInterval(max(1, days)) * 24 * 3600
     }
 
     public init(
@@ -80,6 +103,7 @@ public final class MeetingManager: ObservableObject {
                 nextEvent = nil
                 calendars = []
                 pendingRSVPEvents = []
+                recentEvents = []
                 return
             }
             await loadCalendars()
@@ -110,6 +134,7 @@ public final class MeetingManager: ObservableObject {
             events = []
             nextEvent = nil
             pendingRSVPEvents = []
+            recentEvents = []
             lastFetchDayStart = nil
             return
         }
@@ -149,13 +174,24 @@ public final class MeetingManager: ObservableObject {
             fetchedEvents.sort { $0.startDate < $1.startDate }
 
             let newlySeenEvents = fetchedEvents.filter { !seenEventIDs.contains($0.id) }
+            let now = nowProvider()
             for event in fetchedEvents {
                 seenEventIDs.insert(event.id)
+                if firstSeenAt[event.id] == nil {
+                    firstSeenAt[event.id] = now
+                }
             }
 
             events = fetchedEvents
-            pendingRSVPEvents = fetchedEvents.filter { $0.myRSVPStatus == .pending }
-            nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs, now: nowProvider())
+            pendingRSVPEvents = EventDisplayPlanner.pendingInvites(from: fetchedEvents, now: now)
+            recentEvents = EventDisplayPlanner.recentEvents(
+                firstSeen: firstSeenAt,
+                from: fetchedEvents,
+                now: now,
+                window: recentEventsWindow,
+                limit: recentEventsLimit
+            )
+            nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs, now: now)
             lastFetchDayStart = window.start
 
             if !newlySeenEvents.isEmpty {

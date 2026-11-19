@@ -26,6 +26,15 @@ struct CalendarsTab: View {
     /// request switch stays unreachable without it.
     private let isRuntimeBundlePresent: Bool
     private let defaults: UserDefaults
+    private var recentEventsLimit: Int {
+        defaults.integer(forKey: Constants.Defaults.recentEventsLimit)
+    }
+    private var recentEventsWindowDays: Int {
+        if let value = defaults.object(forKey: Constants.Defaults.recentEventsWindowDays) as? Int {
+            return value
+        }
+        return Constants.DefaultValues.recentEventsWindowDays
+    }
     @State private var notificationsAuthorized = false
     /// Confirmation-toggle enable waiting for the system authorization
     /// answer: requestNotificationAccess completes it once the status lands.
@@ -257,6 +266,35 @@ struct CalendarsTab: View {
             Section("Meeting Display") {
                 Toggle("Show tomorrow's events", isOn: $showTomorrowEvents)
                 Toggle("Show declined events (dimmed)", isOn: $showDeclinedEvents)
+            }
+            .disabled(!canEditCalendarConfig)
+
+            Section("Recently Added") {
+                Picker("Events to list:", selection: Binding(
+                    get: { recentEventsLimit },
+                    set: { setRecentEventsLimit($0) }
+                )) {
+                    Text("3").tag(3)
+                    Text("5").tag(5)
+                    Text("10").tag(10)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 180)
+
+                Picker("First seen within:", selection: Binding(
+                    get: { recentEventsWindowDays },
+                    set: { setRecentEventsWindowDays($0) }
+                )) {
+                    Text("24 hours").tag(1)
+                    Text("3 days").tag(3)
+                    Text("7 days").tag(7)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 240)
+
+                Text("Lists events BusinessBar observed appear for the first time in that window. The list restarts when the app restarts.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             .disabled(!canEditCalendarConfig)
 
@@ -604,6 +642,16 @@ struct CalendarsTab: View {
         if let data = try? JSONEncoder().encode(ids) {
             defaults.set(data, forKey: Constants.Defaults.selectedCalendars)
         }
+    }
+
+    private func setRecentEventsLimit(_ value: Int) {
+        defaults.set(value, forKey: Constants.Defaults.recentEventsLimit)
+        notifyPreferencesChanged()
+    }
+
+    private func setRecentEventsWindowDays(_ value: Int) {
+        defaults.set(value, forKey: Constants.Defaults.recentEventsWindowDays)
+        notifyPreferencesChanged()
     }
 
     private func notifyPreferencesChanged() {
