@@ -197,6 +197,12 @@ final class StatusBarController: NSObject {
             }
             .store(in: &cancellables)
 
+        meetingManager.$timeChangedEvents
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.updateMainStatusItem() }
+            }
+            .store(in: &cancellables)
+
         meetingManager.$isLoading
             .filter { !$0 }
             .sink { [weak self] _ in
@@ -250,6 +256,17 @@ final class StatusBarController: NSObject {
         return menu
     }
 
+    /// Coverage hook: drives the missing-symbol fallback of the changed-
+    /// times icon. SF Symbols ship with the OS, so the production path can
+    /// never miss; the hook passes a nonexistent name to reach the branch.
+    func timeChangedIconFallbackForCoverage() -> NSImage? {
+        makeTimeChangedIcon(count: 1, symbolName: "businessbar.nonexistent.symbol")
+    }
+
+    /// Coverage hook: the branded idle icon instance, so scenarios can
+    /// assert the missing-symbol fallback returns the same image.
+    var cachedAppIconForCoverage: NSImage? { cachedAppIcon }
+
     // MARK: - Minute refresh timer (power-efficient)
 
     /// Starts the 60-second refresh timer only when the calendar feature is
@@ -284,6 +301,7 @@ final class StatusBarController: NSObject {
         let nextEventToShow = isCalendarFeatureEnabled ? meetingManager.nextEvent : nil
         let shouldShowNoSleep = noSleepManager.isActive && isNoSleepFeatureEnabled
         let pendingRSVPCount = isCalendarFeatureEnabled ? meetingManager.pendingRSVPEvents.count : 0
+        let timeChangedCount = isCalendarFeatureEnabled ? meetingManager.timeChangedEvents.count : 0
 
         // ── Display logic ──────────────────────────────────────────────
         //
@@ -300,7 +318,11 @@ final class StatusBarController: NSObject {
             if let nextEvent = nextEventToShow {
                 // NoSleep + meeting: meeting text with cup icon on the right
                 button.imagePosition = .imageRight
-                button.attributedTitle = makeMeetingAttributedString(for: nextEvent, pendingRSVPCount: pendingRSVPCount)
+                button.attributedTitle = makeMeetingAttributedString(
+                    for: nextEvent,
+                    pendingRSVPCount: pendingRSVPCount,
+                    timeChangedCount: timeChangedCount
+                )
             } else {
                 // NoSleep only: just the cup icon, no text
                 button.imagePosition = .imageOnly
@@ -308,7 +330,15 @@ final class StatusBarController: NSObject {
         } else if let nextEvent = nextEventToShow {
             // Meeting only: text, no icon
             button.imagePosition = .noImage
-            button.attributedTitle = makeMeetingAttributedString(for: nextEvent, pendingRSVPCount: pendingRSVPCount)
+            button.attributedTitle = makeMeetingAttributedString(
+                for: nextEvent,
+                pendingRSVPCount: pendingRSVPCount,
+                timeChangedCount: timeChangedCount
+            )
+        } else if timeChangedCount > 0 {
+            // Idle but times moved: calendar icon with an orange exclamation badge
+            button.image = makeTimeChangedIcon(count: timeChangedCount)
+            button.imagePosition = .imageOnly
         } else if pendingRSVPCount > 0 {
             // Idle but invitations wait: calendar icon with a question badge
             button.image = makePendingRSVPIcon(count: pendingRSVPCount)
@@ -449,6 +479,28 @@ final class StatusBarController: NSObject {
         return symbol
     }
 
+    /// Branded calendar icon with an orange exclamation badge when seen
+    /// events moved their times. Mirrors the pending badge geometry so both
+    /// idle states read consistently.
+    private func makeTimeChangedIcon(count: Int, symbolName: String = "calendar.badge.exclamationmark") -> NSImage? {
+        let brandColor = NSColor(red: 70/255, green: 80/255, blue: 170/255, alpha: 1.0)
+        let white = NSColor.white
+        let orange = NSColor.systemOrange
+
+        let paletteConfig = NSImage.SymbolConfiguration(paletteColors: [brandColor, white, orange])
+        let sizeConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        let config = paletteConfig.applying(sizeConfig)
+
+        guard let symbol = NSImage(
+            systemSymbolName: symbolName,
+            accessibilityDescription: "\(count) events changed time"
+        )?.withSymbolConfiguration(config) else {
+            return cachedAppIcon
+        }
+        symbol.isTemplate = false
+        return symbol
+    }
+
     /// NoSleep remaining time as a compact string for tooltip or accessibility.
     /// Returns "∞" for infinite or "1h 23m" / "45m" for scheduled durations.
     private var noSleepTimeDescription: String {
@@ -466,7 +518,11 @@ final class StatusBarController: NSObject {
     }
 
     /// Truncated meeting title + countdown/remaining-time string.
-    private func makeMeetingAttributedString(for event: CalendarEvent, pendingRSVPCount: Int = 0) -> NSAttributedString {
+    private func makeMeetingAttributedString(
+        for event: CalendarEvent,
+        pendingRSVPCount: Int = 0,
+        timeChangedCount: Int = 0
+    ) -> NSAttributedString {
         let titleMaxLength = defaults.integer(forKey: Constants.Defaults.meetingTitleMaxLength)
         let maxLength = titleMaxLength > 0 ? titleMaxLength : Constants.DefaultValues.meetingTitleMaxLength
         let title = event.title.truncated(to: maxLength)
@@ -474,6 +530,9 @@ final class StatusBarController: NSObject {
         let string = NSMutableAttributedString(string: "\(title) \(timeString)  ")
         if pendingRSVPCount > 0 {
             string.append(Self.pendingRSVPBadge(count: pendingRSVPCount))
+        }
+        if timeChangedCount > 0 {
+            string.append(Self.timeChangedBadge(count: timeChangedCount))
         }
         return string
     }
@@ -485,6 +544,17 @@ final class StatusBarController: NSObject {
         let text = count == 1 ? " 1?" : " \(count)?"
         let badge = NSMutableAttributedString(string: text)
         badge.addAttribute(.foregroundColor, value: NSColor.systemRed, range: NSRange(location: 0, length: text.count))
+        badge.addAttribute(.font, value: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium), range: NSRange(location: 0, length: text.count))
+        return badge
+    }
+
+    /// Orange "N!" segment appended to the meeting text when seen events
+    /// moved their times. Same monospaced-digit treatment as the pending
+    /// badge; orange marks a change rather than red marking a question.
+    private static func timeChangedBadge(count: Int) -> NSAttributedString {
+        let text = count == 1 ? " 1!" : " \(count)!"
+        let badge = NSMutableAttributedString(string: text)
+        badge.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: NSRange(location: 0, length: text.count))
         badge.addAttribute(.font, value: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium), range: NSRange(location: 0, length: text.count))
         return badge
     }
@@ -815,6 +885,8 @@ extension StatusBarController: NSMenuDelegate {
             showCompanion: isCompanionFeatureEnabled,
             pendingRSVPEvents: meetingManager.pendingRSVPEvents,
             onAnswerInvites: { [weak self] in self?.effects.answerInvites() },
+            recentEvents: meetingManager.recentEvents,
+            timeChangedEvents: meetingManager.timeChangedEvents,
             defaults: defaults
         )
 

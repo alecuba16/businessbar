@@ -22,6 +22,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         var isNewEventsEnabled: () -> Bool
         /// Whether the pending-invite confirmation feature is enabled.
         var isPendingInvitesEnabled: () -> Bool
+        var isEventTimeChangesEnabled: () -> Bool
 
         static var live: Dependencies {
             Dependencies(
@@ -60,6 +61,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 },
                 isPendingInvitesEnabled: {
                     (UserDefaults.standard.object(forKey: Constants.Defaults.notifyPendingInvites) as? Bool) ?? false
+                },
+                isEventTimeChangesEnabled: {
+                    (UserDefaults.standard.object(forKey: Constants.Defaults.notifyEventTimeChanges) as? Bool) ?? false
                 }
             )
         }
@@ -232,6 +236,22 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
                 }
             }
             .store(in: &cancellables)
+
+        // Seen events that moved their start or end. One notification per
+        // changed event, mirroring the new-event flow: the badge in the menu
+        // bar persists the state, the banner announces the change.
+        dependencies.notificationCenter
+            .publisher(for: .businessBarEventTimesChanged)
+            .sink { [weak self] notification in
+                guard let self,
+                      let events = notification.userInfo?["events"] as? [CalendarEvent] else { return }
+                Task { @MainActor in
+                    for event in events {
+                        self.presentTimeChangedNotification(for: event)
+                    }
+                }
+            }
+            .store(in: &cancellables)
     }
     
     func scheduleNotification(for event: CalendarEvent, minutesBefore: Int) {
@@ -363,6 +383,25 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         )
         dependencies.add(request)
         markInviteDelivered(event.id)
+    }
+
+    private func presentTimeChangedNotification(for event: CalendarEvent) {
+        guard dependencies.isAvailable(),
+              areNotificationsEnabled,
+              dependencies.isEventTimeChangesEnabled() else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Event Time Changed"
+        content.body = "\(event.title) · \(Self.timeLine(for: event))"
+        content.sound = .default
+        content.userInfo = ["eventID": event.id]
+
+        let request = UNNotificationRequest(
+            identifier: "time-changed-\(event.id)",
+            content: content,
+            trigger: nil
+        )
+        dependencies.add(request)
     }
 
     private static func timeLine(for event: CalendarEvent) -> String {

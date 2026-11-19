@@ -537,8 +537,8 @@ enum AppViewScenarios {
         var durations: [TimeInterval?] = []
         let event = makeEvent(id: "meeting", title: "Menu meeting", location: nil, url: URL(string: "https://meet.google.com/aaa-bbbb-ccc"))
         let plain = makeEvent(id: "plain", title: "No meeting URL", location: nil, url: nil)
-        func build(events: [CalendarEvent], loading: Bool = false, showEvents: Bool = true, showNoSleep: Bool = true, companion: Bool = true, pending: [CalendarEvent] = [], onAnswer: (() -> Void)? = nil) -> NSMenu {
-            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, defaults: defaults)
+        func build(events: [CalendarEvent], loading: Bool = false, showEvents: Bool = true, showNoSleep: Bool = true, companion: Bool = true, pending: [CalendarEvent] = [], recent: [CalendarEvent] = [], changed: [CalendarEvent] = [], onAnswer: (() -> Void)? = nil) -> NSMenu {
+            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, recentEvents: recent, timeChangedEvents: changed, defaults: defaults)
         }
         let menu = build(events: [event, plain])
         try context.expect(menu.items.contains(where: { $0.title.contains("Menu meeting") && $0.submenu != nil }), "Meeting gets join submenu")
@@ -569,6 +569,21 @@ enum AppViewScenarios {
         try context.equal(durations.compactMap { $0 }, [900, 1800, 3600, 7200, 10800, 14400, 18000, 21600, 25200, 28800, 43200, 57600], "Menu durations retain exact seconds")
         try context.expect(build(events: [], loading: true).item(withTitle: "Loading events...")?.isEnabled == false, "Loading menu is not actionable")
         try context.expect(build(events: []).item(withTitle: "No upcoming events")?.isEnabled == false, "Empty menu is explicit")
+
+        // Recently added region: rows only when events were provided, join
+        // and dismiss route through the same menu actions as event rows.
+        let recentMenu = build(events: [], recent: [event])
+        try context.expect(recentMenu.item(withTitle: "Recently added") != nil, "Recent region appears with recent events")
+        try context.expect(recentMenu.items.contains(where: { $0.title.contains("Menu meeting") }), "Recent rows list the event")
+        try context.expect(build(events: []).item(withTitle: "Recently added") == nil, "No recent events means no region")
+        if let recentRow = recentMenu.items.first(where: { $0.title.contains("Menu meeting") }), let recentJoin = recentRow.submenu?.item(withTitle: "Join Meeting"), let recentDismiss = recentRow.submenu?.item(withTitle: "Dismiss") {
+            handler.joinMeeting(recentJoin)
+            try context.equal(joined.last, event.id, "Recent row join routes through the join callback")
+            handler.dismissEvent(recentDismiss)
+            try context.equal(dismissed.last, event.id, "Recent row dismiss routes through the dismiss callback")
+        } else {
+            throw CoverageContext.Failure(description: "Recent row missing join/dismiss submenu")
+        }
         let tomorrowStart = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date()))!.addingTimeInterval(3600)
         let tomorrow = CalendarEvent(id: "tomorrow", title: "Tomorrow fixture", startDate: tomorrowStart, endDate: tomorrowStart.addingTimeInterval(1800), location: nil, notes: nil, url: nil, calendar: event.calendar, organizer: nil, attendees: [])
         defaults.set(true, forKey: Constants.Defaults.showTomorrowEvents)
@@ -620,6 +635,32 @@ enum AppViewScenarios {
         // Feature off or empty pending list: section omitted entirely.
         try context.expect(build(events: []).item(withTitle: "Pending invitations") == nil, "No invites means no section")
         try context.expect(build(events: [], showEvents: false, pending: [inviteOne]).item(withTitle: "Pending invitations") == nil, "Calendar off means no section")
+
+        // Changed times region: header row, rows with the moved event, join
+        // and dismiss route through the shared menu actions, and empty or
+        // feature-off builds omit the section.
+        let changedMenu = build(events: [], changed: [event, plain])
+        guard let changedHeader = changedMenu.item(withTitle: "Changed times"),
+              let changedJoinRow = changedMenu.items.first(where: { $0.title.hasPrefix("Menu meeting ·") }),
+              let changedPlainRow = changedMenu.items.first(where: { $0.title.hasPrefix("No meeting URL ·") }) else {
+            throw CoverageContext.Failure(description: "Changed times section missing its rows")
+        }
+        try context.expect(!changedHeader.isEnabled, "Changed-times header is a disabled label")
+        try context.expect(changedJoinRow.representedObject is MenuAction && changedPlainRow.representedObject is MenuAction, "Each changed row carries a payload")
+        try context.expect(changedJoinRow.submenu != nil, "Changed row with a link keeps its join submenu")
+        try context.expect(changedPlainRow.submenu == nil, "Changed row without a link has no submenu")
+        if let changedJoin = changedJoinRow.submenu?.item(withTitle: "Join Meeting"), let changedDismiss = changedJoinRow.submenu?.item(withTitle: "Dismiss") {
+            handler.joinMeeting(changedJoin)
+            try context.equal(joined.last, event.id, "Changed row join routes through the join callback")
+            handler.dismissEvent(changedDismiss)
+            try context.equal(dismissed.last, event.id, "Changed row dismiss routes through the dismiss callback")
+        } else {
+            throw CoverageContext.Failure(description: "Changed row missing join/dismiss submenu")
+        }
+        handler.eventClicked(changedJoinRow)
+        try context.equal(joined.count > 3, true, "Changed row click also joins")
+        try context.expect(build(events: []).item(withTitle: "Changed times") == nil, "No changed events means no section")
+        try context.expect(build(events: [], showEvents: false, changed: [event]).item(withTitle: "Changed times") == nil, "Calendar off means no changed section")
     }
 
     private static func preferences(_ context: CoverageContext) async throws {

@@ -856,6 +856,33 @@ enum AppPreferencesUI2Scenarios {
         // Notification lead time persists through its picker key.
         defaults.set(10, forKey: BusinessBar.Constants.Defaults.notificationMinutesBefore)
         try context.equal(defaults.integer(forKey: BusinessBar.Constants.Defaults.notificationMinutesBefore), 10, "Lead minutes persist")
+
+        // Recently Added section: the segmented pickers persist count and
+        // first-seen window through their setter bindings, and a fresh tab
+        // reads both keys back through the getters (stored-value branches).
+        try ui2PressSegment(granted, "Events to list:", segment: "10", context)
+        await ui2Settle()
+        try context.equal(defaults.integer(forKey: BusinessBar.Constants.Defaults.recentEventsLimit), 10, "Count segment press persists the row cap")
+        try ui2PressSegment(granted, "First seen within:", segment: "7 days", context)
+        await ui2Settle()
+        try context.equal(
+            defaults.object(forKey: BusinessBar.Constants.Defaults.recentEventsWindowDays) as? Int,
+            7,
+            "Window segment press persists the first-seen window"
+        )
+        let storedRecentTab = UI2Hosted(
+            CalendarsTab(
+                meetingManager: meetings,
+                googleAuth: auth,
+                defaults: defaults,
+                calendarAuthorization: { .fullAccess },
+                notificationAuthorization: { receive in receive(true) }
+            ).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1400)
+        )
+        defer { storedRecentTab.close() }
+        await ui2Settle()
+        try context.expect(storedRecentTab.text.contains("Recently Added"), "Fresh tab renders the Recently Added section with stored values")
     }
 
     /// Toggle-press paths, default init closures, grant request flows, and
@@ -1186,6 +1213,24 @@ enum AppPreferencesUI2Scenarios {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
         try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyPendingInvites), "Authorized enable persists the pending-invites toggle")
+
+        // Time-change confirmation toggle: same opt-in flow as the other
+        // confirmation toggles, driven from its own row on the authorized
+        // tab and then disabled through the assign(false) branch. Runs
+        // before the denied phase flips the master flag off in the shared
+        // defaults, which would disable the row.
+        try authorizedTab.pressCheckbox(afterLabel: "Notify when an event changes time", context)
+        for _ in 0..<20 where !defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyEventTimeChanges) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyEventTimeChanges), "Authorized enable persists the time-change toggle")
+        try authorizedTab.pressCheckbox(afterLabel: "Notify when an event changes time", context)
+        for _ in 0..<20 where defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyEventTimeChanges) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.notifyEventTimeChanges), "Disable routes the time-change toggle through assign(false)")
 
         // Disable: the assign(false) branch runs, no request involved.
         try authorizedTab.pressCheckbox(afterLabel: "Notify when a new event is added", context)

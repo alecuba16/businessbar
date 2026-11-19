@@ -521,7 +521,7 @@ enum AppServiceScenarios {
             configure: { _, value in categories = value }, authorize: { authorizations += 1 },
             add: { requests.append($0) }, remove: { removals.append($0) },
             removeAll: { clears += 1 }, openURL: { opened.append($0) },
-            isNewEventsEnabled: { false }, isPendingInvitesEnabled: { false }
+            isNewEventsEnabled: { false }, isPendingInvitesEnabled: { false }, isEventTimeChangesEnabled: { false }
         )
         let manager = NotificationManager(dependencies: dependencies)
         // The configure boundary receives a Set: iteration order is not
@@ -613,6 +613,7 @@ private extension AppServiceScenarios {
         var order: [String] = []
         var newEventsEnabled = false
         var pendingInvitesEnabled = false
+        var timeChangesEnabled = false
         var templates: [PromptTemplate] = []
         var templateLoads = 0
         var templateSaves = 0
@@ -778,7 +779,7 @@ private extension AppServiceScenarios {
                 now: { now }, configure: { _, _ in }, authorize: { effects.authorizations += 1 },
                 add: { effects.requests.append($0) }, remove: { effects.removals.append($0) },
                 removeAll: { effects.clears += 1 }, openURL: { _ in }, notificationCenter: center,
-                isNewEventsEnabled: { effects.newEventsEnabled }, isPendingInvitesEnabled: { effects.pendingInvitesEnabled }
+                isNewEventsEnabled: { effects.newEventsEnabled }, isPendingInvitesEnabled: { effects.pendingInvitesEnabled }, isEventTimeChangesEnabled: { effects.timeChangesEnabled }
             ))
         }
 
@@ -841,6 +842,7 @@ private extension AppServiceScenarios {
         var available = true
         var newEventsEnabled = false
         var pendingInvitesEnabled = false
+        var timeChangesEnabled = false
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         var requests: [UNNotificationRequest] = []
         var removals: [[String]] = []
@@ -854,7 +856,8 @@ private extension AppServiceScenarios {
             add: { requests.append($0) }, remove: { removals.append($0) },
             removeAll: {}, openURL: { opened.append($0) }, notificationCenter: center,
             isNewEventsEnabled: { newEventsEnabled },
-            isPendingInvitesEnabled: { pendingInvitesEnabled }
+            isPendingInvitesEnabled: { pendingInvitesEnabled },
+            isEventTimeChangesEnabled: { timeChangesEnabled }
         )
         let manager = NotificationManager(dependencies: dependencies)
         manager.setDeliveredInviteBookkeeping(
@@ -939,6 +942,12 @@ private extension AppServiceScenarios {
         try await settleRSVP()
         try context.equal(requests.count, 4, "Guards stop every later presentation path")
 
+        // Time changes while unavailable: the guard stops the banner too.
+        timeChangesEnabled = true
+        center.post(name: .businessBarEventTimesChanged, object: nil, userInfo: ["events": [fresh]])
+        try await settleRSVP()
+        try context.equal(requests.count, 4, "Unavailable stops the time-change banner")
+
         // The delegate-extracted dispatch entry: scenarios cannot build a
         // UNNotificationResponse, so this is the closest drivable surface.
         enabled = true
@@ -952,17 +961,29 @@ private extension AppServiceScenarios {
         manager.dispatchAction("JOIN_ACTION", userInfo: ["meetingLink": "https://fixture.invalid/join"])
         try context.equal(opened.last?.absoluteString, "https://fixture.invalid/join", "Dispatch entry routes join links")
 
+        // Back available: the time-change banner lands with its own shape.
+        center.post(name: .businessBarEventTimesChanged, object: nil, userInfo: ["events": [fresh]])
+        try await settleRSVP()
+        try context.equal(requests.count, 5, "Time change posts one banner")
+        try context.equal(requests.last?.identifier, "time-changed-fresh-1", "Time-change identifier embeds event id")
+        try context.equal(requests.last?.content.title, "Event Time Changed", "Time-change banner has its own title")
+        try context.equal(requests.last?.content.userInfo["eventID"] as? String, "fresh-1", "Time-change banner carries the event id")
+
         // Live dependency closures: the flag readers default to
         // UserDefaults.standard, so seed the isolated domain and read back.
         let liveManager = NotificationManager()
         UserDefaults.standard.set(true, forKey: BusinessBar.Constants.Defaults.notifyNewEvents)
         UserDefaults.standard.set(true, forKey: BusinessBar.Constants.Defaults.notifyPendingInvites)
+        UserDefaults.standard.set(true, forKey: BusinessBar.Constants.Defaults.notifyEventTimeChanges)
         try context.expect(liveManager.dependenciesForCoverage.isNewEventsEnabled(), "Live new-events flag reads the default")
         try context.expect(liveManager.dependenciesForCoverage.isPendingInvitesEnabled(), "Live pending-invites flag reads the default")
+        try context.expect(liveManager.dependenciesForCoverage.isEventTimeChangesEnabled(), "Live time-changes flag reads the default")
         UserDefaults.standard.set(false, forKey: BusinessBar.Constants.Defaults.notifyNewEvents)
         UserDefaults.standard.set(false, forKey: BusinessBar.Constants.Defaults.notifyPendingInvites)
+        UserDefaults.standard.set(false, forKey: BusinessBar.Constants.Defaults.notifyEventTimeChanges)
         try context.expect(!liveManager.dependenciesForCoverage.isNewEventsEnabled(), "Live new-events flag follows the stored value")
         try context.expect(!liveManager.dependenciesForCoverage.isPendingInvitesEnabled(), "Live pending-invites flag follows the stored value")
+        try context.expect(!liveManager.dependenciesForCoverage.isEventTimeChangesEnabled(), "Live time-changes flag follows the stored value")
     }
 
     private static func settleRSVP() async {

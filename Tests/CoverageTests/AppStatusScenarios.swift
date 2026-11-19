@@ -406,7 +406,10 @@ enum AppStatusScenarios {
         func preferencesChanged() { notifications.post(name: .businessBarPreferencesDidChange, object: nil) }
 
         func event(minutes: Int, url: URL? = URL(string: "https://zoom.us/j/123456789")) -> CalendarEvent {
-            CalendarEvent(id: "status-event", title: "Status planning", startDate: now.addingTimeInterval(Double(minutes) * 60), endDate: now.addingTimeInterval(Double(minutes + 30) * 60), location: nil, notes: nil, url: url, calendar: .init(id: "status", title: "Status", color: "#228844", source: "Fixture"), organizer: nil, attendees: [])
+            // Unique IDs per call: the rendering loop mutates the store
+            // between refreshes, and a stable ID would flag every window
+            // change as a time change and append the "N!" suffix.
+            CalendarEvent(id: "status-event-\(minutes)", title: "Status planning", startDate: now.addingTimeInterval(Double(minutes) * 60), endDate: now.addingTimeInterval(Double(minutes + 30) * 60), location: nil, notes: nil, url: url, calendar: .init(id: "status", title: "Status", color: "#228844", source: "Fixture"), organizer: nil, attendees: [])
         }
 
         func invite(minutes: Int) -> CalendarEvent {

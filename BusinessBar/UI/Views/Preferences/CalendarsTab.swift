@@ -26,6 +26,16 @@ struct CalendarsTab: View {
     /// request switch stays unreachable without it.
     private let isRuntimeBundlePresent: Bool
     private let defaults: UserDefaults
+    private var recentEventsLimit: Int {
+        let value = defaults.integer(forKey: Constants.Defaults.recentEventsLimit)
+        return value > 0 ? value : Constants.DefaultValues.recentEventsLimit
+    }
+    private var recentEventsWindowDays: Int {
+        if let value = defaults.object(forKey: Constants.Defaults.recentEventsWindowDays) as? Int {
+            return value
+        }
+        return Constants.DefaultValues.recentEventsWindowDays
+    }
     @State private var notificationsAuthorized = false
     /// Confirmation-toggle enable waiting for the system authorization
     /// answer: requestNotificationAccess completes it once the status lands.
@@ -53,6 +63,9 @@ struct CalendarsTab: View {
         didSet { notifyPreferencesChanged() }
     }
     @AppStorage(Constants.Defaults.notifyPendingInvites) private var notifyPendingInvites = false {
+        didSet { notifyPreferencesChanged() }
+    }
+    @AppStorage(Constants.Defaults.notifyEventTimeChanges) private var notifyEventTimeChanges = false {
         didSet { notifyPreferencesChanged() }
     }
 
@@ -260,6 +273,35 @@ struct CalendarsTab: View {
             }
             .disabled(!canEditCalendarConfig)
 
+            Section("Recently Added") {
+                Picker("Events to list:", selection: Binding(
+                    get: { recentEventsLimit },
+                    set: { setRecentEventsLimit($0) }
+                )) {
+                    Text("3").tag(3)
+                    Text("5").tag(5)
+                    Text("10").tag(10)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 180)
+
+                Picker("First seen within:", selection: Binding(
+                    get: { recentEventsWindowDays },
+                    set: { setRecentEventsWindowDays($0) }
+                )) {
+                    Text("24 hours").tag(1)
+                    Text("3 days").tag(3)
+                    Text("7 days").tag(7)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 240)
+
+                Text("Lists events BusinessBar observed appear for the first time in that window. The list restarts when the app restarts.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .disabled(!canEditCalendarConfig)
+
             Section("Notifications") {
                 Toggle("Enable meeting notifications", isOn: Binding(
                     get: { meetingNotificationsEnabled },
@@ -291,7 +333,16 @@ struct CalendarsTab: View {
                 ))
                 .disabled(!featureCalendarEnabled || !meetingNotificationsEnabled)
 
+                Toggle("Notify when an event changes time", isOn: Binding(
+                    get: { notifyEventTimeChanges },
+                    set: { setConfirmationEnabled($0) { notifyEventTimeChanges = $0 } }
+                ))
+                .disabled(!featureCalendarEnabled || !meetingNotificationsEnabled)
+
                 Text("Unanswered invitations also show a count in the menu bar and a section in the menu, independent of these toggles.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Events that change time also show an orange count in the menu bar and a section in the menu, independent of these toggles.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -604,6 +655,16 @@ struct CalendarsTab: View {
         if let data = try? JSONEncoder().encode(ids) {
             defaults.set(data, forKey: Constants.Defaults.selectedCalendars)
         }
+    }
+
+    private func setRecentEventsLimit(_ value: Int) {
+        defaults.set(value, forKey: Constants.Defaults.recentEventsLimit)
+        notifyPreferencesChanged()
+    }
+
+    private func setRecentEventsWindowDays(_ value: Int) {
+        defaults.set(value, forKey: Constants.Defaults.recentEventsWindowDays)
+        notifyPreferencesChanged()
     }
 
     private func notifyPreferencesChanged() {

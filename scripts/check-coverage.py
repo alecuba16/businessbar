@@ -14,8 +14,8 @@ import sys
 MINIMUM_PERCENT = 90
 # These declarations have no executable mappings in the instrumented app.
 DECLARATION_ONLY = {
-    "BusinessBar/App/Constants.swift": "5d75b80fc98e478c64015c7fb090112cc8e5a7154b81205fe9e28cd485982af5",
-    "BusinessBarCore/Constants.swift": "d2318fc26941e49ef57328977b13d1f56d197003676e8a5e571e36eff7486347",
+    "BusinessBar/App/Constants.swift": "4175bc5d5233ecf199b09d04ded44014420ebaf7fc55485ecdfe1eb68dbe1d69",
+    "BusinessBarCore/Constants.swift": "0860a801e113a6875a99c56676603a73cbbc1565d8728d2d4519478b45549ed0",
     "BusinessBarCore/Core/Meeting/EventStoreProtocol.swift": "3492360e9334ffcc9ab6d64b81dc523dfdca5b65345467d04515ec2435414e81",
 }
 

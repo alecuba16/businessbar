@@ -11,8 +11,18 @@ public final class MeetingManager: ObservableObject {
     @Published public private(set) var isLoading = false
     /// Events whose invitation is still waiting for the user's answer.
     /// Drives the status-bar pending badge, the menu invites section, and
-    /// the RSVP panel.
+    /// the RSVP panel. Events that already ended are excluded: a pending
+    /// status on a past invitation is stale bookkeeping, not a question.
     @Published public private(set) var pendingRSVPEvents: [CalendarEvent] = []
+    /// Events first observed within the last 24 h, newest first. Drives
+    /// the menu's recently-added region. Session memory only: it starts
+    /// empty on launch and empties when the calendar feature turns off.
+    @Published public private(set) var recentEvents: [CalendarEvent] = []
+    /// Already-seen events whose start or end moved in the latest refresh.
+    /// Drives the orange "N!" status-bar badge and the menu's changed-times
+    /// region. Session memory only: the first fetch of a session cannot
+    /// produce changes because there is nothing to compare against.
+    @Published public private(set) var timeChangedEvents: [CalendarEvent] = []
 
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "Meeting")
 
@@ -38,6 +48,14 @@ public final class MeetingManager: ObservableObject {
     /// resets when the calendar feature turns off so a later re-enable does
     /// not replay the whole day as "new".
     private var seenEventIDs = Set<String>()
+    /// When each event was first observed, for the recently-added region.
+    /// Same lifecycle as `seenEventIDs`: cleared with the feature toggle and
+    /// session-only, so a restart restarts the list as the UI states.
+    private var firstSeenAt = [String: Date]()
+    /// Last observed time window per seen event, for change detection.
+    /// Same lifecycle as `seenEventIDs`: a first-seen event never counts as
+    /// changed, only a later shift of its start or end does.
+    private var lastSeenWindows = [String: (start: Date, end: Date)]()
     private var lastFeatureState: Bool {
         didSet {
             if !lastFeatureState {
@@ -45,8 +63,12 @@ public final class MeetingManager: ObservableObject {
                 nextEvent = nil
                 calendars = []
                 pendingRSVPEvents = []
+                recentEvents = []
+                timeChangedEvents = []
                 dismissedEventIDs.removeAll()
                 seenEventIDs.removeAll()
+                firstSeenAt.removeAll()
+                lastSeenWindows.removeAll()
                 lastFetchDayStart = nil
             }
         }
@@ -57,6 +79,19 @@ public final class MeetingManager: ObservableObject {
             return value
         }
         return true
+    }
+
+    /// Row cap for the menu's Recently added region.
+    private var recentEventsLimit: Int {
+        let value = defaults.integer(forKey: Constants.Defaults.recentEventsLimit)
+        return value > 0 ? value : Constants.DefaultValues.recentEventsLimit
+    }
+
+    /// First-seen window for the same region, in days.
+    private var recentEventsWindow: TimeInterval {
+        let days = defaults.object(forKey: Constants.Defaults.recentEventsWindowDays) as? Int
+            ?? Constants.DefaultValues.recentEventsWindowDays
+        return TimeInterval(max(1, days)) * 24 * 3600
     }
 
     public init(
@@ -80,6 +115,7 @@ public final class MeetingManager: ObservableObject {
                 nextEvent = nil
                 calendars = []
                 pendingRSVPEvents = []
+                recentEvents = []
                 return
             }
             await loadCalendars()
@@ -110,6 +146,8 @@ public final class MeetingManager: ObservableObject {
             events = []
             nextEvent = nil
             pendingRSVPEvents = []
+            recentEvents = []
+            timeChangedEvents = []
             lastFetchDayStart = nil
             return
         }
@@ -149,13 +187,39 @@ public final class MeetingManager: ObservableObject {
             fetchedEvents.sort { $0.startDate < $1.startDate }
 
             let newlySeenEvents = fetchedEvents.filter { !seenEventIDs.contains($0.id) }
+            let now = nowProvider()
             for event in fetchedEvents {
                 seenEventIDs.insert(event.id)
+                if firstSeenAt[event.id] == nil {
+                    firstSeenAt[event.id] = now
+                }
             }
 
+            // Time-change detection compares against the previous fetch's
+            // window. First-seen events have no memory yet, so they never
+            // count as changed.
+            let changedTimeEvents = fetchedEvents.filter { event in
+                guard let previous = lastSeenWindows[event.id] else { return false }
+                return previous.start != event.startDate || previous.end != event.endDate
+            }
+            for event in fetchedEvents {
+                lastSeenWindows[event.id] = (event.startDate, event.endDate)
+            }
+            for eventID in Set(lastSeenWindows.keys).subtracting(fetchedEvents.map(\.id)) {
+                lastSeenWindows.removeValue(forKey: eventID)
+            }
+            timeChangedEvents = changedTimeEvents
+
             events = fetchedEvents
-            pendingRSVPEvents = fetchedEvents.filter { $0.myRSVPStatus == .pending }
-            nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs, now: nowProvider())
+            pendingRSVPEvents = EventDisplayPlanner.pendingInvites(from: fetchedEvents, now: now)
+            recentEvents = EventDisplayPlanner.recentEvents(
+                firstSeen: firstSeenAt,
+                from: fetchedEvents,
+                now: now,
+                window: recentEventsWindow,
+                limit: recentEventsLimit
+            )
+            nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs, now: now)
             lastFetchDayStart = window.start
 
             if !newlySeenEvents.isEmpty {
@@ -170,6 +234,13 @@ public final class MeetingManager: ObservableObject {
                     name: .businessBarPendingRSVPsAppeared,
                     object: nil,
                     userInfo: ["events": pendingRSVPEvents]
+                )
+            }
+            if !timeChangedEvents.isEmpty {
+                notificationCenter.post(
+                    name: .businessBarEventTimesChanged,
+                    object: nil,
+                    userInfo: ["events": timeChangedEvents]
                 )
             }
         } catch {
@@ -189,7 +260,7 @@ public final class MeetingManager: ObservableObject {
     public func respond(to event: CalendarEvent, status: CalendarEvent.RSVPStatus) async -> Bool {
         let ok = await eventStore.respond(toEventID: event.id, calendarID: event.calendar.id, status: status)
         if ok {
-            await refreshEvents()
+            await refreshEventsAfterAnswer()
         }
         return ok
     }
@@ -200,9 +271,21 @@ public final class MeetingManager: ObservableObject {
     public func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool {
         let ok = await eventStore.respond(toEventID: eventID, calendarID: calendarID, status: status)
         if ok {
-            await refreshEvents()
+            await refreshEventsAfterAnswer()
         }
         return ok
+    }
+
+    /// `refreshEvents` early-returns while a fetch is in flight, which would
+    /// silently drop the post-answer refresh the RSVP flow needs. Requeues
+    /// until the in-flight fetch lands so the badge, menu, and next-event
+    /// always pick up the stored answer.
+    private func refreshEventsAfterAnswer() async {
+        for _ in 0..<100 where isLoading {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        await refreshEvents()
     }
 
     /// Recalculation of `nextEvent` from the cached events array, plus day

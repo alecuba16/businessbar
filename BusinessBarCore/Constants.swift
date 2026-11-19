@@ -9,6 +9,9 @@ public extension Notification.Name {
     /// Posted after a refresh while at least one invitation is unanswered.
     /// userInfo["events"] holds the pending [CalendarEvent].
     static let businessBarPendingRSVPsAppeared = Notification.Name("com.businessbar.pendingRSVPsAppeared")
+    /// Posted after a refresh when an already-seen event moved its start or
+    /// end time. userInfo["events"] holds the changed [CalendarEvent].
+    static let businessBarEventTimesChanged = Notification.Name("com.businessbar.eventTimesChanged")
 }
 
 /// Runtime bundle checks shared by notification and permission entry points.
@@ -62,6 +65,10 @@ enum Constants {
         // Confirmation popups for new events / invitations (opt-in).
         static let notifyNewEvents = "notifyNewEvents"
         static let notifyPendingInvites = "notifyPendingInvites"
+        static let notifyEventTimeChanges = "notifyEventTimeChanges"
+        // Recently added events region in the menu.
+        static let recentEventsLimit = "recentEventsLimit"
+        static let recentEventsWindowDays = "recentEventsWindowDays"
     }
     
     enum DefaultValues {
@@ -72,5 +79,7 @@ enum Constants {
         static let badgePollInterval = 3             // seconds between badge polls
         static let activityCheckInterval = 30       // seconds between idle checks
         static let activityIdleMultiplier = 3       // fire after N × checkInterval seconds idle
+        static let recentEventsLimit = 5             // rows in the Recently added menu region
+        static let recentEventsWindowDays = 1       // first-seen window for that region
     }
 }

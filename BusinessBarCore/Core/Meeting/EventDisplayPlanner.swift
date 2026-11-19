@@ -34,4 +34,38 @@ public enum EventDisplayPlanner {
     ) -> CalendarEvent? {
         events.first { !dismissedIDs.contains($0.id) && $0.endDate > now }
     }
+
+    /// Invitations still waiting for an answer. Already-ended events are
+    /// ignored: replying to something in the past is noise, so a stale
+    /// pending status on a past event never surfaces.
+    public static func pendingInvites(
+        from events: [CalendarEvent],
+        now: Date = Date()
+    ) -> [CalendarEvent] {
+        events.filter { $0.myRSVPStatus == .pending && $0.endDate > now }
+    }
+
+    /// Events the app first saw within the recency window, newest first.
+    /// Drives the menu's recently-added region. Input order is arbitrary;
+    /// the returned order follows when each event was first observed.
+    public static func recentEvents(
+        firstSeen: [String: Date],
+        from events: [CalendarEvent],
+        now: Date = Date(),
+        window: TimeInterval = 24 * 3600,
+        limit: Int = 5
+    ) -> [CalendarEvent] {
+        let cutoff = now.addingTimeInterval(-window)
+        return events
+            .compactMap { event -> (event: CalendarEvent, seen: Date)? in
+                guard let seen = firstSeen[event.id], seen >= cutoff else { return nil }
+                return (event, seen)
+            }
+            .sorted { lhs, rhs in
+                if lhs.seen != rhs.seen { return lhs.seen > rhs.seen }
+                return lhs.event.startDate < rhs.event.startDate
+            }
+            .prefix(limit)
+            .map(\.event)
+    }
 }
