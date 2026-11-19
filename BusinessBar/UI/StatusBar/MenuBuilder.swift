@@ -22,6 +22,7 @@ enum MenuBuilder {
         pendingRSVPEvents: [CalendarEvent],
         onAnswerInvites: @escaping () -> Void,
         recentEvents: [CalendarEvent] = [],
+        timeChangedEvents: [CalendarEvent] = [],
         defaults: UserDefaults = .standard
     ) -> NSMenu {
         let menu = NSMenu()
@@ -43,6 +44,7 @@ enum MenuBuilder {
         if showEvents {
             addInvitesSection(to: menu, pendingRSVPEvents: pendingRSVPEvents, onAnswerInvites: onAnswerInvites)
             addRecentSection(to: menu, recentEvents: recentEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
+            addTimeChangedSection(to: menu, timeChangedEvents: timeChangedEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
         }
 
         menu.addItem(NSMenuItem.separator())
@@ -141,6 +143,37 @@ enum MenuBuilder {
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         for event in recentEvents {
+            let item = NSMenuItem(
+                title: "\(event.title) \u{00b7} \(formatter.string(from: event.startDate))",
+                action: #selector(MenuActionHandler.eventClicked),
+                keyEquivalent: ""
+            )
+            item.representedObject = MenuAction.eventClicked(event, onJoinMeeting, onDismissEvent)
+            item.target = MenuActionHandler.shared
+            if event.meetingLink != nil {
+                item.submenu = createEventSubmenu(for: event, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
+            }
+            menu.addItem(item)
+        }
+    }
+
+    /// Events whose start or end moved after the app had already seen
+    /// them. Rows mirror the recently-added rows so a moved meeting stays
+    /// clickable: join when a link exists, submenu offers Join and Dismiss.
+    @MainActor
+    private static func addTimeChangedSection(to menu: NSMenu, timeChangedEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void) {
+        guard !timeChangedEvents.isEmpty else { return }
+
+        menu.addItem(NSMenuItem.separator())
+
+        let header = NSMenuItem(title: "Changed times", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        for event in timeChangedEvents {
             let item = NSMenuItem(
                 title: "\(event.title) \u{00b7} \(formatter.string(from: event.startDate))",
                 action: #selector(MenuActionHandler.eventClicked),

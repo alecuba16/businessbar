@@ -136,6 +136,8 @@ enum CoreMeetingUtilitiesScenarios {
         catch { failures.append("meeting manager: \(error)") }
         do { try await rsvp(context) }
         catch { failures.append("rsvp flow: \(error)") }
+        do { try await timeChanges(context) }
+        catch { failures.append("time changes: \(error)") }
         do { try ekParticipantMapping(context) }
         catch { failures.append("participant mapping: \(error)") }
         do { try await ekRespond(context) }
@@ -490,6 +492,96 @@ enum CoreMeetingUtilitiesScenarios {
             slowManager.pendingRSVPEvents.isEmpty
         }
         try context.equal(slowManager.pendingRSVPEvents.count, 0, "Answered invite left the pending set after the wait")
+    }
+
+    private static func timeChanges(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("meeting-time-changes")
+        defaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        defaults.set(try JSONEncoder().encode([calendar.id]), forKey: Constants.Defaults.selectedCalendars)
+        let notifications = NotificationCenter()
+        let store = CoverageEventStore()
+        store.calendars = [calendar]
+        let manager = MeetingManager(eventStore: store, nowProvider: { instant }, defaults: defaults, notificationCenter: notifications)
+        await Task.yield()
+
+        var changedPosts: [[CalendarEvent]] = []
+        let changedObserver = notifications.publisher(for: .businessBarEventTimesChanged).sink { note in
+            if let events = note.userInfo?["events"] as? [CalendarEvent] { changedPosts.append(events) }
+        }
+        defer { changedObserver.cancel() }
+
+        // First fetch: everything is first-seen, nothing counts as changed.
+        let stable = event("stable", start: 3600, end: 4200)
+        let moving = event("moving", start: 7200, end: 7800)
+        store.events = [stable, moving]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "First fetch has no change baseline")
+        try context.equal(changedPosts.count, 0, "No time-change notification on first sight")
+
+        // Same window again: still nothing.
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Unmoved events stay out of the changed set")
+        try context.equal(changedPosts.count, 0, "Unmoved events post no notification")
+
+        // Start moves: one change, one post.
+        store.events = [stable, event("moving", start: 9000, end: 9600)]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), ["moving"], "Moved start surfaces as changed")
+        try context.equal(changedPosts.count, 1, "Moved event posts the notification")
+        try context.equal(changedPosts.last?.map(\.id), ["moving"], "Notification carries the moved event")
+
+        // Window reverts to the original: still a change against the last
+        // observation, so the event stays in the set and posts again.
+        store.events = [stable, moving]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), ["moving"], "Reverted window counts as another change")
+        try context.equal(changedPosts.count, 2, "Reverted window posts again")
+
+        // Event vanishes from the fetch: pruned from memory, no post.
+        store.events = [stable]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Removed event clears the changed set")
+        try context.equal(changedPosts.count, 2, "Missing event posts nothing")
+
+        // Reappears with its old window: no memory left, first-seen again.
+        store.events = [stable, moving]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Reappearing event is fresh, not changed")
+        try context.equal(changedPosts.count, 2, "Reappearing event posts nothing")
+
+        // Feature off: the disabled refresh clears the published set.
+        store.events = [stable, event("moving", start: 9000, end: 9600)]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), ["moving"], "Change observed before the feature goes off")
+        try context.equal(changedPosts.count, 3, "Change before the feature goes off posts once")
+        defaults.set(false, forKey: Constants.Defaults.featureCalendar)
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Disabled feature clears the changed set")
+        try context.equal(changedPosts.count, 3, "Disabled feature posts nothing")
+
+        // The preference-toggle path wipes deep memory, but only when the
+        // debounced observer sees the false state, so the post must land
+        // while the feature is still off. After the wipe, the moved window
+        // counts as first-seen: the re-enable fetch posts nothing.
+        notifications.post(name: .businessBarPreferencesDidChange, object: nil)
+        // The observer debounces at 200 ms, so give it time to observe the
+        // false state before flipping the preference back on: a coalesced
+        // run would only see the final true state and never wipe memory.
+        try await Task.sleep(nanoseconds: 400_000_000)
+        store.events = [stable, event("moving", start: 10800, end: 11400)]
+        defaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        notifications.post(name: .businessBarPreferencesDidChange, object: nil)
+        try await wait(context, "Re-enable fetch repopulates events") {
+            manager.events.contains(where: { $0.id == "moving" })
+        }
+        // The wipe erased the old window, so the moved event is first-seen
+        // again: no change, no post. Without the wipe the 10800 window
+        // would differ from the pre-disable 9000 memory and post again.
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Wiped memory treats the moved event as first-seen")
+        try context.equal(changedPosts.count, 3, "No post after the memory wipe")
+        // A stable repeat of the same window stays quiet.
+        await manager.refreshEvents()
+        try context.equal(changedPosts.count, 3, "Stable window after the wipe posts nothing")
     }
 
     private static func ekParticipantMapping(_ context: CoverageContext) throws {

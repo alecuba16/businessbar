@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 - The status menu has a "Recently added" section with events the app first saw in the last day (configurable window: 24 hours, 3 days, or 7 days, and count: 3, 5, or 10 rows, under Preferences > Calendars). Rows join the meeting or dismiss it like the agenda rows. The memory is per-session, so it lists what appeared while the app was running
+- Events that move their start or end after the app already saw them get an orange "N!" badge in the menu bar, a "Changed times" section in the status menu with join and dismiss actions, and an optional notification (Preferences > Calendars). The detection compares against the previous refresh, so the first fetch of a session never counts, and the memory clears with the calendar feature toggle
 - Calendar invitations that already ended no longer count anywhere: they are dropped from the question badge, the menu's pending section, and the answer panel, because replying to something in the past is noise
 
 ## [1.6.7] - 2026-11-11

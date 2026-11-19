@@ -35,6 +35,7 @@ enum Constants {
         // Confirmation popups for new events / invitations (opt-in).
         static let notifyNewEvents = "notifyNewEvents"
         static let notifyPendingInvites = "notifyPendingInvites"
+        static let notifyEventTimeChanges = "notifyEventTimeChanges"
         // Recently added events region in the menu.
         static let recentEventsLimit = "recentEventsLimit"
         static let recentEventsWindowDays = "recentEventsWindowDays"

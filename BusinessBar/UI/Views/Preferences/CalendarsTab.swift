@@ -65,6 +65,9 @@ struct CalendarsTab: View {
     @AppStorage(Constants.Defaults.notifyPendingInvites) private var notifyPendingInvites = false {
         didSet { notifyPreferencesChanged() }
     }
+    @AppStorage(Constants.Defaults.notifyEventTimeChanges) private var notifyEventTimeChanges = false {
+        didSet { notifyPreferencesChanged() }
+    }
 
     init(
         meetingManager: MeetingManager,
@@ -330,7 +333,16 @@ struct CalendarsTab: View {
                 ))
                 .disabled(!featureCalendarEnabled || !meetingNotificationsEnabled)
 
+                Toggle("Notify when an event changes time", isOn: Binding(
+                    get: { notifyEventTimeChanges },
+                    set: { setConfirmationEnabled($0) { notifyEventTimeChanges = $0 } }
+                ))
+                .disabled(!featureCalendarEnabled || !meetingNotificationsEnabled)
+
                 Text("Unanswered invitations also show a count in the menu bar and a section in the menu, independent of these toggles.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Events that change time also show an orange count in the menu bar and a section in the menu, independent of these toggles.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

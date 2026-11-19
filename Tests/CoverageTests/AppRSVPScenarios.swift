@@ -13,6 +13,7 @@ enum AppRSVPScenarios {
     static func run(_ context: CoverageContext) async throws {
         var failures: [String] = []
         await run("rsvp badge", failures: &failures) { try await statusBadge(context) }
+        await run("time badge", failures: &failures) { try await timeChangeBadge(context) }
         await run("rsvp panel", failures: &failures) { try await panel(context) }
         try context.expect(failures.isEmpty, failures.joined(separator: "\n"))
     }
@@ -185,6 +186,145 @@ enum AppRSVPScenarios {
         } else {
             try c.expect(false, "Main menu should exist for coverage")
         }
+    }
+
+    /// Status bar for time changes: "N!" suffix while a meeting is shown,
+    /// orange calendar badge while idle, and the Changed times menu rows
+    /// route through the shared join/dismiss actions. The manager only flags
+    /// a change between two fetches, so each store mutation below is
+    /// followed by a refresh to build the before/after pair.
+    private static func timeChangeBadge(_ c: CoverageContext) async throws {
+        let defaults = try c.defaults("rsvp-time-badge")
+        defaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        defaults.set(true, forKey: Constants.Defaults.featureBadges)
+        defaults.set(false, forKey: Constants.Defaults.featureNoSleep)
+        defaults.set(0, forKey: Constants.Defaults.meetingTitleMaxLength)
+        defaults.set(0, forKey: Constants.Defaults.timeRoundingThreshold)
+        defaults.set("relative", forKey: Constants.Defaults.timeFormat)
+        let calendar = MBCalendar(id: "time-cal", title: "Times", color: "#112233", source: "Fixture")
+        defaults.set(try JSONEncoder().encode([calendar.id]), forKey: Constants.Defaults.selectedCalendars)
+        let notifications = NotificationCenter()
+        let store = Store()
+        let moving = CalendarEvent(
+            id: "moving", title: "Moved meeting",
+            startDate: now.addingTimeInterval(3600), endDate: now.addingTimeInterval(4200),
+            location: nil, notes: nil, url: URL(string: "https://zoom.us/j/123456789"), calendar: calendar,
+            organizer: nil, attendees: [], myRSVPStatus: .accepted
+        )
+        store.events = [moving]
+        let meetings = MeetingManager(eventStore: store, nowProvider: { now }, defaults: defaults, notificationCenter: notifications)
+        let unscheduled: (TimeInterval, @escaping () -> Void) -> Timer = { interval, action in
+            Timer(timeInterval: interval, repeats: false) { _ in action() }
+        }
+        let badges = BadgeManager(defaults: defaults, notifications: notifications, trust: { false }, monitor: Monitor(), schedule: unscheduled, requestPermission: {}, openSettings: { _ in })
+        let noSleep = NoSleepManager(defaults: defaults, notifications: notifications, workspace: NotificationCenter(), trust: { false }, now: { now }, schedule: unscheduled, activateSleep: { _ in }, deactivateSleep: {}, startActivity: {}, stopActivity: {})
+        var items: [Backing] = []
+        var answerOpens = 0
+        var effects = StatusBarController.Effects()
+        effects.makeStatusItem = { length in let backing = Backing(length); items.append(backing); return backing }
+        effects.scheduleTimer = { interval, _ in Timer(timeInterval: interval, repeats: false) { _ in } }
+        effects.now = { now }
+        effects.answerInvites = { answerOpens += 1 }
+        let controller = StatusBarController(meetingManager: meetings, badgeManager: badges, noSleepManager: noSleep, defaults: defaults, notifications: notifications, effects: effects, onShowPreferences: {})
+        await settle()
+        await meetings.refreshEvents()
+        await settle()
+        let button = items[0].ownedButton
+
+        // Baseline fetch: the event is first-seen, nothing changed yet.
+        try c.expect(button.attributedTitle.string.contains("!") == false, "No change yet means no bang suffix")
+
+        // Window moves: the live meeting text carries the orange "1!".
+        let shifted = CalendarEvent(
+            id: moving.id, title: moving.title,
+            startDate: now.addingTimeInterval(5400), endDate: now.addingTimeInterval(6000),
+            location: moving.location, notes: moving.notes, url: moving.meetingLink, calendar: calendar,
+            organizer: moving.organizer, attendees: moving.attendees, myRSVPStatus: .accepted
+        )
+        store.events = [shifted]
+        await meetings.refreshEvents()
+        await settle()
+        try c.expect(button.imagePosition == .noImage, "Moved meeting still shows as text")
+        try c.expect(button.attributedTitle.string.contains("1!"), "Moved event adds the bang suffix")
+
+        // Two changed events while a meeting shows: "2!" suffix.
+        let second = CalendarEvent(
+            id: "second", title: "Second meeting",
+            startDate: now.addingTimeInterval(7200), endDate: now.addingTimeInterval(7800),
+            location: nil, notes: nil, url: nil, calendar: calendar,
+            organizer: nil, attendees: [], myRSVPStatus: .accepted
+        )
+        store.events = [shifted, second]
+        await meetings.refreshEvents()
+        await settle()
+        try c.expect(!button.attributedTitle.string.contains("2!"), "First-seen second event is not counted as changed")
+
+        // Both move in the same fetch: "2!" suffix appears.
+        let secondShifted = CalendarEvent(
+            id: second.id, title: second.title,
+            startDate: now.addingTimeInterval(9000), endDate: now.addingTimeInterval(9600),
+            location: second.location, notes: second.notes, url: second.meetingLink, calendar: calendar,
+            organizer: second.organizer, attendees: second.attendees, myRSVPStatus: .accepted
+        )
+        let reshifted = CalendarEvent(
+            id: shifted.id, title: shifted.title,
+            startDate: now.addingTimeInterval(6600), endDate: now.addingTimeInterval(7200),
+            location: shifted.location, notes: shifted.notes, url: shifted.meetingLink, calendar: calendar,
+            organizer: shifted.organizer, attendees: shifted.attendees, myRSVPStatus: .accepted
+        )
+        store.events = [reshifted, secondShifted]
+        await meetings.refreshEvents()
+        await settle()
+        try c.expect(button.attributedTitle.string.contains("2!"), "Two moved events carry the combined suffix")
+
+        // Idle badge: shift both windows into the past so no next event
+        // shows. The past windows differ from the last observation, so the
+        // changed count survives and the icon branch renders.
+        let pastMoving = CalendarEvent(
+            id: shifted.id, title: shifted.title,
+            startDate: now.addingTimeInterval(-7200), endDate: now.addingTimeInterval(-6600),
+            location: shifted.location, notes: shifted.notes, url: shifted.meetingLink, calendar: calendar,
+            organizer: shifted.organizer, attendees: shifted.attendees, myRSVPStatus: .accepted
+        )
+        let pastSecond = CalendarEvent(
+            id: secondShifted.id, title: secondShifted.title,
+            startDate: now.addingTimeInterval(-5400), endDate: now.addingTimeInterval(-4800),
+            location: secondShifted.location, notes: secondShifted.notes, url: secondShifted.meetingLink, calendar: calendar,
+            organizer: secondShifted.organizer, attendees: secondShifted.attendees, myRSVPStatus: .accepted
+        )
+        store.events = [pastMoving, pastSecond]
+        await meetings.refreshEvents()
+        await settle()
+        try c.expect(button.imagePosition == .imageOnly, "Idle with changes shows the icon layout")
+        try c.expect(button.image?.tiffRepresentation != nil, "Changed-times icon renders")
+        // Missing-symbol fallback: SF Symbols ship with the OS so the
+        // production name always resolves; the coverage hook drives the
+        // branch with a nonexistent name and must fall back to the app icon.
+        let fallbackIcon = controller.timeChangedIconFallbackForCoverage()
+        try c.expect(fallbackIcon === controller.cachedAppIconForCoverage, "Missing symbol falls back to the branded icon")
+
+        // The controller keeps a persistent menu on the backing; when the
+        // fixture backing has none yet, hand it one so menuWillOpen can
+        // populate it the same way AppKit does on a real click.
+        if items[0].menu == nil { items[0].menu = NSMenu() }
+        guard let menu = items[0].menu else { throw CoverageContext.Failure(description: "Status backing has no menu") }
+        controller.menuWillOpen(menu)
+        try c.expect(menu.item(withTitle: "Changed times") != nil, "Changed times header appears in the menu")
+        try c.expect(menu.items.contains(where: { $0.title.hasPrefix("Moved meeting ·") }), "Changed row lists the moved event")
+
+        // Windows move back to upcoming: every seen event differs again,
+        // and neither was dismissed, so the text layout resumes with a
+        // "2!" suffix before the final stable fetch clears it.
+        store.events = [reshifted, secondShifted]
+        await meetings.refreshEvents()
+        await settle()
+        try c.expect(button.attributedTitle.string.contains("2!"), "Moved-back windows count as changed again")
+
+        // Everything back to a stable window: suffix disappears.
+        store.events = [reshifted, secondShifted]
+        await meetings.refreshEvents()
+        await settle()
+        try c.expect(!button.attributedTitle.string.contains("!"), "Stable windows clear the suffix")
     }
 
     /// Iterate panel: present with two invites, answer both, verify the
