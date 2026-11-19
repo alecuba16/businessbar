@@ -124,9 +124,9 @@ enum MenuBuilder {
         }
     }
 
-    /// Events the app saw appear for the first time in the last 24 h.
-    /// Rows behave like the event rows above: click joins when a meeting
-    /// link exists, submenu offers Join and Dismiss.
+    /// Events the app saw appear for the first time inside the configured
+    /// first-seen window. Rows behave like the event rows above: click joins
+    /// when a meeting link exists, submenu offers Join and Dismiss.
     @MainActor
     private static func addRecentSection(to menu: NSMenu, recentEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void) {
         guard !recentEvents.isEmpty else { return }

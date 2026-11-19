@@ -3,6 +3,53 @@ import EventKit
 import Foundation
 @testable import BusinessBarCore
 
+/// Fixture for the answer-while-fetching case: the first fetch parks on an
+/// async continuation until `openGate` resumes it. Parking must suspend, not
+/// block: EventStoreProtocol is main-actor bound, so a semaphore wait inside
+/// fetchEvents would freeze the actor and the scenario poll with it.
+@MainActor
+private final class SlowAnswerEventStore: EventStoreProtocol {
+    private var parkedFetches: [CheckedContinuation<Void, Never>] = []
+    private var opened = false
+    private var storedEvents: [CalendarEvent] = []
+    private var storedCalendars: [MBCalendar] = []
+    var receivedRSVPs: [(eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus)] = []
+
+    func seed(_ events: [CalendarEvent], calendars: [MBCalendar]) {
+        storedEvents = events
+        storedCalendars = calendars
+    }
+
+    /// Resumes every parked fetch and stops parking later ones, so the
+    /// post-answer refresh returns immediately and the suite cannot stall.
+    func openGate() {
+        opened = true
+        let waiters = parkedFetches
+        parkedFetches.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func requestAccess() async throws -> Bool { true }
+
+    func fetchCalendars() async throws -> [MBCalendar] {
+        storedCalendars
+    }
+
+    func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] {
+        if !opened {
+            await withCheckedContinuation { continuation in
+                parkedFetches.append(continuation)
+            }
+        }
+        return storedEvents
+    }
+
+    func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool {
+        receivedRSVPs.append((eventID, calendarID, status))
+        return true
+    }
+}
+
 @MainActor
 private final class CoverageEventStore: EventStoreProtocol {
     enum Failure: Error { case unavailable }
@@ -408,6 +455,41 @@ enum CoreMeetingUtilitiesScenarios {
         let failed = await manager.respond(toEventID: "invited", calendarID: calendar.id, status: .declined)
         try context.expect(!failed, "Rejected answer returns false")
         try context.equal(store.receivedRSVPs.map(\.2), [.accepted, .declined], "Both answer variants reach the store")
+
+        // Answer while a fetch is in flight: refreshEventsAfterAnswer waits
+        // out the in-flight refresh instead of dropping the post-answer one,
+        // so the stored answer lands in the published state. The first fetch
+        // parks on a continuation (the actor stays responsive), then a side
+        // task holds the gate open after a moment so the parked fetch lands
+        // while the answer's wait loop is running.
+        let slowStore = SlowAnswerEventStore()
+        slowStore.seed([invited, personal], calendars: [calendar])
+        let slowManager = MeetingManager(eventStore: slowStore, nowProvider: { instant }, defaults: defaults, notificationCenter: notifications)
+        var observedInFlight = false
+        let slowRefresh = Task { await slowManager.refreshEvents() }
+        for _ in 0..<400 where !observedInFlight {
+            observedInFlight = slowManager.isLoading
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try context.expect(observedInFlight, "Fetch is in flight while the answer arrives")
+        slowStore.seed([
+            CalendarEvent(id: invited.id, title: invited.title, startDate: invited.startDate, endDate: invited.endDate, location: invited.location, notes: invited.notes, url: invited.url, calendar: invited.calendar, organizer: invited.organizer, attendees: invited.attendees, myRSVPStatus: .accepted),
+            personal
+        ], calendars: [calendar])
+        let gateTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            slowStore.openGate()
+        }
+        let slowAnswer = await slowManager.respond(to: invited, status: .accepted)
+        try context.expect(slowAnswer, "Answer during in-flight fetch returns true")
+        try context.equal(slowStore.receivedRSVPs.map(\.0), [invited.id], "Slow store received the answer while fetching")
+        _ = await slowRefresh.value
+        _ = await gateTask.value
+        try context.expect(slowManager.isLoading == false, "In-flight refresh completed after the gate opened")
+        try await wait(context, "Post-answer refresh picks up the stored answer") {
+            slowManager.pendingRSVPEvents.isEmpty
+        }
+        try context.equal(slowManager.pendingRSVPEvents.count, 0, "Answered invite left the pending set after the wait")
     }
 
     private static func ekParticipantMapping(_ context: CoverageContext) throws {

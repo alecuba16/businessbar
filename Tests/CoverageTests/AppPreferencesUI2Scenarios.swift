@@ -856,6 +856,33 @@ enum AppPreferencesUI2Scenarios {
         // Notification lead time persists through its picker key.
         defaults.set(10, forKey: BusinessBar.Constants.Defaults.notificationMinutesBefore)
         try context.equal(defaults.integer(forKey: BusinessBar.Constants.Defaults.notificationMinutesBefore), 10, "Lead minutes persist")
+
+        // Recently Added section: the segmented pickers persist count and
+        // first-seen window through their setter bindings, and a fresh tab
+        // reads both keys back through the getters (stored-value branches).
+        try ui2PressSegment(granted, "Events to list:", segment: "10", context)
+        await ui2Settle()
+        try context.equal(defaults.integer(forKey: BusinessBar.Constants.Defaults.recentEventsLimit), 10, "Count segment press persists the row cap")
+        try ui2PressSegment(granted, "First seen within:", segment: "7 days", context)
+        await ui2Settle()
+        try context.equal(
+            defaults.object(forKey: BusinessBar.Constants.Defaults.recentEventsWindowDays) as? Int,
+            7,
+            "Window segment press persists the first-seen window"
+        )
+        let storedRecentTab = UI2Hosted(
+            CalendarsTab(
+                meetingManager: meetings,
+                googleAuth: auth,
+                defaults: defaults,
+                calendarAuthorization: { .fullAccess },
+                notificationAuthorization: { receive in receive(true) }
+            ).defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1400)
+        )
+        defer { storedRecentTab.close() }
+        await ui2Settle()
+        try context.expect(storedRecentTab.text.contains("Recently Added"), "Fresh tab renders the Recently Added section with stored values")
     }
 
     /// Toggle-press paths, default init closures, grant request flows, and

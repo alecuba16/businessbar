@@ -46,7 +46,7 @@ final class GCEventStoreAdapter: EventStoreProtocol {
     }
 
     func fetchEvents(from startDate: Date, to endDate: Date, calendars: [String]) async throws -> [CalendarEvent] {
-        guard dependencies.isAuthenticated() else { return [] }
+        guard dependencies.isAuthenticated(), !calendars.isEmpty else { return [] }
         // One calendarList call feeds every per-calendar fetch: the event
         // mapping needs the calendar object, and N calendars used to mean
         // N+1 identical list requests per refresh.

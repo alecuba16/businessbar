@@ -27,7 +27,8 @@ struct CalendarsTab: View {
     private let isRuntimeBundlePresent: Bool
     private let defaults: UserDefaults
     private var recentEventsLimit: Int {
-        defaults.integer(forKey: Constants.Defaults.recentEventsLimit)
+        let value = defaults.integer(forKey: Constants.Defaults.recentEventsLimit)
+        return value > 0 ? value : Constants.DefaultValues.recentEventsLimit
     }
     private var recentEventsWindowDays: Int {
         if let value = defaults.object(forKey: Constants.Defaults.recentEventsWindowDays) as? Int {

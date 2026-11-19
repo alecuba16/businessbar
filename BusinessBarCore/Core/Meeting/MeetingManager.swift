@@ -44,7 +44,8 @@ public final class MeetingManager: ObservableObject {
     /// not replay the whole day as "new".
     private var seenEventIDs = Set<String>()
     /// When each event was first observed, for the recently-added region.
-    /// Keyed by event ID and pruned with the same lifecycle as `seenEventIDs`.
+    /// Same lifecycle as `seenEventIDs`: cleared with the feature toggle and
+    /// session-only, so a restart restarts the list as the UI states.
     private var firstSeenAt = [String: Date]()
     private var lastFeatureState: Bool {
         didSet {
@@ -225,7 +226,7 @@ public final class MeetingManager: ObservableObject {
     public func respond(to event: CalendarEvent, status: CalendarEvent.RSVPStatus) async -> Bool {
         let ok = await eventStore.respond(toEventID: event.id, calendarID: event.calendar.id, status: status)
         if ok {
-            await refreshEvents()
+            await refreshEventsAfterAnswer()
         }
         return ok
     }
@@ -236,9 +237,21 @@ public final class MeetingManager: ObservableObject {
     public func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool {
         let ok = await eventStore.respond(toEventID: eventID, calendarID: calendarID, status: status)
         if ok {
-            await refreshEvents()
+            await refreshEventsAfterAnswer()
         }
         return ok
+    }
+
+    /// `refreshEvents` early-returns while a fetch is in flight, which would
+    /// silently drop the post-answer refresh the RSVP flow needs. Requeues
+    /// until the in-flight fetch lands so the badge, menu, and next-event
+    /// always pick up the stored answer.
+    private func refreshEventsAfterAnswer() async {
+        for _ in 0..<100 where isLoading {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        await refreshEvents()
     }
 
     /// Recalculation of `nextEvent` from the cached events array, plus day

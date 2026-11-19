@@ -576,11 +576,13 @@ enum AppViewScenarios {
         try context.expect(recentMenu.item(withTitle: "Recently added") != nil, "Recent region appears with recent events")
         try context.expect(recentMenu.items.contains(where: { $0.title.contains("Menu meeting") }), "Recent rows list the event")
         try context.expect(build(events: []).item(withTitle: "Recently added") == nil, "No recent events means no region")
-        if let recentRow = recentMenu.items.first(where: { $0.title.contains("Menu meeting") }), let recentJoin = recentRow.submenu?.item(withTitle: "Join Meeting") {
+        if let recentRow = recentMenu.items.first(where: { $0.title.contains("Menu meeting") }), let recentJoin = recentRow.submenu?.item(withTitle: "Join Meeting"), let recentDismiss = recentRow.submenu?.item(withTitle: "Dismiss") {
             handler.joinMeeting(recentJoin)
             try context.equal(joined.last, event.id, "Recent row join routes through the join callback")
+            handler.dismissEvent(recentDismiss)
+            try context.equal(dismissed.last, event.id, "Recent row dismiss routes through the dismiss callback")
         } else {
-            throw CoverageContext.Failure(description: "Recent row missing join submenu")
+            throw CoverageContext.Failure(description: "Recent row missing join/dismiss submenu")
         }
         let tomorrowStart = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date()))!.addingTimeInterval(3600)
         let tomorrow = CalendarEvent(id: "tomorrow", title: "Tomorrow fixture", startDate: tomorrowStart, endDate: tomorrowStart.addingTimeInterval(1800), location: nil, notes: nil, url: nil, calendar: event.calendar, organizer: nil, attendees: [])
