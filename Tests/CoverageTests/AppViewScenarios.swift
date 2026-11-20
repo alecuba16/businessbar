@@ -535,10 +535,11 @@ enum AppViewScenarios {
         var dismissed: [String] = []
         var callbacks: [String] = []
         var durations: [TimeInterval?] = []
+        var read: [String] = []
         let event = makeEvent(id: "meeting", title: "Menu meeting", location: nil, url: URL(string: "https://meet.google.com/aaa-bbbb-ccc"))
         let plain = makeEvent(id: "plain", title: "No meeting URL", location: nil, url: nil)
         func build(events: [CalendarEvent], loading: Bool = false, showEvents: Bool = true, showNoSleep: Bool = true, companion: Bool = true, pending: [CalendarEvent] = [], recent: [CalendarEvent] = [], changed: [CalendarEvent] = [], onAnswer: (() -> Void)? = nil) -> NSMenu {
-            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, recentEvents: recent, timeChangedEvents: changed, defaults: defaults)
+            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onMarkRecentAsRead: { read.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, recentEvents: recent, timeChangedEvents: changed, defaults: defaults)
         }
         let menu = build(events: [event, plain])
         try context.expect(menu.items.contains(where: { $0.title.contains("Menu meeting") && $0.submenu != nil }), "Meeting gets join submenu")
@@ -570,20 +571,32 @@ enum AppViewScenarios {
         try context.expect(build(events: [], loading: true).item(withTitle: "Loading events...")?.isEnabled == false, "Loading menu is not actionable")
         try context.expect(build(events: []).item(withTitle: "No upcoming events")?.isEnabled == false, "Empty menu is explicit")
 
-        // Recently added region: rows only when events were provided, join
-        // and dismiss route through the same menu actions as event rows.
+        // Recently added region: rows only when events were provided, and
+        // every row carries Join (when linked), Mark as read, and Dismiss.
         let recentMenu = build(events: [], recent: [event])
         try context.expect(recentMenu.item(withTitle: "Recently added") != nil, "Recent region appears with recent events")
         try context.expect(recentMenu.items.contains(where: { $0.title.contains("Menu meeting") }), "Recent rows list the event")
         try context.expect(build(events: []).item(withTitle: "Recently added") == nil, "No recent events means no region")
-        if let recentRow = recentMenu.items.first(where: { $0.title.contains("Menu meeting") }), let recentJoin = recentRow.submenu?.item(withTitle: "Join Meeting"), let recentDismiss = recentRow.submenu?.item(withTitle: "Dismiss") {
-            handler.joinMeeting(recentJoin)
-            try context.equal(joined.last, event.id, "Recent row join routes through the join callback")
-            handler.dismissEvent(recentDismiss)
-            try context.equal(dismissed.last, event.id, "Recent row dismiss routes through the dismiss callback")
-        } else {
-            throw CoverageContext.Failure(description: "Recent row missing join/dismiss submenu")
+        guard let recentRow = recentMenu.items.first(where: { $0.title.contains("Menu meeting") }), let recentJoin = recentRow.submenu?.item(withTitle: "Join Meeting"), let recentRead = recentRow.submenu?.item(withTitle: "Mark as read"), let recentDismiss = recentRow.submenu?.item(withTitle: "Dismiss") else {
+            throw CoverageContext.Failure(description: "Recent row missing join/read/dismiss submenu")
         }
+        handler.joinMeeting(recentJoin)
+        try context.equal(joined.last, event.id, "Recent row join routes through the join callback")
+        handler.markRecentAsRead(recentRead)
+        try context.equal(read, [event.id], "Recent row mark-as-read carries exact event ID")
+        handler.dismissEvent(recentDismiss)
+        try context.equal(dismissed.last, event.id, "Recent row dismiss routes through the dismiss callback")
+        // Unlinked recent rows still expose the read and dismiss actions.
+        let plainRecent = build(events: [], recent: [plain])
+        guard let plainRow = plainRecent.items.first(where: { $0.title.contains("No meeting URL") }) else {
+            throw CoverageContext.Failure(description: "Unlinked recent row missing")
+        }
+        try context.expect(plainRow.submenu?.item(withTitle: "Join Meeting") == nil, "Unlinked recent row has no join item")
+        guard let plainRead = plainRow.submenu?.item(withTitle: "Mark as read") else {
+            throw CoverageContext.Failure(description: "Unlinked recent row missing mark-as-read")
+        }
+        handler.markRecentAsRead(plainRead)
+        try context.equal(read, [event.id, plain.id], "Unlinked recent row still markable as read")
         let tomorrowStart = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date()))!.addingTimeInterval(3600)
         let tomorrow = CalendarEvent(id: "tomorrow", title: "Tomorrow fixture", startDate: tomorrowStart, endDate: tomorrowStart.addingTimeInterval(1800), location: nil, notes: nil, url: nil, calendar: event.calendar, organizer: nil, attendees: [])
         defaults.set(true, forKey: Constants.Defaults.showTomorrowEvents)
@@ -606,6 +619,7 @@ enum AppViewScenarios {
         handler.joinMeeting(invalid)
         handler.eventClicked(invalid)
         handler.dismissEvent(invalid)
+        handler.markRecentAsRead(invalid)
         handler.toggleNoSleep(invalid)
         handler.activateNoSleepFor(invalid)
         handler.deactivateNoSleep(invalid)

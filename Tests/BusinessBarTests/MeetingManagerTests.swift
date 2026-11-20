@@ -178,6 +178,51 @@ final class MeetingManagerTests: XCTestCase {
         )
     }
 
+    func test_markRecentAsReadRemovesRowButKeepsEvent() async throws {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = MockEventStore()
+        let calendar = MBCalendar(id: "cal1", title: "Work", color: "#FF0000", source: "iCloud")
+        store.stubbedCalendars = [calendar]
+
+        let future = Date().addingTimeInterval(600)
+        let event = CalendarEvent(
+            id: "evt1",
+            title: "Standup",
+            startDate: future,
+            endDate: future.addingTimeInterval(1800),
+            location: nil, notes: nil, url: nil,
+            calendar: calendar, organizer: nil, attendees: []
+        )
+        store.stubbedEvents = [event]
+
+        let calendarData = try JSONEncoder().encode(["cal1"])
+        defaults.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
+        defer { defaults.removeObject(forKey: Constants.Defaults.selectedCalendars) }
+
+        let manager = MeetingManager(eventStore: store, defaults: defaults, notificationCenter: NotificationCenter())
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(manager.recentEvents.map(\.id), ["evt1"], "first fetch feeds the recent region")
+
+        manager.markRecentAsRead("evt1")
+        XCTAssertTrue(manager.recentEvents.isEmpty, "marked row leaves the recent region")
+        XCTAssertEqual(manager.events.map(\.id), ["evt1"], "read row keeps its agenda place")
+        XCTAssertEqual(manager.nextEvent?.id, "evt1", "read row keeps next-event eligibility")
+
+        await manager.refreshEvents()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(manager.recentEvents.isEmpty, "refresh cannot re-announce a read row")
+
+        store.stubbedEvents = []
+        await manager.refreshEvents()
+        store.stubbedEvents = [event]
+        await manager.refreshEvents()
+        XCTAssertEqual(
+            manager.recentEvents.map(\.id), ["evt1"],
+            "read ID is forgotten once its event left the fetch window"
+        )
+    }
+
     func test_midnightRolloverRefetchesAndWindowAdvances() async throws {
         let (defaults, suiteName) = isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

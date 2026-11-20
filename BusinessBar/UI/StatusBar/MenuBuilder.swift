@@ -10,6 +10,7 @@ enum MenuBuilder {
         noSleepManager: NoSleepManager,
         onJoinMeeting: @escaping (CalendarEvent) -> Void,
         onDismissEvent: @escaping (String) -> Void,
+        onMarkRecentAsRead: @escaping (String) -> Void,
         onToggleNoSleep: @escaping () -> Void,
         onActivateNoSleep: @escaping (TimeInterval?) -> Void,
         onDeactivateNoSleep: @escaping () -> Void,
@@ -43,7 +44,7 @@ enum MenuBuilder {
 
         if showEvents {
             addInvitesSection(to: menu, pendingRSVPEvents: pendingRSVPEvents, onAnswerInvites: onAnswerInvites)
-            addRecentSection(to: menu, recentEvents: recentEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
+            addRecentSection(to: menu, recentEvents: recentEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent, onMarkRecentAsRead: onMarkRecentAsRead)
             addTimeChangedSection(to: menu, timeChangedEvents: timeChangedEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
         }
 
@@ -127,10 +128,11 @@ enum MenuBuilder {
     }
 
     /// Events the app saw appear for the first time inside the configured
-    /// first-seen window. Rows behave like the event rows above: click joins
-    /// when a meeting link exists, submenu offers Join and Dismiss.
+    /// first-seen window. Click joins when a meeting link exists; the
+    /// submenu offers Join, Mark as read (row leaves the region without
+    /// touching the agenda), and Dismiss (event hidden everywhere).
     @MainActor
-    private static func addRecentSection(to menu: NSMenu, recentEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void) {
+    private static func addRecentSection(to menu: NSMenu, recentEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void, onMarkRecentAsRead: @escaping (String) -> Void) {
         guard !recentEvents.isEmpty else { return }
 
         menu.addItem(NSMenuItem.separator())
@@ -150,11 +152,35 @@ enum MenuBuilder {
             )
             item.representedObject = MenuAction.eventClicked(event, onJoinMeeting, onDismissEvent)
             item.target = MenuActionHandler.shared
-            if event.meetingLink != nil {
-                item.submenu = createEventSubmenu(for: event, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
-            }
+            item.submenu = createRecentEventSubmenu(for: event, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent, onMarkRecentAsRead: onMarkRecentAsRead)
             menu.addItem(item)
         }
+    }
+
+    /// Recent rows keep a submenu even without a meeting link, because
+    /// Mark as read and Dismiss never depend on the link.
+    @MainActor
+    private static func createRecentEventSubmenu(for event: CalendarEvent, onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void, onMarkRecentAsRead: @escaping (String) -> Void) -> NSMenu {
+        let submenu = NSMenu()
+
+        if event.meetingLink != nil {
+            let joinItem = NSMenuItem(title: "Join Meeting", action: #selector(MenuActionHandler.joinMeeting), keyEquivalent: "")
+            joinItem.representedObject = MenuAction.joinMeeting(event, onJoinMeeting)
+            joinItem.target = MenuActionHandler.shared
+            submenu.addItem(joinItem)
+        }
+
+        let readItem = NSMenuItem(title: "Mark as read", action: #selector(MenuActionHandler.markRecentAsRead), keyEquivalent: "")
+        readItem.representedObject = MenuAction.markRecentAsRead(event.id, onMarkRecentAsRead)
+        readItem.target = MenuActionHandler.shared
+        submenu.addItem(readItem)
+
+        let dismissItem = NSMenuItem(title: "Dismiss", action: #selector(MenuActionHandler.dismissEvent), keyEquivalent: "")
+        dismissItem.representedObject = MenuAction.dismissEvent(event.id, onDismissEvent)
+        dismissItem.target = MenuActionHandler.shared
+        submenu.addItem(dismissItem)
+
+        return submenu
     }
 
     /// Events whose start or end moved after the app had already seen
@@ -365,6 +391,7 @@ enum MenuAction {
     case joinMeeting(CalendarEvent, (CalendarEvent) -> Void)
     case eventClicked(CalendarEvent, (CalendarEvent) -> Void, (String) -> Void)
     case dismissEvent(String, (String) -> Void)
+    case markRecentAsRead(String, (String) -> Void)
     case toggleNoSleep(() -> Void)
     case activateNoSleepFor(TimeInterval?, (TimeInterval?) -> Void)
     case deactivateNoSleep(() -> Void)
@@ -397,6 +424,11 @@ final class MenuActionHandler: NSObject {
     
     @objc func dismissEvent(_ sender: NSMenuItem) {
         guard case .dismissEvent(let eventID, let handler) = sender.representedObject as? MenuAction else { return }
+        handler(eventID)
+    }
+
+    @objc func markRecentAsRead(_ sender: NSMenuItem) {
+        guard case .markRecentAsRead(let eventID, let handler) = sender.representedObject as? MenuAction else { return }
         handler(eventID)
     }
     

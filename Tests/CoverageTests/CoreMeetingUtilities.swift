@@ -357,6 +357,23 @@ enum CoreMeetingUtilitiesScenarios {
         store.events = [first, later]
         await manager.refreshEvents()
         try context.equal(manager.nextEvent?.id, "first", "Dismissed IDs pruned when outside fetched window")
+
+        // Recently-added rows can be marked as read: the row leaves the
+        // region while the event keeps its agenda and next-event place, and
+        // the read memory survives refreshes until the event leaves the
+        // fetch window or the feature turns off.
+        try context.equal(manager.recentEvents.map(\.id), ["first", "later"], "Seen events populate the recent region")
+        manager.markRecentAsRead("first")
+        try context.equal(manager.recentEvents.map(\.id), ["later"], "Marked row leaves the recent region")
+        try context.equal(manager.nextEvent?.id, "first", "Read row keeps its agenda place and next-event eligibility")
+        await manager.refreshEvents()
+        try context.equal(manager.recentEvents.map(\.id), ["later"], "Read memory survives refresh")
+        store.events = [later]
+        await manager.refreshEvents()
+        store.events = [first, later]
+        await manager.refreshEvents()
+        try context.equal(manager.recentEvents.map(\.id), ["first", "later"], "Read ID pruned once its event leaves the fetch window")
+
         now = instant.addingTimeInterval(650)
         manager.recalculateNextEvent()
         try context.equal(manager.nextEvent?.id, "later", "Tick excludes ended event")

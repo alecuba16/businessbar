@@ -14,9 +14,10 @@ public final class MeetingManager: ObservableObject {
     /// the RSVP panel. Events that already ended are excluded: a pending
     /// status on a past invitation is stale bookkeeping, not a question.
     @Published public private(set) var pendingRSVPEvents: [CalendarEvent] = []
-    /// Events first observed within the last 24 h, newest first. Drives
-    /// the menu's recently-added region. Session memory only: it starts
-    /// empty on launch and empties when the calendar feature turns off.
+    /// Events first observed within the last 24 h, newest first, minus rows
+    /// the user marked as read. Drives the menu's recently-added region.
+    /// Session memory only: it starts empty on launch and empties when the
+    /// calendar feature turns off.
     @Published public private(set) var recentEvents: [CalendarEvent] = []
     /// Already-seen events whose start or end moved in the latest refresh.
     /// Drives the orange "N!" status-bar badge and the menu's changed-times
@@ -38,6 +39,11 @@ public final class MeetingManager: ObservableObject {
     /// fetch window on every refresh, so the set cannot grow without bound
     /// across weeks of 24/7 uptime.
     private var dismissedEventIDs = Set<String>()
+
+    /// Recently-added rows the user marked as read. Pruned with the same
+    /// fetch-window rule as `dismissedEventIDs`, so a row can come back only
+    /// after its event left the fetch window or the app restarted.
+    private var readRecentEventIDs = Set<String>()
 
     /// Start of the day the last successful fetch covered. Used by the
     /// periodic tick to detect midnight rollover and trigger a full refresh
@@ -66,6 +72,7 @@ public final class MeetingManager: ObservableObject {
                 recentEvents = []
                 timeChangedEvents = []
                 dismissedEventIDs.removeAll()
+                readRecentEventIDs.removeAll()
                 seenEventIDs.removeAll()
                 firstSeenAt.removeAll()
                 lastSeenWindows.removeAll()
@@ -175,6 +182,7 @@ public final class MeetingManager: ObservableObject {
             )
 
             pruneDismissedIDs(keeping: fetchedEvents)
+            pruneReadRecentIDs(keeping: fetchedEvents)
 
             fetchedEvents = EventDisplayPlanner.filter(
                 fetchedEvents,
@@ -214,7 +222,7 @@ public final class MeetingManager: ObservableObject {
             pendingRSVPEvents = EventDisplayPlanner.pendingInvites(from: fetchedEvents, now: now)
             recentEvents = EventDisplayPlanner.recentEvents(
                 firstSeen: firstSeenAt,
-                from: fetchedEvents,
+                from: fetchedEvents.filter { !readRecentEventIDs.contains($0.id) },
                 now: now,
                 window: recentEventsWindow,
                 limit: recentEventsLimit
@@ -251,6 +259,22 @@ public final class MeetingManager: ObservableObject {
     public func dismissEvent(_ eventID: String) {
         dismissedEventIDs.insert(eventID)
         nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs, now: nowProvider())
+    }
+
+    /// Marks one recently-added row as read: the event keeps its agenda place
+    /// and next-event eligibility, it only leaves the recently-added region.
+    /// The read memory outlives the removal, so refreshes cannot re-announce
+    /// the same row until its event leaves the fetch window or the app
+    /// restarts.
+    public func markRecentAsRead(_ eventID: String) {
+        readRecentEventIDs.insert(eventID)
+        recentEvents = EventDisplayPlanner.recentEvents(
+            firstSeen: firstSeenAt,
+            from: events.filter { !readRecentEventIDs.contains($0.id) },
+            now: nowProvider(),
+            window: recentEventsWindow,
+            limit: recentEventsLimit
+        )
     }
 
     /// Sends the user's RSVP answer for one event through the active store
@@ -312,6 +336,14 @@ public final class MeetingManager: ObservableObject {
     private func pruneDismissedIDs(keeping fetchedEvents: [CalendarEvent]) {
         let currentIDs = Set(fetchedEvents.map { $0.id })
         dismissedEventIDs = dismissedEventIDs.intersection(currentIDs)
+    }
+
+    /// Same bounded-memory rule for read recently-added rows: an ID whose
+    /// event left the fetch window is forgotten, so a later reappearance is
+    /// announced as recent again.
+    private func pruneReadRecentIDs(keeping fetchedEvents: [CalendarEvent]) {
+        let currentIDs = Set(fetchedEvents.map { $0.id })
+        readRecentEventIDs = readRecentEventIDs.intersection(currentIDs)
     }
 
     private func getSelectedCalendarIDs() -> [String] {
