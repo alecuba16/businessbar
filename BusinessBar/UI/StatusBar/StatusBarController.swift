@@ -871,6 +871,7 @@ extension StatusBarController: NSMenuDelegate {
             noSleepManager: noSleepManager,
             onJoinMeeting: { [weak self] event in self?.joinMeeting(event) },
             onDismissEvent: { [weak self] eventID in self?.meetingManager.dismissEvent(eventID) },
+            onMarkRecentAsRead: { [weak self] eventID in self?.meetingManager.markRecentAsRead(eventID) },
             onToggleNoSleep: { [weak self] in self?.noSleepManager.toggle() },
             onActivateNoSleep: { [weak self] duration in self?.noSleepManager.activate(duration: duration) },
             onDeactivateNoSleep: { [weak self] in self?.noSleepManager.deactivate() },
