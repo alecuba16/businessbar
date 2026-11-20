@@ -5,7 +5,7 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.8.0] - 2026-11-20
 ### Added
 - Rows in the "Recently added" menu section can be marked as read from their submenu, so they stop surfacing without the heavier Dismiss, which still hides the event everywhere. A read row keeps its agenda place and its next-event eligibility, and the memory is per-session like the rest of the region: refreshes cannot bring the row back, only the app restarting, the event leaving the fetch window, or turning the calendar feature off can. Rows without a meeting link now also carry the submenu, because Mark as read and Dismiss never depended on the link
 
