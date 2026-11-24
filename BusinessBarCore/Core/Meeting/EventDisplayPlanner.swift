@@ -4,12 +4,16 @@ import Foundation
 /// MeetingManager so date-window, filter, and next-event rules can be
 /// unit-tested without a store or UserDefaults side effects.
 public enum EventDisplayPlanner {
-    /// Fetch window for the current refresh: today, optionally + tomorrow.
-    public static func fetchWindow(now: Date = Date(), includeTomorrow: Bool, calendar: Calendar = .current) -> (start: Date, end: Date) {
+    /// Fetch window for the current refresh: from the start of today to
+    /// `horizonDays` calendar days ahead. `includeTomorrow` only sets the
+    /// floor: the window covers at least two days with it on and one with it
+    /// off, so a wide horizon never shrinks below what the legacy callers
+    /// fetched. The agenda cut for the tomorrow toggle lives in the manager,
+    /// not here.
+    public static func fetchWindow(now: Date = Date(), includeTomorrow: Bool, horizonDays: Int = 1, calendar: Calendar = .current) -> (start: Date, end: Date) {
         let startOfToday = calendar.startOfDay(for: now)
-        let end = includeTomorrow
-            ? calendar.date(byAdding: .day, value: 2, to: startOfToday)!
-            : calendar.date(byAdding: .day, value: 1, to: startOfToday)!
+        let days = includeTomorrow ? max(2, horizonDays) : max(1, horizonDays)
+        let end = calendar.date(byAdding: .day, value: days, to: startOfToday)!
         return (startOfToday, end)
     }
 

@@ -303,6 +303,67 @@ final class MeetingManagerRSVPTests: XCTestCase {
         )
     }
 
+    func test_fetchHorizonCoversFutureDaysWhileAgendaStaysCurrent() async throws {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = MockEventStore()
+        let calendar = MBCalendar(id: "cal1", title: "Work", color: "#FF0000", source: "iCloud")
+        store.stubbedCalendars = [calendar]
+
+        var now = Date()
+        let startOfToday = Calendar.current.startOfDay(for: now)
+        let day10 = Calendar.current.date(byAdding: .day, value: 10, to: startOfToday)!
+        let futureEvent = CalendarEvent(
+            id: "day10-evt",
+            title: "Far future",
+            startDate: day10.addingTimeInterval(3600),
+            endDate: day10.addingTimeInterval(5400),
+            location: nil, notes: nil, url: nil,
+            calendar: calendar, organizer: nil, attendees: []
+        )
+        store.stubbedEvents = [futureEvent]
+
+        let calendarData = try JSONEncoder().encode(["cal1"])
+        defaults.set(calendarData, forKey: Constants.Defaults.selectedCalendars)
+        defer { defaults.removeObject(forKey: Constants.Defaults.selectedCalendars) }
+        defaults.set(14, forKey: Constants.Defaults.fetchHorizonDays)
+        defaults.set(false, forKey: Constants.Defaults.showTomorrowEvents)
+
+        let manager = MeetingManager(eventStore: store, nowProvider: { now }, defaults: defaults, notificationCenter: NotificationCenter())
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(store.fetchedWindows.count, 1, "initial refresh should fetch exactly one window")
+        let window = store.fetchedWindows[0]
+        XCTAssertEqual(
+            Calendar.current.dateComponents([.day], from: window.start, to: window.end).day,
+            14,
+            "fetch window must reach the configured horizon"
+        )
+        XCTAssertEqual(manager.recentEvents.map(\.id), ["day10-evt"], "future-dated event feeds the recently-added region")
+        XCTAssertTrue(manager.events.isEmpty, "agenda stays cut to today when tomorrow is off")
+        XCTAssertNil(manager.nextEvent, "next event ignores days outside the agenda window")
+
+        // Marking the far-future row as read must stick even though the
+        // agenda never lists the event, and it must survive a refresh at
+        // the same now (stale-first-seen is not the reason the row is gone).
+        manager.markRecentAsRead("day10-evt")
+        XCTAssertTrue(manager.recentEvents.isEmpty, "future row readable without its day in the agenda")
+        await manager.refreshEvents()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(manager.recentEvents.isEmpty, "read flag survives the refresh while first-seen is fresh")
+        XCTAssertEqual(manager.horizonEvents.map(\.id), ["day10-evt"], "horizon cache holds the full window")
+
+        // Time travel to the event's own day: the today-only agenda now
+        // lists it. The recent row must not come back either way, its
+        // first-seen memory is ten days stale by then.
+        now = day10.addingTimeInterval(1800)
+        manager.recalculateNextEvent()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(manager.events.map(\.id), ["day10-evt"], "event shows once its day is current")
+        XCTAssertEqual(manager.nextEvent?.id, "day10-evt", "current-day event becomes the next event")
+        XCTAssertEqual(manager.recentEvents.map(\.id), [], "read row stays gone after the day arrives")
+    }
+
     func test_pendingInvitesAreExposedAfterRefresh() async throws {
         let (defaults, suiteName) = isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

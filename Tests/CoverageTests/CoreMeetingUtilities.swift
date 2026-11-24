@@ -160,6 +160,16 @@ enum CoreMeetingUtilitiesScenarios {
         let tomorrow = EventDisplayPlanner.fetchWindow(now: spring, includeTomorrow: true, calendar: gregorian)
         try context.equal(today.end.timeIntervalSince(today.start), 23 * 3600, "DST fetch window uses calendar day")
         try context.equal(tomorrow.end.timeIntervalSince(today.end), 24 * 3600, "Tomorrow adds one calendar day")
+        // The horizon widens the window past the legacy two days; the
+        // includeTomorrow floor keeps the legacy minimums untouched. Day
+        // components, not elapsed time: March 8 is the spring-forward
+        // date in this zone, so 14 calendar days is one wall-clock hour
+        // short.
+        let horizon = EventDisplayPlanner.fetchWindow(now: spring, includeTomorrow: false, horizonDays: 14, calendar: gregorian)
+        try context.equal(gregorian.dateComponents([.day], from: horizon.start, to: horizon.end).day, 14, "Horizon extends the window in calendar days")
+        try context.equal(horizon.start, today.start, "Horizon window keeps the start of today")
+        let flooredHorizon = EventDisplayPlanner.fetchWindow(now: spring, includeTomorrow: true, horizonDays: 1, calendar: gregorian)
+        try context.equal(gregorian.dateComponents([.day], from: flooredHorizon.start, to: flooredHorizon.end).day, 2, "Tomorrow floor survives a shorter horizon")
         let ended = event("ended", end: 0)
         let live = event("live")
         let declined = event("declined", status: .canceled)

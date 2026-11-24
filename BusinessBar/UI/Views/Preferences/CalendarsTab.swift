@@ -36,6 +36,12 @@ struct CalendarsTab: View {
         }
         return Constants.DefaultValues.recentEventsWindowDays
     }
+    private var fetchHorizonDays: Int {
+        if let value = defaults.object(forKey: Constants.Defaults.fetchHorizonDays) as? Int {
+            return value
+        }
+        return Constants.DefaultValues.fetchHorizonDays
+    }
     @State private var notificationsAuthorized = false
     /// Confirmation-toggle enable waiting for the system authorization
     /// answer: requestNotificationAccess completes it once the status lands.
@@ -270,6 +276,21 @@ struct CalendarsTab: View {
             Section("Meeting Display") {
                 Toggle("Show tomorrow's events", isOn: $showTomorrowEvents)
                 Toggle("Show declined events (dimmed)", isOn: $showDeclinedEvents)
+
+                Picker("Fetch events up to:", selection: Binding(
+                    get: { fetchHorizonDays },
+                    set: { setFetchHorizonDays($0) }
+                )) {
+                    Text("7 days").tag(7)
+                    Text("14 days").tag(14)
+                    Text("30 days").tag(30)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 220)
+
+                Text("Refreshes fetch every event from today up to this horizon, so recently-added rows, time-change flags, and notifications cover events on any future day, not just today.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             .disabled(!canEditCalendarConfig)
 
@@ -664,6 +685,11 @@ struct CalendarsTab: View {
 
     private func setRecentEventsWindowDays(_ value: Int) {
         defaults.set(value, forKey: Constants.Defaults.recentEventsWindowDays)
+        notifyPreferencesChanged()
+    }
+
+    private func setFetchHorizonDays(_ value: Int) {
+        defaults.set(value, forKey: Constants.Defaults.fetchHorizonDays)
         notifyPreferencesChanged()
     }
 

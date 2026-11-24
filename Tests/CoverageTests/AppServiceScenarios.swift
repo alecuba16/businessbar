@@ -452,7 +452,7 @@ enum AppServiceScenarios {
         try context.equal(events[2].calendar.id, "unknown", "Unknown calendar gets fallback metadata")
         try context.expect(events.first?.meetingLink != nil, "Conference link detected")
         let query = URLComponents(url: urls.first { $0.path.hasSuffix("events") }!, resolvingAgainstBaseURL: false)!.queryItems!
-        try context.equal(query.first { $0.name == "maxResults" }?.value, "50", "Google event query limit preserved")
+        try context.equal(query.first { $0.name == "maxResults" }?.value, "250", "Google event query limit matches the wide fetch window")
         try context.equal(query.first { $0.name == "singleEvents" }?.value, "true", "Recurring events expanded")
         calendarJSON = "{}"
         try await context.expectThrowsAsync("Malformed calendar list rejected") { _ = try await adapter.fetchCalendars() }
