@@ -5,6 +5,10 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-11-24
+### Added
+- Calendar refreshes can now fetch up to a week ahead by default. The horizon is configurable between 7, 14, and 30 days under Preferences > Calendars, so the Recently added section, the changed-times flag, and the notifications see events landing on any future day, not only today or tomorrow. The menu agenda keeps showing just today and tomorrow (per the existing toggle): a wide fetch feeds the memory regions, the listing stays compact
+
 ## [1.8.0] - 2026-11-20
 ### Added
 - Rows in the "Recently added" menu section can be marked as read from their submenu, so they stop surfacing without the heavier Dismiss, which still hides the event everywhere. A read row keeps its agenda place and its next-event eligibility, and the memory is per-session like the rest of the region: refreshes cannot bring the row back, only the app restarting, the event leaving the fetch window, or turning the calendar feature off can. Rows without a meeting link now also carry the submenu, because Mark as read and Dismiss never depended on the link

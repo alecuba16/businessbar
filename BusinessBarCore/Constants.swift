@@ -69,6 +69,8 @@ enum Constants {
         // Recently added events region in the menu.
         static let recentEventsLimit = "recentEventsLimit"
         static let recentEventsWindowDays = "recentEventsWindowDays"
+        // Days ahead the calendar fetch window reaches.
+        static let fetchHorizonDays = "fetchHorizonDays"
     }
     
     enum DefaultValues {
@@ -81,5 +83,6 @@ enum Constants {
         static let activityIdleMultiplier = 3       // fire after N × checkInterval seconds idle
         static let recentEventsLimit = 5             // rows in the Recently added menu region
         static let recentEventsWindowDays = 1       // first-seen window for that region
+        static let fetchHorizonDays = 7             // days ahead the fetch window reaches
     }
 }

@@ -123,7 +123,7 @@ final class GCEventStoreAdapter: EventStoreProtocol {
             URLQueryItem(name: "timeMax",      value: isoFormatter.string(from: endDate)),
             URLQueryItem(name: "singleEvents", value: "true"),
             URLQueryItem(name: "orderBy",      value: "startTime"),
-            URLQueryItem(name: "maxResults",   value: "50")
+            URLQueryItem(name: "maxResults",   value: "250")
         ]
 
         guard let url = components.url else { return [] }

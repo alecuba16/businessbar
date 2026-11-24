@@ -857,6 +857,16 @@ enum AppPreferencesUI2Scenarios {
         defaults.set(10, forKey: BusinessBar.Constants.Defaults.notificationMinutesBefore)
         try context.equal(defaults.integer(forKey: BusinessBar.Constants.Defaults.notificationMinutesBefore), 10, "Lead minutes persist")
 
+        // Fetch horizon picker: segment press persists the horizon through
+        // the setter binding, and the fresh tab below reads it back.
+        try ui2PressSegment(granted, "Fetch events up to:", segment: "30 days", context)
+        await ui2Settle()
+        try context.equal(
+            defaults.integer(forKey: BusinessBar.Constants.Defaults.fetchHorizonDays),
+            30,
+            "Horizon segment press persists the fetch window reach"
+        )
+
         // Recently Added section: the segmented pickers persist count and
         // first-seen window through their setter bindings, and a fresh tab
         // reads both keys back through the getters (stored-value branches).

@@ -58,6 +58,13 @@ public final class MeetingManager: ObservableObject {
     /// Same lifecycle as `seenEventIDs`: cleared with the feature toggle and
     /// session-only, so a restart restarts the list as the UI states.
     private var firstSeenAt = [String: Date]()
+    /// Last fetched events covering the whole horizon, before the agenda
+    /// display cut. The read-row recompute runs on the full window because
+    /// a recent row can sit on a day the agenda does not list. Notification
+    /// scheduling stays on the agenda on purpose: every refresh re-schedules
+    /// from the current list, so events only need coverage once they land
+    /// in the two-day window.
+    public private(set) var horizonEvents: [CalendarEvent] = []
     /// Last observed time window per seen event, for change detection.
     /// Same lifecycle as `seenEventIDs`: a first-seen event never counts as
     /// changed, only a later shift of its start or end does.
@@ -76,6 +83,7 @@ public final class MeetingManager: ObservableObject {
                 seenEventIDs.removeAll()
                 firstSeenAt.removeAll()
                 lastSeenWindows.removeAll()
+                horizonEvents = []
                 lastFetchDayStart = nil
             }
         }
@@ -99,6 +107,16 @@ public final class MeetingManager: ObservableObject {
         let days = defaults.object(forKey: Constants.Defaults.recentEventsWindowDays) as? Int
             ?? Constants.DefaultValues.recentEventsWindowDays
         return TimeInterval(max(1, days)) * 24 * 3600
+    }
+
+    /// How many days ahead the fetch window reaches. Everything from the
+    /// start of today to this horizon is polled every refresh, so the
+    /// recently-added region, change detection, and notifications cover
+    /// events scheduled on any future day, not just today and tomorrow.
+    private var fetchHorizonDays: Int {
+        let days = defaults.object(forKey: Constants.Defaults.fetchHorizonDays) as? Int
+            ?? Constants.DefaultValues.fetchHorizonDays
+        return max(1, days)
     }
 
     public init(
@@ -155,6 +173,7 @@ public final class MeetingManager: ObservableObject {
             pendingRSVPEvents = []
             recentEvents = []
             timeChangedEvents = []
+            horizonEvents = []
             lastFetchDayStart = nil
             return
         }
@@ -169,11 +188,17 @@ public final class MeetingManager: ObservableObject {
             guard !selectedCalendarIDs.isEmpty else {
                 events = []
                 nextEvent = nil
+                horizonEvents = []
                 return
             }
 
             let showTomorrow = showTomorrowEvents
-            let window = EventDisplayPlanner.fetchWindow(now: nowProvider(), includeTomorrow: showTomorrow)
+            let now = nowProvider()
+            let window = EventDisplayPlanner.fetchWindow(
+                now: now,
+                includeTomorrow: showTomorrow,
+                horizonDays: fetchHorizonDays
+            )
 
             var fetchedEvents = try await eventStore.fetchEvents(
                 from: window.start,
@@ -189,13 +214,9 @@ public final class MeetingManager: ObservableObject {
                 dismissedIDs: dismissedEventIDs,
                 showDeclined: defaults.bool(forKey: Constants.Defaults.showDeclinedEvents)
             )
-            if !showTomorrow {
-                fetchedEvents = fetchedEvents.filter { $0.startDate < window.end }
-            }
             fetchedEvents.sort { $0.startDate < $1.startDate }
 
             let newlySeenEvents = fetchedEvents.filter { !seenEventIDs.contains($0.id) }
-            let now = nowProvider()
             for event in fetchedEvents {
                 seenEventIDs.insert(event.id)
                 if firstSeenAt[event.id] == nil {
@@ -218,8 +239,6 @@ public final class MeetingManager: ObservableObject {
             }
             timeChangedEvents = changedTimeEvents
 
-            events = fetchedEvents
-            pendingRSVPEvents = EventDisplayPlanner.pendingInvites(from: fetchedEvents, now: now)
             recentEvents = EventDisplayPlanner.recentEvents(
                 firstSeen: firstSeenAt,
                 from: fetchedEvents.filter { !readRecentEventIDs.contains($0.id) },
@@ -227,7 +246,23 @@ public final class MeetingManager: ObservableObject {
                 window: recentEventsWindow,
                 limit: recentEventsLimit
             )
-            nextEvent = EventDisplayPlanner.nextEvent(from: fetchedEvents, dismissedIDs: dismissedEventIDs, now: now)
+
+            // Agenda display keeps its own two-day model regardless of the
+            // fetch horizon: the menu lists today, plus tomorrow when the
+            // toggle is on. Everything else the wide fetch feeds (recently
+            // added, changed times, invites, notifications) works on the
+            // whole horizon.
+            let agendaEnd = Calendar.current.date(
+                byAdding: .day,
+                value: showTomorrow ? 2 : 1,
+                to: Calendar.current.startOfDay(for: now)
+            )!
+            let agendaEvents = fetchedEvents.filter { $0.startDate < agendaEnd }
+
+            events = agendaEvents
+            pendingRSVPEvents = EventDisplayPlanner.pendingInvites(from: fetchedEvents, now: now)
+            nextEvent = EventDisplayPlanner.nextEvent(from: agendaEvents, dismissedIDs: dismissedEventIDs, now: now)
+            horizonEvents = fetchedEvents
             lastFetchDayStart = window.start
 
             if !newlySeenEvents.isEmpty {
@@ -270,7 +305,7 @@ public final class MeetingManager: ObservableObject {
         readRecentEventIDs.insert(eventID)
         recentEvents = EventDisplayPlanner.recentEvents(
             firstSeen: firstSeenAt,
-            from: events.filter { !readRecentEventIDs.contains($0.id) },
+            from: horizonEvents.filter { !readRecentEventIDs.contains($0.id) },
             now: nowProvider(),
             window: recentEventsWindow,
             limit: recentEventsLimit
