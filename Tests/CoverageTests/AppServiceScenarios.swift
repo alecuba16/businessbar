@@ -38,16 +38,27 @@ enum AppServiceScenarios {
     }
 
     static func run(_ context: CoverageContext) async throws {
+        print("SRV: keychain")
         try keychain(context)
+        print("SRV: credentials")
         try credentials(context)
+        print("SRV: authentication")
         try await authentication(context)
+        print("SRV: oauth")
         try await oauth(context)
+        print("SRV: updaterAndLifecycle")
         try updaterAndLifecycle(context)
+        print("SRV: calendars")
         try await calendars(context)
+        print("SRV: gcRespond")
         try await gcRespond(context)
+        print("SRV: notifications")
         try await notifications(context)
+        print("SRV: rsvpNotifications")
         try await rsvpNotifications(context)
+        print("SRV: lifecycle")
         try await lifecycle(context)
+        print("SRV: appDelegateLiveClosures")
         try await appDelegateLiveClosures(context)
     }
 
@@ -735,6 +746,11 @@ private extension AppServiceScenarios {
         // off-main in its async task) watches for the new alert window and
         // hops back to main to stop the session. runModal returns the first
         // button response ("Open Settings" / OK) without user interaction.
+        // Headless hosts (CI) do not service main-queue blocks from inside
+        // the modal run loop, so the watcher alone can freeze there (the
+        // measured f13/f14 deadlock class); the backstop timer is registered
+        // in the modal-panel mode, so it fires inside the modal loop itself
+        // and stops the session from the same thread, on every host.
         let windowsBeforeAlerts = Set(NSApp.windows.map(ObjectIdentifier.init))
         func stopModalOnceWindowAppears() async {
             for _ in 0..<600 {
@@ -746,17 +762,22 @@ private extension AppServiceScenarios {
             }
             DispatchQueue.main.async { NSApp.stopModal() }
         }
-        DispatchQueue.main.async {
-            _ = live.permissionAlert()
+        func presentModalAlert(_ present: @escaping @MainActor () -> Void) async {
+            let backstop = Timer(timeInterval: 5, repeats: false) { _ in
+                NSApp.stopModal()
+            }
+            RunLoop.main.add(backstop, forMode: .modalPanel)
+            DispatchQueue.main.async {
+                present()
+            }
+            await stopModalOnceWindowAppears()
+            backstop.invalidate()
+            // Give the main queue a beat to unwind runModal before the next
+            // main-queue work in this scenario.
+            for _ in 0..<50 { await Task.yield() }
         }
-        await stopModalOnceWindowAppears()
-        DispatchQueue.main.async {
-            live.preferencesError()
-        }
-        await stopModalOnceWindowAppears()
-        // Give the main queue a beat to unwind runModal before the next
-        // main-queue work in this scenario.
-        for _ in 0..<50 { await Task.yield() }
+        await presentModalAlert { _ = live.permissionAlert() }
+        await presentModalAlert { live.preferencesError() }
 
         // enqueue/after dispatch on the main queue; drain both.
         var enqueued = false
