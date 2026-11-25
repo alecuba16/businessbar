@@ -117,6 +117,18 @@ private final class CoverageCalendarBackend: CalendarStoreBackend {
     }
 }
 
+/// Coverage seam for the native store's access request: answers the real
+/// `requestFullAccessToEvents` completion without a TCC prompt, so headless
+/// hosts (CI) cannot hang waiting for a grant nobody can give. The backend's
+/// continuation body still executes unchanged.
+private final class PromptFreeEventStore: EKEventStore {
+    var accessAnswer: (Bool, Error?) = (true, nil)
+
+    override func requestFullAccessToEvents(completion: @escaping (Bool, (any Error)?) -> Void) {
+        completion(accessAnswer.0, accessAnswer.1)
+    }
+}
+
 @MainActor
 enum CoreMeetingUtilitiesScenarios {
     static func run(_ context: CoverageContext) async throws {
@@ -831,7 +843,13 @@ enum CoreMeetingUtilitiesScenarios {
 
         // Native backend through the coverage seam: real store, injected
         // access flag. The unfiled event makes save throw, so no state is touched.
-        let nativeBackend = EKEventStoreAdapter.nativeBackendForCoverage(hasAccess: true)
+        // The store answers its own access request (PromptFreeEventStore) so
+        // headless hosts cannot hang on a TCC prompt nobody can answer.
+        // The provider hands back the same instance, because a successful
+        // access request refreshes sources and the error probe below must
+        // reach the store the backend actually holds.
+        let promptFree = PromptFreeEventStore()
+        let nativeBackend = EKEventStoreAdapter.nativeBackendForCoverage(store: promptFree, hasAccess: true) { promptFree }
         let nativeAdapter = EKEventStoreAdapter(backend: nativeBackend)
         answered = await nativeAdapter.respond(toEventID: "native-missing", calendarID: "work", status: .accepted)
         try context.expect(!answered, "Native lookup miss rejects the answer")
@@ -845,7 +863,7 @@ enum CoreMeetingUtilitiesScenarios {
         } catch {
             try context.expect(true, "Native save surfaces EventKit errors to the caller")
         }
-        try await nativeBackendSurface(context, nativeBackend, nativeAdapter)
+        try await nativeBackendSurface(context, nativeBackend, nativeAdapter, promptFree: promptFree)
     }
 
     /// NativeCalendarStoreBackend against the real EventKit store: the read
@@ -853,7 +871,7 @@ enum CoreMeetingUtilitiesScenarios {
     /// and the request continuation resumes with the OS answer instead of
     /// throwing. Store contents depend on the host calendar state, so checks
     /// mirror counts rather than assume emptiness.
-    private static func nativeBackendSurface(_ context: CoverageContext, _ backend: CalendarStoreBackend, _ adapter: EKEventStoreAdapter) async throws {
+    private static func nativeBackendSurface(_ context: CoverageContext, _ backend: CalendarStoreBackend, _ adapter: EKEventStoreAdapter, promptFree: PromptFreeEventStore) async throws {
         backend.refreshSources()
         let nativeCalendars = backend.calendars()
         _ = backend.events(from: instant.addingTimeInterval(-3600), to: instant.addingTimeInterval(3600), calendars: nativeCalendars)
@@ -867,6 +885,16 @@ enum CoreMeetingUtilitiesScenarios {
         // with the OS answer instead of throwing; the granted value itself is
         // host TCC state and is not asserted.
         _ = try await adapter.requestAccess()
+
+        // The access request can also fail, and the failure must resume the
+        // same continuation through the throw path.
+        promptFree.accessAnswer = (false, CocoaError(.userActivityConnectionUnavailable))
+        do {
+            _ = try await adapter.requestAccess()
+            try context.expect(false, "Native access error should surface as a throw")
+        } catch {
+            try context.expect(true, "Native access error surfaces through the continuation")
+        }
     }
 
     private static func wait(_ context: CoverageContext, _ message: String, until condition: () -> Bool) async throws {

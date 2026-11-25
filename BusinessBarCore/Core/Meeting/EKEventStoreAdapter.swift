@@ -24,10 +24,15 @@ private final class NativeCalendarStoreBackend: CalendarStoreBackend {
     /// Coverage seam: scenarios cannot grant real calendar access, so they
     /// inject the access answer while the store stays real.
     private let accessOverride: Bool?
+    /// Coverage seam: headless hosts cannot answer a real TCC prompt, so
+    /// scenarios inject a store whose access request answers immediately.
+    /// Nil keeps the production EKEventStore() construction.
+    private let storeProvider: (() -> EKEventStore)?
 
-    init(store: EKEventStore = EKEventStore(), accessOverride: Bool? = nil) {
+    init(store: EKEventStore = EKEventStore(), accessOverride: Bool? = nil, storeProvider: (() -> EKEventStore)? = nil) {
         self.store = store
         self.accessOverride = accessOverride
+        self.storeProvider = storeProvider
     }
 
     var hasAccess: Bool {
@@ -51,7 +56,7 @@ private final class NativeCalendarStoreBackend: CalendarStoreBackend {
     func refreshSources() {
         // Plain init: EKEventStore(sources:) built from the pre-grant (empty)
         // source list yields a store whose calaccessd connection never initializes.
-        store = EKEventStore()
+        store = storeProvider?() ?? EKEventStore()
     }
 
     func calendars() -> [EKCalendar] {
@@ -84,9 +89,15 @@ public final class EKEventStoreAdapter: EventStoreProtocol {
     /// Coverage seam: the real EventKit backend with the access answer
     /// injected. Event lookups and saves hit EventKit as in production; only
     /// the TCC-bound access flag is replaced, because scenarios cannot grant
-    /// calendar permission.
-    public static func nativeBackendForCoverage(store: EKEventStore = EKEventStore(), hasAccess: Bool) -> CalendarStoreBackend {
-        NativeCalendarStoreBackend(store: store, accessOverride: hasAccess)
+    /// calendar permission. The store provider swaps in a store whose access
+    /// request answers without a prompt, so headless hosts cannot hang on
+    /// TCC; the requestAccess continuation body itself still executes.
+    public static func nativeBackendForCoverage(
+        store: EKEventStore = EKEventStore(),
+        hasAccess: Bool,
+        storeProvider: (() -> EKEventStore)? = nil
+    ) -> CalendarStoreBackend {
+        NativeCalendarStoreBackend(store: store, accessOverride: hasAccess, storeProvider: storeProvider)
     }
 
     public init(backend: CalendarStoreBackend) {
