@@ -18,7 +18,7 @@ final class BadgeManagerTests: XCTestCase {
     }
 
     private final class StubMonitor: BadgeMonitoring {
-        var onBadgeUpdate: ((String, Int) -> Void)?
+        var onBadgeUpdate: ((String, BadgeValue?) -> Void)?
         func startMonitoring(apps: [MonitoredApp]) {}
         func stopMonitoring() {}
         func updateAppElements(for apps: [MonitoredApp]) {}

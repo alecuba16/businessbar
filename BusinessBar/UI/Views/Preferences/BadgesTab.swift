@@ -92,14 +92,24 @@ struct BadgesTab: View {
 
                                     Spacer()
 
-                                    if app.badgeCount > 0 {
-                                        Text("\(app.badgeCount)")
-                                            .font(.caption)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.red)
-                                            .foregroundColor(.white)
-                                            .clipShape(Capsule())
+                                    if let badge = app.badge {
+                                        switch badge {
+                                        case .known(let count):
+                                            Text(count > 99 ? "99+" : "\(count)")
+                                                .font(.caption)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.red)
+                                                .foregroundColor(.white)
+                                                .clipShape(Capsule())
+                                                .accessibilityLabel("\(count) unread notifications")
+                                        case .unknown:
+                                            Circle()
+                                                .fill(Color.red)
+                                                .frame(width: 8, height: 8)
+                                                .overlay(Circle().stroke(Color.white, lineWidth: 1))
+                                                .accessibilityLabel("Unread notifications")
+                                        }
                                     }
 
                                     Button {

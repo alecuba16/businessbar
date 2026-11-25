@@ -606,7 +606,7 @@ enum AppServiceScenarios {
 private extension AppServiceScenarios {
     @MainActor
     final class LifecycleMonitor: BadgeMonitoring {
-        var onBadgeUpdate: ((String, Int) -> Void)?
+        var onBadgeUpdate: ((String, BadgeValue?) -> Void)?
         func startMonitoring(apps: [MonitoredApp]) {}
         func stopMonitoring() {}
         func updateAppElements(for apps: [MonitoredApp]) {}

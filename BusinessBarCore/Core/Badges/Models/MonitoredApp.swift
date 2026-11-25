@@ -5,6 +5,9 @@ public struct MonitoredApp: Identifiable, Hashable, Codable {
     public let id: String
     public let bundleIdentifier: String
     public let displayName: String
+    /// Persisted badge storage: 0 = no badge, -1 = unknown count, n > 0 = n.
+    /// Kept as a plain Int so the JSON format is unchanged from earlier
+    /// releases; read through `badge` instead.
     public var badgeCount: Int
     public var iconPath: String?
 
@@ -14,6 +17,12 @@ public struct MonitoredApp: Identifiable, Hashable, Codable {
         self.displayName = displayName
         self.badgeCount = badgeCount
         self.iconPath = iconPath
+    }
+
+    /// Badge state for rendering: nil = no badge, .unknown = dot,
+    /// .known(n) = count bubble.
+    public var badge: BadgeValue? {
+        BadgeValue?.from(persistedCount: badgeCount)
     }
 
     /// Resolves the app icon, handling both `.app` bundle directories and bare

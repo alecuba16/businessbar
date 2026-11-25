@@ -21,7 +21,7 @@ private final class SystemScheduler {
 }
 
 private final class SystemBadgeMonitor: BadgeMonitoring {
-    var onBadgeUpdate: ((String, Int) -> Void)?
+    var onBadgeUpdate: ((String, BadgeValue?) -> Void)?
     var starts: [[MonitoredApp]] = []
     var updates: [[MonitoredApp]] = []
     var stops = 0
@@ -77,14 +77,21 @@ enum CoreSystemScenarios {
         try c.expect(manager.isAccessibilityGranted, "permission grant published")
         try c.equal(monitor.starts.last, [app], "grant starts configured apps")
         try c.expect(!scheduler.timers[0].isValid, "permission timer stops after grant")
-        monitor.onBadgeUpdate?(app.bundleIdentifier, 7)
+        monitor.onBadgeUpdate?(app.bundleIdentifier, .known(7))
         await drain()
-        try c.equal(manager.badges[app.bundleIdentifier], 7, "monitor callback publishes badge")
+        try c.equal(manager.badges[app.bundleIdentifier], .known(7), "monitor callback publishes badge")
         try c.equal(manager.monitoredApps.first?.badgeCount, 7, "app badge tracks dictionary")
-        manager.updateBadge(for: app.bundleIdentifier, count: 7)
-        manager.updateBadge(for: "unknown", count: 2)
-        manager.updateBadge(for: app.bundleIdentifier, count: 0)
+        manager.updateBadge(for: app.bundleIdentifier, badge: .known(7))
+        manager.updateBadge(for: "unknown", badge: .known(2))
+        manager.updateBadge(for: app.bundleIdentifier, badge: nil)
         try c.expect(manager.badges[app.bundleIdentifier] == nil, "zero badge removes dictionary value")
+        manager.updateBadge(for: app.bundleIdentifier, badge: .unknown)
+        try c.equal(manager.badges[app.bundleIdentifier], .unknown, "unknown badge stores the dot state")
+        try c.equal(manager.monitoredApps.first?.badgeCount, -1, "dot state persists as -1")
+        manager.updateBadge(for: app.bundleIdentifier, badge: nil)
+        try c.expect(manager.badges[app.bundleIdentifier] == nil, "clearing the dot removes the dictionary value")
+        manager.updateBadge(for: app.bundleIdentifier, badge: .known(1))
+        try c.equal(manager.monitoredApps.first?.badge, .known(1), "app badge decodes from persisted count")
         manager.addApp(MonitoredApp(bundleIdentifier: "coverage.two", displayName: "Two"))
         try c.equal(monitor.updates.last?.count, 2, "trusted app addition refreshes monitor")
         manager.removeApp(app.bundleIdentifier)
@@ -122,7 +129,7 @@ enum CoreSystemScenarios {
     }
 
     private static func monitor(_ c: CoverageContext) throws {
-        for (text, value) in [(nil, 0), ("", 0), ("42 messages", 42), ("9+", 9), ("•", 1), ("999999999999999999999999999", 1)] as [(String?, Int)] {
+        for (text, value) in [(nil, nil), ("", nil), ("42 messages", BadgeValue.known(42)), ("9+", BadgeValue.known(9)), ("•", BadgeValue.unknown), ("999999999999999999999999999", BadgeValue.unknown), ("0", nil)] as [(String?, BadgeValue?)] {
             try c.equal(BadgeMonitor.parseBadge(text), value, "badge label parse \(text ?? "nil")")
         }
         let defaults = try c.defaults("monitor")
@@ -138,7 +145,6 @@ enum CoreSystemScenarios {
         var starts = 0
         var cancellations = 0
         var refresh: (() -> Void)?
-        var received: [Int] = []
         let monitor = BadgeMonitor(defaults: defaults, trust: { trusted }, dock: { (0, root) },
                                    attribute: { element, attribute in
             if attribute == kAXChildrenAttribute {
@@ -159,7 +165,8 @@ enum CoreSystemScenarios {
         let apps = [MonitoredApp(bundleIdentifier: "coverage.direct", displayName: "Direct"),
                     MonitoredApp(bundleIdentifier: "coverage.nested", displayName: "Nested"),
                     MonitoredApp(bundleIdentifier: "coverage.missing", displayName: "Missing")]
-        monitor.onBadgeUpdate = { _, count in received.append(count) }
+        var received: [BadgeValue?] = []
+        monitor.onBadgeUpdate = { _, badge in received.append(badge) }
         monitor.restartPollTimer()
         monitor.startMonitoring(apps: apps)
         try c.expect(scheduler.timers.isEmpty, "untrusted monitor never schedules")
@@ -169,10 +176,16 @@ enum CoreSystemScenarios {
         try c.equal(starts, 1, "injected AX observer starts")
         scheduler.timers.last?.fire()
         monitor.pollBadges()
-        try c.equal(received, [5], "unchanged badge values suppressed")
+        try c.equal(received, [.known(5)], "unchanged badge values suppressed")
         label = ""
         monitor.pollBadges()
-        try c.equal(received, [5, 0], "badge clear is delivered")
+        try c.equal(received, [.known(5), nil], "badge clear is delivered")
+        label = "•"
+        monitor.pollBadges()
+        try c.equal(received, [.known(5), nil, .unknown], "digitless label delivers the dot state")
+        label = ""
+        monitor.pollBadges()
+        try c.equal(received, [.known(5), nil, .unknown, nil], "dot clear is delivered")
         defaults.set(7, forKey: Constants.Defaults.badgePollInterval)
         monitor.restartPollTimer()
         try c.equal(scheduler.intervals.last, 7, "badge interval reload")
@@ -183,7 +196,7 @@ enum CoreSystemScenarios {
         refresh?()
         label = "8"
         monitor.pollBadges()
-        try c.equal(received, [5, 0], "removed Dock children no longer polled")
+        try c.equal(received.count, 4, "removed Dock children no longer polled")
         monitor.stopMonitoring()
         monitor.stopMonitoring()
         try c.equal(cancellations, 1, "observer cancelled once")
@@ -225,8 +238,8 @@ enum CoreSystemScenarios {
             }
         )
         let apps = [MonitoredApp(bundleIdentifier: ownBundleID, displayName: "Self")]
-        var received: [Int] = []
-        monitor.onBadgeUpdate = { _, count in received.append(count) }
+        var received: [BadgeValue?] = []
+        monitor.onBadgeUpdate = { _, badge in received.append(badge) }
 
         // startMonitoring with a real observer on our own pid: the element
         // scan finds nothing yet (no windows), then a created window makes
@@ -322,7 +335,7 @@ enum CoreSystemScenarios {
             }
             return nil
         }, schedule: scheduler.schedule, observe: { _, _, _ in {} })
-        urlMonitor.onBadgeUpdate = { _, value in count = value }
+        urlMonitor.onBadgeUpdate = { _, value in count = value.map { BadgeValue?.some($0).persistedCount } ?? 0 }
         urlMonitor.startMonitoring(apps: apps)
         urlMonitor.pollBadges()
         try c.equal(count, 3, "Dock URL resolves temporary bundle identifier")

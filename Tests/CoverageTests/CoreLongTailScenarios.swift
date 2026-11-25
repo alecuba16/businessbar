@@ -612,6 +612,11 @@ enum CoreLongTailScenarios {
         let badged = image.withBadge(count: 3)
         try c.expect(badged.tiffRepresentation != nil, "Badge renders on a raster image")
         try c.expect(image.withBadge(count: 100).tiffRepresentation != nil, "Large badge count clamps")
+        // Dot path: unknown count renders a ringed dot, and its pixel scan
+        // finds the same red dominance the bubble uses.
+        let dotted = image.withDot()
+        try c.expect(dotted.tiffRepresentation != nil, "Dot renders on a raster image")
+        try c.expect(!dotted.isTemplate, "Dot image stays colored")
         // Degenerate size forces cgImageRepresentation nil -> return self
         // guards hit (guards return the original).
         let empty = NSImage(size: .zero)

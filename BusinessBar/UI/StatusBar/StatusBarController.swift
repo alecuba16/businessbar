@@ -70,7 +70,8 @@ final class StatusBarController: NSObject {
     private var badgeStatusItems: [String: any StatusItemBacking] = [:]
 
     // MARK: - Toast
-    /// Last-seen badge count per app. nil = never seen (no toast on first read).
+    /// Last-seen badge per app, as the persisted count form. nil = never seen
+    /// (no toast on first read).
     private var previousBadgeCounts: [String: Int] = [:]
     /// The currently visible toast popover, if any.
     private var activeToastPopover: NSPopover?
@@ -89,7 +90,7 @@ final class StatusBarController: NSObject {
     private var cachedNoSleepInfiniteIcon: NSImage?
     private var cachedNoSleepTimedIcon: NSImage?
     /// Tracks the last-rendered badge image per app to avoid redundant CIFilter work.
-    private var renderedBadgeImages: [String: (count: Int, image: NSImage)] = [:]
+    private var renderedBadgeImages: [String: (badge: BadgeValue?, image: NSImage)] = [:]
 
     private let meetingManager: MeetingManager
     private let badgeManager: BadgeManager
@@ -648,25 +649,30 @@ final class StatusBarController: NSObject {
         for app in monitoredApps {
             let bundleID = app.bundleIdentifier
 
-            let count     = badges[bundleID] ?? 0
+            let badge = badges[bundleID]
+            let badgeKey = badge.persistedCount
             let isRunning = runningBundleIDs.contains(bundleID)
 
-            // Toast: show when count increases after the first observed read.
-            // nil previousCount means the app was just added — record the baseline
-            // without toasting so we don't fire on pre-existing unread counts.
-            let previousCount = previousBadgeCounts[bundleID]
-            previousBadgeCounts[bundleID] = count
-            if let prev = previousCount, count > prev, count > 0,
+            // Toast: show when the badge increases after the first observed
+            // read. nil previousBadgeCounts entry means the app was just
+            // added — record the baseline without toasting so we don't fire
+            // on pre-existing unread counts. Rank: none < unknown < known,
+            // so a dot appearing from nothing toasts, but any real count
+            // outranks the dot and a higher known count still beats lower.
+            let previousKey = previousBadgeCounts[bundleID]
+            previousBadgeCounts[bundleID] = badgeKey
+            let increased = badgeRank(badgeKey) > badgeRank(previousKey ?? 0) && badgeKey != 0
+            if increased,
                badgeStatusItems[bundleID] != nil {
                 if let button = badgeStatusItems[bundleID]?.button {
-                    showToast(for: app, count: count, anchoredTo: button)
+                    showToast(for: app, badge: badge, anchoredTo: button)
                 }
             }
 
-            // Hide when there are no notifications (counts as 0) and the relevant
+            // Hide when there are no notifications (badge nil) and the relevant
             // preference is on. "No notification" supersedes "not running" since it
             // is the broader condition.
-            let shouldHide = count == 0 && (hideWhenNoNotification || (hideWhenNotRunning && !isRunning))
+            let shouldHide = badge == nil && (hideWhenNoNotification || (hideWhenNotRunning && !isRunning))
             if shouldHide {
                 bundleIDsToHide.insert(bundleID)
             }
@@ -702,21 +708,34 @@ final class StatusBarController: NSObject {
 
             guard let icon = app.icon else { continue }
 
-            let count = badges[bundleID] ?? 0
+            let badge = badges[bundleID]
             let cached = renderedBadgeImages[bundleID]
-            if cached?.count == count, button.image != nil {
+            if cached?.badge == badge, button.image != nil {
                 continue
             }
 
             let iconRect = NSSize(width: iconSize, height: iconSize)
             let newImage: NSImage
-            if count > 0 {
+            switch badge {
+            case .some(.known(let count)):
                 newImage = resized(icon, to: iconRect).withBadge(count: count)
-            } else {
+            case .some(.unknown):
+                newImage = resized(icon, to: iconRect).withDot()
+            case .none:
                 newImage = resized(icon, to: iconRect).grayscalePreservingAlpha()
             }
             button.image = newImage
-            renderedBadgeImages[bundleID] = (count: count, image: newImage)
+            renderedBadgeImages[bundleID] = (badge: badge, image: newImage)
+        }
+    }
+
+    /// Toast ordering key over persisted counts: 0 (none) < -1 (dot) < n>0
+    /// (known). Raw comparison cannot express this since -1 < 0 numerically.
+    private func badgeRank(_ persistedCount: Int) -> Int {
+        switch persistedCount {
+        case 0: return 0
+        case -1: return 1
+        default: return persistedCount + 1
         }
     }
 
@@ -734,7 +753,7 @@ final class StatusBarController: NSObject {
     /// Shows a minimal NSPopover toast anchored to `button` when the badge count
     /// for an app increases. Replaces any currently visible toast and auto-dismisses
     /// after 3 seconds. No arrow (shouldHideAnchor), transient behavior.
-    private func showToast(for app: MonitoredApp, count: Int, anchoredTo button: NSButton) {
+    private func showToast(for app: MonitoredApp, badge: BadgeValue?, anchoredTo button: NSButton) {
         // Cancel any pending dismiss and close the current toast.
         toastDismissTask?.cancel()
         toastDismissTask = nil
@@ -742,7 +761,7 @@ final class StatusBarController: NSObject {
         activeToastPopover = nil
 
         // Build the SwiftUI content and compute its ideal size.
-        let hostingController = NSHostingController(rootView: ToastView(icon: app.icon, count: count))
+        let hostingController = NSHostingController(rootView: ToastView(icon: app.icon, badge: badge))
         let contentSize = hostingController.sizeThatFits(in: NSSize(width: 300, height: 60))
 
         let popover = NSPopover()

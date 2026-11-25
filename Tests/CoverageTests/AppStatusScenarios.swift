@@ -134,7 +134,7 @@ enum AppStatusScenarios {
         await settle()
         try c.expect(badge.ownedButton.image === zeroImage, "Unchanged zero count reuses image")
         try c.equal(f.popovers.count, 0, "Initial badge baseline never toasts")
-        f.badges.updateBadge(for: app.id, count: 1)
+        f.badges.updateBadge(for: app.id, badge: .known(1))
         await settle()
         try c.equal(f.popovers.count, 1, "Badge increase creates one fake-shown popover")
         try c.expect(badge.ownedButton.image !== zeroImage, "Positive count renders new image")
@@ -142,7 +142,7 @@ enum AppStatusScenarios {
         f.preferencesChanged()
         await settle()
         try c.expect(badge.ownedButton.image === countImage, "Count cache avoids rendering again")
-        f.badges.updateBadge(for: app.id, count: 3)
+        f.badges.updateBadge(for: app.id, badge: .known(3))
         await settle()
         try c.equal(f.popovers.count, 2, "Second increase replaces toast")
         try c.expect(f.dismissals[0].isCancelled, "Replacement cancels old dismiss work")
@@ -159,11 +159,28 @@ enum AppStatusScenarios {
         f.preferencesChanged()
         await settle()
         try c.equal(badge.length, 18, "Medium preference updates existing backing width")
-        f.defaults.set(true, forKey: Constants.Defaults.hideIconWhenNoNotification)
-        f.badges.updateBadge(for: app.id, count: 0)
+        // Dot state: unknown count keeps the item visible (dot beats nil),
+        // renders its own image, and a later known count re-renders.
+        f.badges.updateBadge(for: app.id, badge: .unknown)
         await settle()
-        try c.expect(f.removed.contains { $0 === badge }, "Zero badge removes hidden backing")
-        f.badges.updateBadge(for: app.id, count: 2)
+        try c.expect(f.popovers.count == 2, "Unknown badge does not toast over a known count")
+        let dotImage = badge.ownedButton.image
+        try c.expect(dotImage != nil && dotImage !== countImage, "Unknown badge renders the dot image")
+        f.preferencesChanged()
+        await settle()
+        try c.expect(badge.ownedButton.image === dotImage, "Unchanged dot state reuses cached image")
+        try c.expect(!f.removed.contains { $0 === badge }, "Dot badge keeps backing visible")
+        // Dot appearing from nothing must toast: rank none < unknown.
+        f.badges.updateBadge(for: app.id, badge: nil)
+        await settle()
+        f.badges.updateBadge(for: app.id, badge: .unknown)
+        await settle()
+        try c.equal(f.popovers.count, 3, "Dot appearing from nothing toasts")
+        f.defaults.set(true, forKey: Constants.Defaults.hideIconWhenNoNotification)
+        f.badges.updateBadge(for: app.id, badge: nil)
+        await settle()
+        try c.expect(f.removed.contains { $0 === badge }, "Dot clear removes hidden backing under no-notification preference")
+        f.badges.updateBadge(for: app.id, badge: .known(2))
         await settle()
         let recreated = f.items.last!
         try c.expect(recreated !== badge && recreated.ownedButton.image != nil, "Notification recreates hidden backing with image")
@@ -171,7 +188,7 @@ enum AppStatusScenarios {
         f.defaults.set(false, forKey: Constants.Defaults.hideIconWhenNoNotification)
         f.defaults.set(true, forKey: Constants.Defaults.hideIconWhenNotRunning)
         f.runningIDs = []
-        f.badges.updateBadge(for: app.id, count: 0)
+        f.badges.updateBadge(for: app.id, badge: nil)
         await settle()
         try c.expect(f.removed.contains { $0 === recreated }, "Not-running zero badge hides backing")
         f.runningIDs = [app.id]
@@ -314,7 +331,7 @@ enum AppStatusScenarios {
     }
 
     private final class Monitor: BadgeMonitoring {
-        var onBadgeUpdate: ((String, Int) -> Void)?
+        var onBadgeUpdate: ((String, BadgeValue?) -> Void)?
         func startMonitoring(apps: [MonitoredApp]) {}
         func stopMonitoring() {}
         func updateAppElements(for apps: [MonitoredApp]) {}
