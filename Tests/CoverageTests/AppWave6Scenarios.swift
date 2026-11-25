@@ -64,22 +64,39 @@ enum AppWave6Scenarios {
         try c.expect(true, "NoSleepTab default init constructs without side effects")
     }
 
-    /// CalendarSelectionStep with every default boundary omitted from the
-    /// call site: the real EKEventStoreAdapter fetch runs (access denied on
-    /// the bare coverage binary lands in the catch), and the default
-    /// persistSelection writes into the view's AppStorage suite. The toggle
-    /// set-branch runs via the AX press path.
+    /// CalendarSelectionStep default-argument closures. Host A omits
+    /// every injectable so the real default fetch thunk runs (the adapter
+    /// surface is covered by the core nativeBackend block; without a TCC
+    /// grant the fetch throws and lands in the catch, a trusted host
+    /// seeds the selection instead — both host shapes only render here,
+    /// no press). Host B injects a fixture fetch so the enabled Finish
+    /// press runs the onFinish chain and the default persistSelection
+    /// body on every host.
     private static func calendarStepDefaultClosures(_ c: CoverageContext) async throws {
         let defaults = try c.defaults("wave6-calendar-step")
         defaults.set(CalendarProvider.eventKit.rawValue, forKey: Constants.Defaults.calendarProvider)
         var finishCalls = 0
-        let hosted = Coverage2Hosted(
+        let defaultHosted = Coverage2Hosted(
             CalendarSelectionStep(onBack: {}, onFinish: { finishCalls += 1 })
                 .defaultAppStorage(defaults),
             size: NSSize(width: 700, height: 700)
         )
+        defer { defaultHosted.close() }
+        try c.expect(defaultHosted.text.contains("Calendar"), "Calendar step renders")
+        await coverage2Settle()
+
+        let fixtureCalendar = MBCalendar(id: "wave6", title: "Wave6 Calendar", color: "#123456", source: "Fixture")
+        let hosted = Coverage2Hosted(
+            CalendarSelectionStep(
+                onBack: {},
+                onFinish: { finishCalls += 1 },
+                fetchCalendars: { [fixtureCalendar] }
+            )
+            .defaultAppStorage(defaults),
+            size: NSSize(width: 700, height: 700)
+        )
         defer { hosted.close() }
-        try c.expect(hosted.text.contains("Calendar"), "Calendar step renders")
+        try c.expect(hosted.text.contains("Calendar"), "Fixture calendar step renders")
         await coverage2Settle()
         try hosted.press("Finish Setup", c)
         try c.equal(finishCalls, 1, "Finish default closure persists selection and advances")
