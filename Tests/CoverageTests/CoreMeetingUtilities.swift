@@ -117,6 +117,18 @@ private final class CoverageCalendarBackend: CalendarStoreBackend {
     }
 }
 
+/// Coverage seam for the native store's access request: answers the real
+/// `requestFullAccessToEvents` completion without a TCC prompt, so headless
+/// hosts (CI) cannot hang waiting for a grant nobody can give. The backend's
+/// continuation body still executes unchanged.
+private final class PromptFreeEventStore: EKEventStore {
+    var accessAnswer: (Bool, Error?) = (true, nil)
+
+    override func requestFullAccessToEvents(completion: @escaping (Bool, (any Error)?) -> Void) {
+        completion(accessAnswer.0, accessAnswer.1)
+    }
+}
+
 @MainActor
 enum CoreMeetingUtilitiesScenarios {
     static func run(_ context: CoverageContext) async throws {
@@ -138,6 +150,10 @@ enum CoreMeetingUtilitiesScenarios {
         catch { failures.append("rsvp flow: \(error)") }
         do { try await timeChanges(context) }
         catch { failures.append("time changes: \(error)") }
+        do { try await timeChangePastAndRecurrence(context) }
+        catch { failures.append("time changes past and recurrence: \(error)") }
+        do { try await recentBulkActions(context) }
+        catch { failures.append("recent bulk actions: \(error)") }
         do { try ekParticipantMapping(context) }
         catch { failures.append("participant mapping: \(error)") }
         do { try await ekRespond(context) }
@@ -148,8 +164,8 @@ enum CoreMeetingUtilitiesScenarios {
     private static let instant = Date(timeIntervalSince1970: 1_772_964_000)
     private static let calendar = MBCalendar(id: "work", title: "Work", color: "#123456", source: "Fixture")
 
-    private static func event(_ id: String, start: TimeInterval = -60, end: TimeInterval = 600, status: CalendarEvent.EventStatus = .confirmed) -> CalendarEvent {
-        CalendarEvent(id: id, title: id, startDate: instant.addingTimeInterval(start), endDate: instant.addingTimeInterval(end), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Organizer", attendees: ["Attendee"], status: status)
+    private static func event(_ id: String, start: TimeInterval = -60, end: TimeInterval = 600, status: CalendarEvent.EventStatus = .confirmed, occurrence: Date? = nil, recurring: Bool = false) -> CalendarEvent {
+        CalendarEvent(id: id, title: id, startDate: instant.addingTimeInterval(start), endDate: instant.addingTimeInterval(end), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Organizer", attendees: ["Attendee"], status: status, occurrenceDate: occurrence, isRecurring: recurring)
     }
 
     private static func plannerAndModels(_ context: CoverageContext) throws {
@@ -177,6 +193,9 @@ enum CoreMeetingUtilitiesScenarios {
         try context.expect(EventDisplayPlanner.nextEvent(from: [live], dismissedIDs: ["live"], now: instant) == nil, "Dismissal wins over ongoing event")
         try context.equal(EventDisplayPlanner.filter([live, declined], dismissedIDs: [], showDeclined: false).map(\.id), ["live"], "Declined events hidden")
         try context.equal(EventDisplayPlanner.filter([live, declined], dismissedIDs: ["live"], showDeclined: true).map(\.id), ["declined"], "Visibility does not restore dismissed event")
+        let ownDecline = CalendarEvent(id: "own-decline", title: "own-decline", startDate: instant.addingTimeInterval(-60), endDate: instant.addingTimeInterval(600), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Boss", attendees: ["Boss"], myRSVPStatus: .declined)
+        try context.equal(EventDisplayPlanner.filter([live, ownDecline], dismissedIDs: [], showDeclined: false).map(\.id), ["live"], "Declined RSVP hides the event")
+        try context.equal(EventDisplayPlanner.filter([ownDecline], dismissedIDs: [], showDeclined: true).map(\.id), ["own-decline"], "Declined RSVP visible with the toggle on")
         let pendingLive = CalendarEvent(id: "pending-live", title: "pending-live", startDate: instant.addingTimeInterval(-60), endDate: instant.addingTimeInterval(600), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Boss", attendees: ["Boss"], myRSVPStatus: .pending)
         let pendingEnded = CalendarEvent(id: "pending-ended", title: "pending-ended", startDate: instant.addingTimeInterval(-4200), endDate: instant.addingTimeInterval(-60), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Boss", attendees: ["Boss"], myRSVPStatus: .pending)
         try context.equal(EventDisplayPlanner.pendingInvites(from: [pendingLive, pendingEnded], now: instant).map(\.id), ["pending-live"], "Ended invitations stay out of the pending set")
@@ -383,6 +402,28 @@ enum CoreMeetingUtilitiesScenarios {
         store.events = [first, later]
         await manager.refreshEvents()
         try context.equal(manager.recentEvents.map(\.id), ["first", "later"], "Read ID pruned once its event leaves the fetch window")
+
+        // Declined events neither display nor change-track: the filter runs
+        // before tracking memories update, so their windows never land in
+        // lastSeenWindows and a later time move has nothing to compare.
+        defaults.set(false, forKey: Constants.Defaults.showDeclinedEvents)
+        let declineFixed = CalendarEvent(id: "declined-fixed", title: "Declined", startDate: instant.addingTimeInterval(3600), endDate: instant.addingTimeInterval(4200), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Boss", attendees: ["Boss"], myRSVPStatus: .declined)
+        let normalFixed = event("normal-fixed", start: 3600, end: 4200)
+        store.events = [declineFixed, normalFixed]
+        await manager.refreshEvents()
+        try context.equal(manager.events.map(\.id), ["normal-fixed"], "Declined event hidden from the agenda")
+        try context.equal(manager.recentEvents.map(\.id), ["normal-fixed"], "Declined event never announced as recent")
+        try context.expect(manager.timeChangedEvents.isEmpty, "First fetch seeds nothing to compare against")
+        let declineMoved = CalendarEvent(id: "declined-fixed", title: "Declined", startDate: instant.addingTimeInterval(4000), endDate: instant.addingTimeInterval(4600), location: nil, notes: nil, url: nil, calendar: calendar, organizer: "Boss", attendees: ["Boss"], myRSVPStatus: .declined)
+        store.events = [declineMoved, normalFixed]
+        await manager.refreshEvents()
+        try context.equal(manager.events.map(\.id), ["normal-fixed"], "Declined event stays hidden after its own time move")
+        try context.expect(manager.timeChangedEvents.isEmpty, "Declined event's time move produces no change flag")
+        // Hand the shared fixture back so the downstream tick and
+        // refresh-failure checks observe the same agenda they were
+        // written against.
+        store.events = [first, later]
+        await manager.refreshEvents()
 
         now = instant.addingTimeInterval(650)
         manager.recalculateNextEvent()
@@ -611,6 +652,133 @@ enum CoreMeetingUtilitiesScenarios {
         try context.equal(changedPosts.count, 3, "Stable window after the wipe posts nothing")
     }
 
+    /// Past-aware change detection: a shift on an already-ended occurrence
+    /// never flags, a recurring series keeps its occurrences apart, and an
+    /// acknowledged change stays quiet until the times move again.
+    private static func timeChangePastAndRecurrence(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("meeting-time-changes-past")
+        defaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        defaults.set(try JSONEncoder().encode([calendar.id]), forKey: Constants.Defaults.selectedCalendars)
+        let notifications = NotificationCenter()
+        let store = CoverageEventStore()
+        store.calendars = [calendar]
+        let manager = MeetingManager(eventStore: store, nowProvider: { instant }, defaults: defaults, notificationCenter: notifications)
+        await Task.yield()
+
+        var changedPosts: [[CalendarEvent]] = []
+        let changedObserver = notifications.publisher(for: .businessBarEventTimesChanged).sink { note in
+            if let events = note.userInfo?["events"] as? [CalendarEvent] { changedPosts.append(events) }
+        }
+        defer { changedObserver.cancel() }
+
+        // One-off event, entirely in the past: seen at its original window,
+        // then the window shifts. A moved past meeting asks nothing of the
+        // user, so no flag, no post.
+        store.events = [event("past-once", start: -7200, end: -6600)]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Past event first-seen without a change")
+        store.events = [event("past-once", start: -9000, end: -8400)]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Shifted past event never flags")
+        try context.equal(changedPosts.count, 0, "Shifted past event posts nothing")
+
+        // Recurring series, two occurrences sharing the id: one past, one
+        // inside the agenda window so next-event eligibility is observable.
+        let pastOccurrenceDate = instant.addingTimeInterval(-48 * 3600)
+        let futureOccurrenceDate = instant.addingTimeInterval(24 * 3600)
+        let pastOccurrence = event("series", start: -48 * 3600 - 600, end: -48 * 3600, occurrence: pastOccurrenceDate, recurring: true)
+        let futureOccurrence = event("series", start: 24 * 3600, end: 24 * 3600 + 600, occurrence: futureOccurrenceDate, recurring: true)
+        store.events = [pastOccurrence, futureOccurrence]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Series occurrences first-seen without a change")
+        try context.equal(manager.nextEvent?.id, "series", "Future occurrence is the next event")
+
+        // Both occurrences move at once: only the future one flags.
+        let movedPastOccurrence = event("series", start: -50 * 3600 - 600, end: -50 * 3600, occurrence: pastOccurrenceDate, recurring: true)
+        let movedFutureOccurrence = event("series", start: 26 * 3600, end: 26 * 3600 + 600, occurrence: futureOccurrenceDate, recurring: true)
+        store.events = [movedPastOccurrence, movedFutureOccurrence]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), ["series"], "Only the future occurrence flags, the past one stays silent")
+        try context.equal(changedPosts.count, 1, "Future occurrence move posts once")
+        try context.equal(changedPosts.last?.map(\.id), ["series"], "Post carries only the future occurrence")
+
+        // Acknowledging the flag quiets it; the held window stays quiet on
+        // refresh, and a further shift flags again because it is new news.
+        manager.markTimeChangedAsRead(manager.timeChangedEvents[0])
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Acknowledged flag leaves the section")
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Held window does not re-flag an acknowledged change")
+        try context.equal(changedPosts.count, 1, "Held window posts nothing")
+        store.events = [movedPastOccurrence, event("series", start: 27 * 3600, end: 27 * 3600 + 600, occurrence: futureOccurrenceDate, recurring: true)]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), ["series"], "A further shift re-flags an acknowledged occurrence")
+        try context.equal(changedPosts.count, 2, "Further shift posts again")
+
+        // Second event joins: first-seen fetch flags nothing, its own move
+        // flags it beside the series, then Acknowledge all clears both.
+        let otherEvent = event("other", start: 30 * 3600, end: 30 * 3600 + 600)
+        store.events = [movedPastOccurrence, event("series", start: 27 * 3600, end: 27 * 3600 + 600, occurrence: futureOccurrenceDate, recurring: true), otherEvent]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "First-seen event and stable series flag nothing")
+        store.events = [movedPastOccurrence, event("series", start: 28 * 3600, end: 28 * 3600 + 600, occurrence: futureOccurrenceDate, recurring: true), event("other", start: 31 * 3600, end: 31 * 3600 + 600)]
+        await manager.refreshEvents()
+        try context.equal(Set(manager.timeChangedEvents.map(\.id)), Set(["series", "other"]), "Both moved rows flag together")
+        manager.markAllTimeChangedAsRead()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Acknowledge all empties the section")
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Held windows stay acknowledged after refresh")
+
+        // Dismiss all: section empties and both events hide everywhere.
+        store.events = [movedPastOccurrence, event("series", start: 29 * 3600, end: 29 * 3600 + 600, occurrence: futureOccurrenceDate, recurring: true), event("other", start: 32 * 3600, end: 32 * 3600 + 600)]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.count, 2, "Both rows flag again after further shifts")
+        manager.dismissAllTimeChanged()
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Dismiss all empties the section")
+        try context.equal(manager.nextEvent, nil, "Dismissed rows lose next-event eligibility")
+        await manager.refreshEvents()
+        try context.equal(manager.events.filter { $0.id == "series" || $0.id == "other" }.map(\.id), [], "Dismiss all hides the events from the agenda too")
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Dismissed rows cannot re-flag on refresh")
+    }
+
+    /// Bulk actions on the recently-added region: mark-all keeps the agenda
+    /// untouched, dismiss-all hides the events everywhere.
+    private static func recentBulkActions(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("meeting-recent-bulk")
+        defaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        defaults.set(try JSONEncoder().encode([calendar.id]), forKey: Constants.Defaults.selectedCalendars)
+        let notifications = NotificationCenter()
+        let store = CoverageEventStore()
+        store.calendars = [calendar]
+        let manager = MeetingManager(eventStore: store, nowProvider: { instant }, defaults: defaults, notificationCenter: notifications)
+        await Task.yield()
+
+        let first = event("recent-1", start: 3600, end: 4200)
+        let second = event("recent-2", start: 7200, end: 7800)
+        store.events = [first, second]
+        await manager.refreshEvents()
+        try context.equal(Set(manager.recentEvents.map(\.id)), Set(["recent-1", "recent-2"]), "Both events feed the recent region")
+
+        manager.markAllRecentAsRead()
+        try context.equal(manager.recentEvents.map(\.id), [], "Mark all as read empties the recent region")
+        try context.equal(manager.events.map(\.id).count, 2, "Read rows keep their agenda places")
+        try context.equal(manager.nextEvent?.id, "recent-1", "Read rows keep next-event eligibility")
+        await manager.refreshEvents()
+        try context.equal(manager.recentEvents.map(\.id), [], "Refresh cannot re-announce rows marked read in bulk")
+
+        store.events = []
+        await manager.refreshEvents()
+        store.events = [first, second]
+        await manager.refreshEvents()
+        try context.equal(Set(manager.recentEvents.map(\.id)), Set(["recent-1", "recent-2"]), "Rows come back once their events left the fetch window")
+
+        manager.dismissAllRecentEvents()
+        try context.equal(manager.recentEvents.map(\.id), [], "Dismiss all empties the recent region")
+        try context.equal(manager.nextEvent, nil, "Dismissed rows lose next-event eligibility")
+        await manager.refreshEvents()
+        try context.equal(manager.events.map(\.id), [], "Dismiss all hides the events from the agenda")
+        try context.equal(manager.recentEvents.map(\.id), [], "Dismissed rows cannot come back on refresh")
+    }
+
     private static func ekParticipantMapping(_ context: CoverageContext) throws {
         let store = EKEventStore()
         let ekEvent = EKEvent(eventStore: store)
@@ -675,7 +843,13 @@ enum CoreMeetingUtilitiesScenarios {
 
         // Native backend through the coverage seam: real store, injected
         // access flag. The unfiled event makes save throw, so no state is touched.
-        let nativeBackend = EKEventStoreAdapter.nativeBackendForCoverage(hasAccess: true)
+        // The store answers its own access request (PromptFreeEventStore) so
+        // headless hosts cannot hang on a TCC prompt nobody can answer.
+        // The provider hands back the same instance, because a successful
+        // access request refreshes sources and the error probe below must
+        // reach the store the backend actually holds.
+        let promptFree = PromptFreeEventStore()
+        let nativeBackend = EKEventStoreAdapter.nativeBackendForCoverage(store: promptFree, hasAccess: true) { promptFree }
         let nativeAdapter = EKEventStoreAdapter(backend: nativeBackend)
         answered = await nativeAdapter.respond(toEventID: "native-missing", calendarID: "work", status: .accepted)
         try context.expect(!answered, "Native lookup miss rejects the answer")
@@ -688,6 +862,38 @@ enum CoreMeetingUtilitiesScenarios {
             try context.expect(false, "Unfiled event save should not succeed")
         } catch {
             try context.expect(true, "Native save surfaces EventKit errors to the caller")
+        }
+        try await nativeBackendSurface(context, nativeBackend, nativeAdapter, promptFree: promptFree)
+    }
+
+    /// NativeCalendarStoreBackend against the real EventKit store: the read
+    /// surface (refresh/calendars/events/query) executes against live EventKit,
+    /// and the request continuation resumes with the OS answer instead of
+    /// throwing. Store contents depend on the host calendar state, so checks
+    /// mirror counts rather than assume emptiness.
+    private static func nativeBackendSurface(_ context: CoverageContext, _ backend: CalendarStoreBackend, _ adapter: EKEventStoreAdapter, promptFree: PromptFreeEventStore) async throws {
+        backend.refreshSources()
+        let nativeCalendars = backend.calendars()
+        _ = backend.events(from: instant.addingTimeInterval(-3600), to: instant.addingTimeInterval(3600), calendars: nativeCalendars)
+
+        let mappedCalendars = try await adapter.fetchCalendars()
+        try context.equal(mappedCalendars.count, nativeCalendars.count, "Adapter fetchCalendars mirrors the native store list")
+        let emptyEvents = try await adapter.fetchEvents(from: instant.addingTimeInterval(-3600), to: instant.addingTimeInterval(3600), calendars: [])
+        try context.expect(emptyEvents.isEmpty, "Adapter fetchEvents filters to no calendars against the native store")
+
+        // Reaching this point proves the requestAccess continuation resumed
+        // with the OS answer instead of throwing; the granted value itself is
+        // host TCC state and is not asserted.
+        _ = try await adapter.requestAccess()
+
+        // The access request can also fail, and the failure must resume the
+        // same continuation through the throw path.
+        promptFree.accessAnswer = (false, CocoaError(.userActivityConnectionUnavailable))
+        do {
+            _ = try await adapter.requestAccess()
+            try context.expect(false, "Native access error should surface as a throw")
+        } catch {
+            try context.expect(true, "Native access error surfaces through the continuation")
         }
     }
 

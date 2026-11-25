@@ -207,8 +207,16 @@ final class BadgeMonitor: BadgeMonitoring {
 
         axObserver = observer
 
-        AXObserverAddNotification(observer, dockElement!, kAXCreatedNotification as CFString, selfPtr)
-        AXObserverAddNotification(observer, dockElement!, kAXUIElementDestroyedNotification as CFString, selfPtr)
+        guard let dockElement else {
+            // AXObserverCreate can succeed for a pid whose Dock element was
+            // never resolved; adding notifications needs the element.
+            Self.logger.warning("setupAXObserver — observer created without a dock element")
+            axObserver = nil
+            return
+        }
+
+        AXObserverAddNotification(observer, dockElement, kAXCreatedNotification as CFString, selfPtr)
+        AXObserverAddNotification(observer, dockElement, kAXUIElementDestroyedNotification as CFString, selfPtr)
 
         CFRunLoopAddSource(
             CFRunLoopGetMain(),

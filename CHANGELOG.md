@@ -5,6 +5,18 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-11-25
+### Fixed
+- Starting the Dock badge watcher no longer risks a crash when macOS reports no Dock accessibility element: the watcher skips setup with a warning instead of force-unwrapping
+### Added
+- Both memory regions can be cleared in one go: "Mark all as read" and "Dismiss all" close the Recently added section, "Acknowledge all" and "Dismiss all" close Changed times. Bulk Dismiss behaves like the per-row Dismiss (the events hide everywhere), bulk read keeps the agenda untouched
+- Each Changed times row gained "Acknowledge change": the flag leaves without hiding the event, and a later shift of the same occurrence flags again, including per occurrence of a recurring series
+### Changed
+- The permission reset buttons (Calendar, Notifications, Accessibility, and the Google sign-out) moved from the Calendars and Badges tabs to the General tab, next to "Reset All Settings to Defaults", so every reset lives in one place. The grant and sign-in controls stay where they were
+- Time changes on events that already ended no longer flag anywhere: no badge, no menu row, no notification. Recurring occurrences are tracked individually, so editing one past occurrence of a series stays silent while a move that reaches future occurrences still surfaces
+- Events you declined no longer show in the agenda or any memory region, and their later time changes never flag as changed. The "Show declined events" preference restores them
+- The "Show declined events" preference no longer promises dimmed rows: the menu never dimmed them, so the label now matches the actual behavior
+
 ## [1.8.1] - 2026-11-24
 ### Added
 - Calendar refreshes can now fetch up to a week ahead by default. The horizon is configurable between 7, 14, and 30 days under Preferences > Calendars, so the Recently added section, the changed-times flag, and the notifications see events landing on any future day, not only today or tomorrow. The menu agenda keeps showing just today and tomorrow (per the existing toggle): a wide fetch feeds the memory regions, the listing stays compact

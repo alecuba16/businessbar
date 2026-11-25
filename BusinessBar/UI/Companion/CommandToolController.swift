@@ -157,10 +157,6 @@ final class CommandToolController: ObservableObject {
         request.completion(decision)
     }
 
-    private func classifyForApproval(_ command: String) -> CommandPermission {
-        CommandPermissionParser.classify(command, sessionPrefixes: sessionPrefixes)
-    }
-
     /// Suspends until the user decides, panel closes (deny), or the
     /// 5-minute timeout denies.
     private func requestApproval(
@@ -184,8 +180,13 @@ final class CommandToolController: ObservableObject {
             approvalRequest = request
 
             // Auto-deny on timeout: no silent window left open.
+            #if DEBUG
+            let timeoutNanos: UInt64 = CommandToolController.approvalTimeoutNanosecondsForCoverage
+            #else
+            let timeoutNanos: UInt64 = 300_000_000_000
+            #endif
             Task {
-                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                try? await Task.sleep(nanoseconds: timeoutNanos)
                 if approvalRequest?.id == request.id {
                     approvalRequest = nil
                     continuation.resume(returning: .denied)
@@ -194,6 +195,12 @@ final class CommandToolController: ObservableObject {
         }
         return decision
     }
+
+#if DEBUG
+    /// Coverage-only override for the approval auto-deny timeout so the
+    /// scenario suite does not wait five real minutes per branch.
+    nonisolated(unsafe) static var approvalTimeoutNanosecondsForCoverage: UInt64 = 300_000_000_000
+#endif
 
     /// Deny without an answer. Called when the panel closes or the stream
     /// cancels so no continuation stays suspended.

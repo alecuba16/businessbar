@@ -24,6 +24,11 @@ enum MenuBuilder {
         onAnswerInvites: @escaping () -> Void,
         recentEvents: [CalendarEvent] = [],
         timeChangedEvents: [CalendarEvent] = [],
+        onMarkAllRecentAsRead: @escaping () -> Void = {},
+        onDismissAllRecentEvents: @escaping () -> Void = {},
+        onMarkTimeChangedAsRead: @escaping (CalendarEvent) -> Void = { _ in },
+        onMarkAllTimeChangedAsRead: @escaping () -> Void = {},
+        onDismissAllTimeChanged: @escaping () -> Void = {},
         defaults: UserDefaults = .standard
     ) -> NSMenu {
         let menu = NSMenu()
@@ -44,8 +49,8 @@ enum MenuBuilder {
 
         if showEvents {
             addInvitesSection(to: menu, pendingRSVPEvents: pendingRSVPEvents, onAnswerInvites: onAnswerInvites)
-            addRecentSection(to: menu, recentEvents: recentEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent, onMarkRecentAsRead: onMarkRecentAsRead)
-            addTimeChangedSection(to: menu, timeChangedEvents: timeChangedEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
+            addRecentSection(to: menu, recentEvents: recentEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent, onMarkRecentAsRead: onMarkRecentAsRead, onMarkAllRecentAsRead: onMarkAllRecentAsRead, onDismissAllRecentEvents: onDismissAllRecentEvents)
+            addTimeChangedSection(to: menu, timeChangedEvents: timeChangedEvents, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent, onMarkTimeChangedAsRead: onMarkTimeChangedAsRead, onMarkAllTimeChangedAsRead: onMarkAllTimeChangedAsRead, onDismissAllTimeChanged: onDismissAllTimeChanged)
         }
 
         menu.addItem(NSMenuItem.separator())
@@ -131,8 +136,10 @@ enum MenuBuilder {
     /// first-seen window. Click joins when a meeting link exists; the
     /// submenu offers Join, Mark as read (row leaves the region without
     /// touching the agenda), and Dismiss (event hidden everywhere).
+    /// Mark all as read clears the region without hiding anything;
+    /// Dismiss all applies the per-row Dismiss to every listed row.
     @MainActor
-    private static func addRecentSection(to menu: NSMenu, recentEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void, onMarkRecentAsRead: @escaping (String) -> Void) {
+    private static func addRecentSection(to menu: NSMenu, recentEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void, onMarkRecentAsRead: @escaping (String) -> Void, onMarkAllRecentAsRead: @escaping () -> Void, onDismissAllRecentEvents: @escaping () -> Void) {
         guard !recentEvents.isEmpty else { return }
 
         menu.addItem(NSMenuItem.separator())
@@ -152,15 +159,18 @@ enum MenuBuilder {
             )
             item.representedObject = MenuAction.eventClicked(event, onJoinMeeting, onDismissEvent)
             item.target = MenuActionHandler.shared
-            item.submenu = createRecentEventSubmenu(for: event, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent, onMarkRecentAsRead: onMarkRecentAsRead)
+            item.submenu = createRecentEventSubmenu(for: event, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent, onMarkRecentAsRead: onMarkRecentAsRead, markReadTitle: "Mark as read")
             menu.addItem(item)
         }
+
+        menu.addItem(bulkRow("Mark all as read", action: #selector(MenuActionHandler.markAllRecentAsRead), representedObject: MenuAction.markAllRecentAsRead(onMarkAllRecentAsRead)))
+        menu.addItem(bulkRow("Dismiss all", action: #selector(MenuActionHandler.dismissAllRecentEvents), representedObject: MenuAction.dismissAllRecentEvents(onDismissAllRecentEvents)))
     }
 
     /// Recent rows keep a submenu even without a meeting link, because
     /// Mark as read and Dismiss never depend on the link.
     @MainActor
-    private static func createRecentEventSubmenu(for event: CalendarEvent, onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void, onMarkRecentAsRead: @escaping (String) -> Void) -> NSMenu {
+    private static func createRecentEventSubmenu(for event: CalendarEvent, onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void, onMarkRecentAsRead: @escaping (String) -> Void, markReadTitle: String = "Mark as read") -> NSMenu {
         let submenu = NSMenu()
 
         if event.meetingLink != nil {
@@ -170,7 +180,7 @@ enum MenuBuilder {
             submenu.addItem(joinItem)
         }
 
-        let readItem = NSMenuItem(title: "Mark as read", action: #selector(MenuActionHandler.markRecentAsRead), keyEquivalent: "")
+        let readItem = NSMenuItem(title: markReadTitle, action: #selector(MenuActionHandler.markRecentAsRead), keyEquivalent: "")
         readItem.representedObject = MenuAction.markRecentAsRead(event.id, onMarkRecentAsRead)
         readItem.target = MenuActionHandler.shared
         submenu.addItem(readItem)
@@ -185,9 +195,11 @@ enum MenuBuilder {
 
     /// Events whose start or end moved after the app had already seen
     /// them. Rows mirror the recently-added rows so a moved meeting stays
-    /// clickable: join when a link exists, submenu offers Join and Dismiss.
+    /// clickable: join when a link exists, submenu offers Join, Mark as
+    /// read (flag leaves, a later shift flags again), and Dismiss. Bulk
+    /// rows mirror the recently-added bulk rows.
     @MainActor
-    private static func addTimeChangedSection(to menu: NSMenu, timeChangedEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void) {
+    private static func addTimeChangedSection(to menu: NSMenu, timeChangedEvents: [CalendarEvent], onJoinMeeting: @escaping (CalendarEvent) -> Void, onDismissEvent: @escaping (String) -> Void, onMarkTimeChangedAsRead: @escaping (CalendarEvent) -> Void, onMarkAllTimeChangedAsRead: @escaping () -> Void, onDismissAllTimeChanged: @escaping () -> Void) {
         guard !timeChangedEvents.isEmpty else { return }
 
         menu.addItem(NSMenuItem.separator())
@@ -207,11 +219,23 @@ enum MenuBuilder {
             )
             item.representedObject = MenuAction.eventClicked(event, onJoinMeeting, onDismissEvent)
             item.target = MenuActionHandler.shared
-            if event.meetingLink != nil {
-                item.submenu = createEventSubmenu(for: event, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent)
-            }
+            item.submenu = createRecentEventSubmenu(for: event, onJoinMeeting: onJoinMeeting, onDismissEvent: onDismissEvent, onMarkRecentAsRead: { _ in onMarkTimeChangedAsRead(event) }, markReadTitle: "Acknowledge change")
             menu.addItem(item)
         }
+
+        menu.addItem(bulkRow("Acknowledge all", action: #selector(MenuActionHandler.markAllTimeChangedAsRead), representedObject: MenuAction.markAllTimeChangedAsRead(onMarkAllTimeChangedAsRead)))
+        menu.addItem(bulkRow("Dismiss all", action: #selector(MenuActionHandler.dismissAllTimeChanged), representedObject: MenuAction.dismissAllTimeChanged(onDismissAllTimeChanged)))
+    }
+
+    /// One bulk-action row at the end of a region. Same indent level as
+    /// the rows above: the label already separates controls from entries,
+    /// extra indent would read as a submenu of the last row.
+    @MainActor
+    private static func bulkRow(_ title: String, action: Selector, representedObject: Any) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.representedObject = representedObject
+        item.target = MenuActionHandler.shared
+        return item
     }
 
     @MainActor
@@ -392,6 +416,10 @@ enum MenuAction {
     case eventClicked(CalendarEvent, (CalendarEvent) -> Void, (String) -> Void)
     case dismissEvent(String, (String) -> Void)
     case markRecentAsRead(String, (String) -> Void)
+    case markAllRecentAsRead(() -> Void)
+    case dismissAllRecentEvents(() -> Void)
+    case markAllTimeChangedAsRead(() -> Void)
+    case dismissAllTimeChanged(() -> Void)
     case toggleNoSleep(() -> Void)
     case activateNoSleepFor(TimeInterval?, (TimeInterval?) -> Void)
     case deactivateNoSleep(() -> Void)
@@ -430,6 +458,26 @@ final class MenuActionHandler: NSObject {
     @objc func markRecentAsRead(_ sender: NSMenuItem) {
         guard case .markRecentAsRead(let eventID, let handler) = sender.representedObject as? MenuAction else { return }
         handler(eventID)
+    }
+
+    @objc func markAllRecentAsRead(_ sender: NSMenuItem) {
+        guard case .markAllRecentAsRead(let handler) = sender.representedObject as? MenuAction else { return }
+        handler()
+    }
+
+    @objc func dismissAllRecentEvents(_ sender: NSMenuItem) {
+        guard case .dismissAllRecentEvents(let handler) = sender.representedObject as? MenuAction else { return }
+        handler()
+    }
+
+    @objc func markAllTimeChangedAsRead(_ sender: NSMenuItem) {
+        guard case .markAllTimeChangedAsRead(let handler) = sender.representedObject as? MenuAction else { return }
+        handler()
+    }
+
+    @objc func dismissAllTimeChanged(_ sender: NSMenuItem) {
+        guard case .dismissAllTimeChanged(let handler) = sender.representedObject as? MenuAction else { return }
+        handler()
     }
     
     @objc func toggleNoSleep(_ sender: NSMenuItem) {

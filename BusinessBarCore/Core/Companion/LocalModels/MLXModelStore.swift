@@ -181,7 +181,9 @@ public final class MLXModelStore: ObservableObject {
     private static let quitLock = NSLock()
     private static var quitKillTable: [Process] = []
 
-    private static func registerForQuitKill(_ process: Process) {
+    // internal for the coverage scenarios: the quit-kill table has no
+    // other construction path than the download driver.
+    static func registerForQuitKill(_ process: Process) {
         quitLock.lock()
         quitKillTable.removeAll { !$0.isRunning }
         quitKillTable.append(process)

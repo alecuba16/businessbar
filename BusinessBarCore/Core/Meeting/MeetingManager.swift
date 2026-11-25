@@ -65,9 +65,12 @@ public final class MeetingManager: ObservableObject {
     /// from the current list, so events only need coverage once they land
     /// in the two-day window.
     public private(set) var horizonEvents: [CalendarEvent] = []
-    /// Last observed time window per seen event, for change detection.
-    /// Same lifecycle as `seenEventIDs`: a first-seen event never counts as
-    /// changed, only a later shift of its start or end does.
+    /// Last observed time window per seen occurrence, for change detection.
+    /// Keyed by occurrence, not by event id: occurrences of one recurring
+    /// series share the id in both backends, so id alone would collapse
+    /// them and every fetch would report a phantom change. Same lifecycle
+    /// as `seenEventIDs`: a first-seen occurrence never counts as changed,
+    /// only a later shift of its start or end does.
     private var lastSeenWindows = [String: (start: Date, end: Date)]()
     private var lastFeatureState: Bool {
         didSet {
@@ -79,6 +82,7 @@ public final class MeetingManager: ObservableObject {
                 recentEvents = []
                 timeChangedEvents = []
                 dismissedEventIDs.removeAll()
+                acknowledgedChangeWindows.removeAll()
                 readRecentEventIDs.removeAll()
                 seenEventIDs.removeAll()
                 firstSeenAt.removeAll()
@@ -225,17 +229,32 @@ public final class MeetingManager: ObservableObject {
             }
 
             // Time-change detection compares against the previous fetch's
-            // window. First-seen events have no memory yet, so they never
-            // count as changed.
+            // window. First-seen occurrences have no memory yet, so they
+            // never count as changed. Ended occurrences are excluded too:
+            // a moved meeting in the past cannot be joined or rescheduled,
+            // so flagging it only turns the badge into permanent noise.
+            // Acknowledged rows re-flag only when their times move again.
             let changedTimeEvents = fetchedEvents.filter { event in
-                guard let previous = lastSeenWindows[event.id] else { return false }
+                let key = Self.changeKey(event)
+                guard !dismissedEventIDs.contains(event.id),
+                      event.endDate > now,
+                      let previous = lastSeenWindows[key] else { return false }
+                if let acknowledged = acknowledgedChangeWindows[key],
+                   event.startDate == acknowledged.start,
+                   event.endDate == acknowledged.end {
+                    return false
+                }
                 return previous.start != event.startDate || previous.end != event.endDate
             }
             for event in fetchedEvents {
-                lastSeenWindows[event.id] = (event.startDate, event.endDate)
+                lastSeenWindows[Self.changeKey(event)] = (event.startDate, event.endDate)
             }
-            for eventID in Set(lastSeenWindows.keys).subtracting(fetchedEvents.map(\.id)) {
-                lastSeenWindows.removeValue(forKey: eventID)
+            let currentChangeKeys = Set(fetchedEvents.map(Self.changeKey))
+            for key in Set(lastSeenWindows.keys).subtracting(currentChangeKeys) {
+                lastSeenWindows.removeValue(forKey: key)
+            }
+            for key in Set(acknowledgedChangeWindows.keys).subtracting(currentChangeKeys) {
+                acknowledgedChangeWindows.removeValue(forKey: key)
             }
             timeChangedEvents = changedTimeEvents
 
@@ -291,9 +310,78 @@ public final class MeetingManager: ObservableObject {
         }
     }
 
+    /// Acknowledged time windows per occurrence: a changed-times row the
+    /// user marked read stays quiet while its times hold still and re-flags
+    /// only when they move again, because a new shift is new information.
+    /// Pruned with the same fetch-window rule as the other memories.
+    private var acknowledgedChangeWindows = [String: (start: Date, end: Date)]()
+
+    /// Identifies one occurrence of an event. Recurring occurrences share
+    /// their event id in both backends, so the occurrence date separates
+    /// them; a whole-series edit shifts every occurrence date, which makes
+    /// it land as a first-seen key (announced once as changed, then quiet).
+    private static func changeKey(_ event: CalendarEvent) -> String {
+        if event.isRecurring, let occurrence = event.occurrenceDate {
+            return "\(event.id)#\(occurrence.timeIntervalSince1970)"
+        }
+        return event.id
+    }
+
     public func dismissEvent(_ eventID: String) {
         dismissedEventIDs.insert(eventID)
         nextEvent = EventDisplayPlanner.nextEvent(from: events, dismissedIDs: dismissedEventIDs, now: nowProvider())
+    }
+
+    /// Bulk dismiss for the changed-times region: every row gets the same
+    /// treatment as its own Dismiss, the events hide everywhere (agenda,
+    /// next-event pick, both regions) until they leave the fetch window.
+    public func dismissAllTimeChanged() {
+        let eventIDs = timeChangedEvents.map(\.id)
+        timeChangedEvents = []
+        for eventID in eventIDs {
+            dismissEvent(eventID)
+        }
+    }
+
+    /// Acknowledges one changed-times row: the flag leaves, the event keeps
+    /// its agenda place. A later shift of the same occurrence flags again.
+    public func markTimeChangedAsRead(_ event: CalendarEvent) {
+        let key = Self.changeKey(event)
+        acknowledgedChangeWindows[key] = (event.startDate, event.endDate)
+        timeChangedEvents.removeAll { Self.changeKey($0) == key }
+    }
+
+    /// Acknowledges every changed-times row at once, same rule per row.
+    public func markAllTimeChangedAsRead() {
+        for event in timeChangedEvents {
+            acknowledgedChangeWindows[Self.changeKey(event)] = (event.startDate, event.endDate)
+        }
+        timeChangedEvents = []
+    }
+
+    /// Marks every recently-added row as read in one action: rows leave
+    /// the region, events keep their agenda place and next-event eligibility.
+    public func markAllRecentAsRead() {
+        for event in recentEvents {
+            readRecentEventIDs.insert(event.id)
+        }
+        recentEvents = []
+    }
+
+    /// Bulk dismiss for the recently-added region: every row gets the same
+    /// treatment as its own Dismiss, the events hide everywhere.
+    public func dismissAllRecentEvents() {
+        let eventIDs = recentEvents.map(\.id)
+        for eventID in eventIDs {
+            dismissEvent(eventID)
+        }
+        recentEvents = EventDisplayPlanner.recentEvents(
+            firstSeen: firstSeenAt,
+            from: horizonEvents.filter { !dismissedEventIDs.contains($0.id) && !readRecentEventIDs.contains($0.id) },
+            now: nowProvider(),
+            window: recentEventsWindow,
+            limit: recentEventsLimit
+        )
     }
 
     /// Marks one recently-added row as read: the event keeps its agenda place

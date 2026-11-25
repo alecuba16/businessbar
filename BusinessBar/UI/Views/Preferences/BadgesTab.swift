@@ -8,13 +8,12 @@ struct BadgesTab: View {
     /// Injected from PreferencesWindow so the tab drives the shared BadgeManager
     /// rather than reading UserDefaults directly.
     @ObservedObject var badgeManager: BadgeManager
-    /// Test seam: runs the tccutil Accessibility reset off the main thread.
-    /// The coverage fixture injects a recorded no-op; the default keeps the
-    /// production tccutil run exactly.
+    /// Test seam: unused since the Accessibility reset moved to GeneralTab;
+    /// kept as an injectable no-op so coverage fixtures keep constructing
+    /// the tab without touching real TCC state.
     private let resetTCCPermission: () throws -> Int32
 
     @State private var showingAppPicker = false
-    @State private var isResettingPermission = false
 
     @AppStorage(Constants.Defaults.featureBadges)             private var featureBadgesEnabled = true
     @AppStorage(Constants.Defaults.hideIconWhenNotRunning)     private var hideWhenNotRunning     = false
@@ -186,12 +185,6 @@ struct BadgesTab: View {
                                 badgeManager.requestAccessibilityPermission()
                             }
                             .buttonStyle(.bordered)
-
-                            Button(isResettingPermission ? "Resetting…" : "Reset Permission") {
-                                resetAccessibilityPermission()
-                            }
-                            .disabled(isResettingPermission)
-                            .buttonStyle(.bordered)
                         }
                         .padding(.top, 2)
                     }
@@ -238,26 +231,5 @@ struct BadgesTab: View {
 
     private func notifyPreferencesChanged() {
         NotificationCenter.default.post(name: .businessBarPreferencesDidChange, object: nil)
-    }
-
-    private func resetAccessibilityPermission() {
-        guard !isResettingPermission else { return }
-        isResettingPermission = true
-        featureBadgesEnabled = false
-        notifyPreferencesChanged()
-
-        AppLogger.info("Resetting Accessibility permission via tccutil", category: "Permissions")
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let code = try resetTCCPermission()
-                AppLogger.info("Accessibility permission reset completed (exit code: \(code))", category: "Permissions")
-            } catch {
-                AppLogger.error("Failed to run tccutil for Accessibility reset: \(error.localizedDescription)", category: "Permissions")
-            }
-            DispatchQueue.main.async {
-                isResettingPermission = false
-            }
-        }
     }
 }

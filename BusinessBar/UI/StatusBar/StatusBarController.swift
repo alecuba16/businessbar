@@ -267,6 +267,16 @@ final class StatusBarController: NSObject {
     /// assert the missing-symbol fallback returns the same image.
     var cachedAppIconForCoverage: NSImage? { cachedAppIcon }
 
+    /// Coverage hook: drives the missing-symbol fallback of the pending-RSVP
+    /// icon, mirroring timeChangedIconFallbackForCoverage.
+    func pendingRSVPIconFallbackForCoverage() -> NSImage? {
+        makePendingRSVPIcon(count: 1, symbolName: "businessbar.nonexistent.symbol")
+    }
+
+    /// Coverage hook: the NoSleep remaining-time string, so scenarios can
+    /// exercise both the infinite and the scheduled-duration branches.
+    var noSleepTimeDescriptionForCoverage: String { noSleepTimeDescription }
+
     // MARK: - Minute refresh timer (power-efficient)
 
     /// Starts the 60-second refresh timer only when the calendar feature is
@@ -460,7 +470,7 @@ final class StatusBarController: NSObject {
     /// Branded calendar icon with a red question badge in the corner when
     /// invitations are waiting. Reuses the SF Symbol's own badge variant so
     /// the geometry stays consistent with the idle icon.
-    private func makePendingRSVPIcon(count: Int) -> NSImage? {
+    private func makePendingRSVPIcon(count: Int, symbolName: String = "calendar.badge.exclamationmark") -> NSImage? {
         let brandColor = NSColor(red: 70/255, green: 80/255, blue: 170/255, alpha: 1.0)
         let white = NSColor.white
         let red = NSColor.systemRed
@@ -470,7 +480,7 @@ final class StatusBarController: NSObject {
         let config = paletteConfig.applying(sizeConfig)
 
         guard let symbol = NSImage(
-            systemSymbolName: "calendar.badge.exclamationmark",
+            systemSymbolName: symbolName,
             accessibilityDescription: "\(count) invitations waiting"
         )?.withSymbolConfiguration(config) else {
             return cachedAppIcon
@@ -888,6 +898,11 @@ extension StatusBarController: NSMenuDelegate {
             onAnswerInvites: { [weak self] in self?.effects.answerInvites() },
             recentEvents: meetingManager.recentEvents,
             timeChangedEvents: meetingManager.timeChangedEvents,
+            onMarkAllRecentAsRead: { [weak self] in self?.meetingManager.markAllRecentAsRead() },
+            onDismissAllRecentEvents: { [weak self] in self?.meetingManager.dismissAllRecentEvents() },
+            onMarkTimeChangedAsRead: { [weak self] event in self?.meetingManager.markTimeChangedAsRead(event) },
+            onMarkAllTimeChangedAsRead: { [weak self] in self?.meetingManager.markAllTimeChangedAsRead() },
+            onDismissAllTimeChanged: { [weak self] in self?.meetingManager.dismissAllTimeChanged() },
             defaults: defaults
         )
 

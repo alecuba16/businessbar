@@ -5,6 +5,48 @@ import Foundation
 
 import UserNotifications
 
+#if DEBUG
+/// Test-only subclasses: the system notification types have no public
+/// constructors, so scenarios reach the delegate callback through these.
+/// DEBUG-only, never shipped.
+final class UNNotificationForCoverage: UNNotification {
+    init(request: UNNotificationRequest, date: Date) {
+        let coder = CoverageCoder()
+        coder.values["request"] = request
+        coder.values["date"] = date
+        super.init(coder: coder)!
+        setValue(request, forKey: "request")
+        setValue(date, forKey: "date")
+    }
+
+    required convenience init?(coder: NSCoder) { nil }
+}
+
+final class UNNotificationResponseForCoverage: UNNotificationResponse {
+    init(actionIdentifier: String, notification: UNNotification) {
+        let coder = CoverageCoder()
+        coder.values["actionIdentifier"] = actionIdentifier
+        coder.values["notification"] = notification
+        super.init(coder: coder)!
+        setValue(actionIdentifier, forKey: "actionIdentifier")
+        setValue(notification, forKey: "notification")
+    }
+
+    required convenience init?(coder: NSCoder) { nil }
+}
+
+/// Keyed coder that returns the stored values and defaults for scalars.
+final class CoverageCoder: NSCoder {
+    var values: [String: Any] = [:]
+    override var allowsKeyedCoding: Bool { true }
+    override func containsValue(forKey key: String) -> Bool { values[key] != nil }
+    override func decodeObject(forKey key: String) -> Any? { values[key] }
+    override func decodeBool(forKey key: String) -> Bool { false }
+    override func decodeInt64(forKey key: String) -> Int64 { 0 }
+    override func decodeDouble(forKey key: String) -> Double { 0 }
+}
+#endif
+
 @MainActor
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     struct Dependencies {
@@ -388,7 +430,11 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     private func presentTimeChangedNotification(for event: CalendarEvent) {
         guard dependencies.isAvailable(),
               areNotificationsEnabled,
-              dependencies.isEventTimeChangesEnabled() else { return }
+              dependencies.isEventTimeChangesEnabled(),
+              // Ended events never announce a time change: a moved meeting
+              // in the past asks nothing of the user, the same rule the
+              // badge and the menu section already apply.
+              event.endDate > dependencies.now() else { return }
 
         let content = UNMutableNotificationContent()
         content.title = "Event Time Changed"
@@ -430,6 +476,22 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         let calendarID = userInfo["calendarID"] as? String
         handleAction(action, meetingLink: meetingLink, eventID: eventID, calendarID: calendarID)
     }
+
+#if DEBUG
+    /// Test-only initializer for the delegate payload: the system type has
+    /// no public constructor, so scenarios build the response through this
+    /// bridge to drive `userNotificationCenter(_:didReceive:)` directly.
+    nonisolated static func responseForCoverage(
+        action: String,
+        userInfo: [AnyHashable: Any]
+    ) -> UNNotificationResponse {
+        let content = UNMutableNotificationContent()
+        content.userInfo = userInfo
+        let request = UNNotificationRequest(identifier: "coverage-\(action)", content: content, trigger: nil)
+        let notification = UNNotificationForCoverage(request: request, date: Date())
+        return UNNotificationResponseForCoverage(actionIdentifier: action, notification: notification)
+    }
+#endif
 
     func handleAction(_ action: String, meetingLink: String?, eventID: String?, calendarID: String? = nil) {
         guard areNotificationsEnabled else { return }

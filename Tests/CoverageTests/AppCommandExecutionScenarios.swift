@@ -64,6 +64,116 @@ enum AppCommandExecutionScenarios {
         let backgroundFailure = await controller.handleToolCall(name: "run_command", argumentsJSON: "{\"command\":\"echo fails\",\"background\":true}")
         try context.expect(backgroundFailure.contains("controlled spawn failure"), "Background spawn failure surfaced")
         await controller.shutdown()
+        try await commandExecutionEdges(context)
+    }
+
+    /// Branches the happy-path run above never takes: missing workspace
+    /// (read_file/list_files), the rm-with-Deny hint, approval timeout
+    /// auto-deny, missing query argument, tool dispatch with no configured
+    /// search handler, a session-approved Tier 1 prefix, foreground
+    /// promotion through the registry watchdog, and sessionApproved argv
+    /// building through zsh.
+    private static func commandExecutionEdges(_ context: CoverageContext) async throws {
+        let root = try context.temporaryDirectory("command-execution-edges")
+        let savedWorkingDir = CompanionConfigService.commandDefaultWorkingDir()
+        CompanionConfigService.setCommandDefaultWorkingDir(root.path)
+        CompanionConfigService.setCommandPermissionMode(.ask)
+        CompanionConfigService.setCommandAllowedPrefixes([])
+        CompanionConfigService.setCommandDeniedPrefixes([])
+        defer {
+            CompanionConfigService.setCommandDefaultWorkingDir(savedWorkingDir)
+            CompanionConfigService.setCommandPermissionMode(.ask)
+            CommandToolController.approvalTimeoutNanosecondsForCoverage = 300_000_000_000
+        }
+
+        let runtime = AppCommandRuntime()
+        // Short watchdog: 10ms inactivity promotes a hung foreground call.
+        let registry = BackgroundCommandRegistry(
+            inactivity: 0.01,
+            wallClock: 60,
+            spawn: { try runtime.spawn($0, $1) },
+            now: { Date() },
+            sleep: { try await Task.sleep(nanoseconds: $0) }
+        )
+        let controller = CommandToolController(registry: registry, presentation: .init(chooseWorkspace: { nil }, notify: { _ in }))
+        controller.beginSession(UUID())
+
+        // Missing workspace: no session pick, default dir points at a
+        // path that does not exist, so the tools refuse before spawning.
+        controller.workspaceRoot = ""
+        CompanionConfigService.setCommandDefaultWorkingDir("/does-not-exist-businessbar-coverage")
+        let noRoot = await controller.handleToolCall(name: "run_command", argumentsJSON: "{\"command\":\"echo no-root\"}")
+        try context.equal(noRoot, "error: no workspace folder selected. Ask the user to pick one in the panel header.", "run_command without workspace")
+        let noRootRead = await controller.handleToolCall(name: "read_file", argumentsJSON: "{\"path\":\"note.txt\"}")
+        try context.equal(noRootRead, "error: no workspace folder selected. Ask the user to pick one in the panel header.", "read_file without workspace")
+        let noRootList = await controller.handleToolCall(name: "list_files", argumentsJSON: "{}")
+        try context.equal(noRootList, "error: no workspace folder selected. Ask the user to pick one in the panel header.", "list_files without workspace")
+
+        // rm with the fileDelete category dial at Deny appends the hint.
+        CompanionConfigService.setCommandDefaultWorkingDir(root.path)
+        controller.workspaceRoot = root.path
+        let savedDeleteMode = CompanionConfigService.commandCategoryMode(.fileDelete)
+        CompanionConfigService.setCommandCategoryMode(.deny, for: .fileDelete)
+        let refused = await controller.handleToolCall(name: "run_command", argumentsJSON: "{\"command\":\"rm note.txt\"}")
+        try context.expect(refused.hasSuffix("File deletion is set to Deny in Preferences."), "Deny-wins refusal carries the preferences hint")
+        CompanionConfigService.setCommandCategoryMode(savedDeleteMode, for: .fileDelete)
+
+        // Approval timeout auto-deny: 20ms timeout, nobody decides.
+        CommandToolController.approvalTimeoutNanosecondsForCoverage = 20_000_000
+        let timedOut = Task { await controller.handleToolCall(name: "run_command", argumentsJSON: "{\"command\":\"mkdir edge-fixture\"}") }
+        for _ in 0..<1000 {
+            if controller.approvalRequest != nil { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let timedOutResult = await timedOut.value
+        try context.equal(timedOutResult, "denied by user", "Approval timeout auto-denies without a decision")
+        try context.expect(controller.approvalRequest == nil, "Timeout clears the pending card")
+        CommandToolController.approvalTimeoutNanosecondsForCoverage = 300_000_000_000
+
+        // Tool dispatch: without a provider the handler itself is nil, so
+        // the panel handler reports not-configured; with a scrape provider
+        // configured the handler exists and bad arguments surface the
+        // missing-query branch inside the config service closure.
+        CompanionConfigService.setCommandToolsEnabled(true)
+        let handler = controller.makePanelToolHandler()
+        try context.expect(handler != nil, "Handler exists for the dispatch checks")
+        let unconfigured = await handler?("web_search", "{}")
+        try context.equal(unconfigured, "Error: web_search is not configured", "Missing provider surfaces the not-configured message")
+        CompanionConfigService.setSearchProviderKind("scrape-ddg")
+        let scrapeHandler = controller.makePanelToolHandler()
+        try context.expect(scrapeHandler != nil, "Scrape provider produces a dispatch handler")
+        let noQuery = await scrapeHandler?("web_search", "not json")
+        try context.equal(noQuery, "Error: missing 'query' argument", "Unparseable arguments surface the missing query message")
+        CompanionConfigService.setSearchProviderKind("none")
+
+        // Session-approved prefix: alwaysThisSession upgrades the exact
+        // command, the retry resolves sessionApproved and builds argv
+        // through zsh.
+        controller.sessionPermissionMode = .ask
+        let sessionIndex = runtime.arguments.count
+        let sessionApproval = Task { await controller.handleToolCall(name: "run_command", argumentsJSON: "{\"command\":\"mkdir session-fixture\"}") }
+        for _ in 0..<1000 {
+            if controller.approvalRequest != nil { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try context.equal(controller.approvalRequest?.command, "mkdir session-fixture", "Session approval card created")
+        controller.decide(.alwaysThisSession)
+        try await waitForProcess(runtime, index: sessionIndex, context)
+        runtime.process(sessionIndex).finish(0)
+        let sessionResult = await sessionApproval.value
+        try context.expect(sessionResult.hasPrefix("exit code "), "Session-approved command runs")
+        try context.equal(runtime.arguments.last?.0.first, "/bin/zsh", "Session-approved argv goes through zsh")
+
+        // Foreground promotion: the controlled process never exits, the
+        // watchdog promotes it after the inactivity window.
+        let promote = Task { await controller.handleToolCall(name: "run_command", argumentsJSON: "{\"command\":\"echo promote-fixture\"}") }
+        let promoteIndex = runtime.arguments.count
+        try await waitForProcess(runtime, index: promoteIndex, context)
+        let promoted = await promote.value
+        try context.expect(promoted.hasPrefix("command still running after timeout, moved to background. handle:"), "Hung foreground command promoted to background")
+        try context.expect(controller.backgroundProcesses.contains { $0.running }, "Promoted handle appears in the background cards")
+
+        await controller.shutdown()
     }
 
     private static func waitForProcess(_ runtime: AppCommandRuntime, index: Int, _ context: CoverageContext) async throws {

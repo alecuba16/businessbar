@@ -46,6 +46,10 @@ enum AppCoverageScenarios {
         await run("logging", focused: focused, failures: &failures) { try await AppLoggingScenarios.run(context) }
         await run("chat-stream", focused: focused, failures: &failures) { try await AppChatStreamScenarios.run(context) }
         await run("companion-deep", focused: focused, failures: &failures) { try await AppCompanionTabDeepScenarios.run(context) }
+        await run("chat-send", focused: focused, failures: &failures) { try await AppChatSendScenarios.run(context) }
+        await run("calendars-wave2", focused: focused, failures: &failures) { try await AppCalendarsWave2Scenarios.run(context) }
+        await run("companion-wave2", focused: focused, failures: &failures) { try await AppCompanionWave2Scenarios.run(context) }
+        await run("wave6", focused: focused, failures: &failures) { try await AppWave6Scenarios.run(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 

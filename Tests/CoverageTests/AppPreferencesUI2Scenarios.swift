@@ -8,6 +8,16 @@ import UserNotifications
 @testable import BusinessBar
 
 @MainActor
+private final class UI2UpdaterBackend: UpdaterBackend {
+    var automaticallyChecksForUpdates = false
+    var canCheckForUpdates = false
+    private(set) var started = false
+    private(set) var checked = 0
+    func start() throws { started = true; canCheckForUpdates = true }
+    func checkForUpdates() { checked += 1 }
+}
+
+@MainActor
 private final class UI2Hosted<Content: View> {
     let host: NSHostingView<Content>
     private let window: NSPanel
@@ -250,6 +260,8 @@ enum AppPreferencesUI2Scenarios {
         await timed("calendarsTabReset") { try await calendarsTabReset(context) }
         await timed("calendarsTabConfirmations") { try await calendarsTabConfirmations(context) }
         await timed("calendarsTabGoogle") { try await calendarsTabGoogle(context) }
+        await timed("generalTabPermissionResets") { try await generalTabPermissionResets(context) }
+        await timed("toolsSectionAXSpike") { try await toolsSectionAXSpike(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
@@ -1016,7 +1028,6 @@ enum AppPreferencesUI2Scenarios {
         let meetings = MeetingManager(eventStore: UI2CalendarBoundary(), defaults: defaults, notificationCenter: NotificationCenter())
 
         var openedURLs: [String] = []
-        var resetServices: [String] = []
         var reportedStatuses: [UNAuthorizationStatus] = []
         var requestGrants: [Bool] = []
 
@@ -1033,10 +1044,6 @@ enum AppPreferencesUI2Scenarios {
                     calendarAuthorization: { .fullAccess },
                     notificationAuthorization: { receive in receive(true) },
                     openSettingsURL: { url in openedURLs.append(url.absoluteString) },
-                    resetTCCPermission: { service, completion in
-                        resetServices.append(service)
-                        completion(0)
-                    },
                     notificationCenterAuthorizationStatus: { receive in
                         if let status { reportedStatuses.append(status) }
                         receive(status ?? .denied)
@@ -1104,44 +1111,11 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(openedURLs.contains { $0.contains("notifications") }, "Denied branch opens notification settings through the seam")
         try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Denied branch clears the stored toggle")
 
-        // Reset press presents the confirmation dialog first; only the
-        // destructive confirm reaches the tccutil seam.
+        // Reset press moved to the General tab (Permission Resets
+        // section); the calendar/notification resets are covered there.
         let resetTab = makeTab(status: nil, bundlePresent: false)
         defer { resetTab.close() }
         await ui2Settle()
-        try resetTab.press("Reset Permission", context)
-        for _ in 0..<20 where !resetTab.sheetText().contains("Reset Calendar Permission?") {
-            await Task.yield()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        }
-        try context.expect(resetServices.isEmpty, "Calendar reset waits for confirmation before touching TCC")
-        try context.expect(resetTab.sheetText().contains("Reset Calendar Permission?"), "Reset press presents the calendar confirmation dialog")
-        try resetTab.alertPress("Reset Permission", context)
-        for _ in 0..<20 where !resetServices.contains("Calendar") {
-            await Task.yield()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        }
-        try context.expect(resetServices.contains("Calendar"), "Confirmed calendar reset routes through the tccutil seam")
-        await ui2Settle()
-        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Calendar reset disables the feature flag")
-        try context.expect(resetTab.text.contains("Resetting…") == false, "Reset flag clears after the seam completes")
-
-        // Notification reset press: second "Reset Permission" occurrence
-        // is the notifications row, same confirm-through-dialog flow.
-        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
-        try resetTab.pressOccurrence("Reset Permission", occurrence: 1, context)
-        for _ in 0..<20 where !resetTab.sheetText().contains("Reset Notification Permission?") {
-            await Task.yield()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        }
-        try context.expect(!resetServices.contains("Notifications"), "Notification reset waits for confirmation before touching TCC")
-        try resetTab.alertPress("Reset Permission", context)
-        for _ in 0..<20 where !resetServices.contains("Notifications") {
-            await Task.yield()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        }
-        try context.expect(resetServices.contains("Notifications"), "Notification reset routes through the tccutil seam")
-        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Notification reset clears the stored toggle")
 
         // Open System Settings press routes through the settings seam.
         try resetTab.press("Open System Settings", context)
@@ -1412,10 +1386,22 @@ enum AppPreferencesUI2Scenarios {
         }
         try context.expect(defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Successful sign-in persists the enabled flag")
 
-        // Signed-in state renders the reset caption, and the sign-out press
-        // clears the state and the flag through the real signOut path.
+        // Signed-in state now renders the sign-out button on the General
+        // tab (Permission Resets section): a hosted GeneralTab with the
+        // same authenticated auth drives the real signOut path, which
+        // clears the session and the feature flag.
         await ui2Settle()
-        try signedOut.press("Reset Permission (Sign Out)", context)
+        let generalUpdater = UpdaterViewModel(backend: UI2UpdaterBackend())
+        let generalTab = UI2Hosted(
+            GeneralTab(googleAuth: auth, googleConfigured: { true })
+                .environmentObject(generalUpdater)
+                .defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1400)
+        )
+        defer { generalTab.close() }
+        await ui2Settle()
+        try context.expect(generalTab.text.contains("Reset Google Permission (Sign Out)"), "Signed-in General tab renders the Google sign-out reset")
+        try generalTab.press("Reset Google Permission (Sign Out)", context)
         for _ in 0..<20 where auth.isAuthenticated {
             await Task.yield()
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
@@ -1904,6 +1890,192 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(removeHelps.filter { $0 == "Remove header" }.count == 2, "Add Header appends an editable pair row")
         try customSheet.press("Done", context)
     }
+
+    /// Permission-reset buttons that moved from CalendarsTab and BadgesTab
+    /// into the General tab's Permission Resets section. Every host-touching
+    /// operation runs through the tab's injected seams (named tccutil runner,
+    /// throwing Accessibility runner, Google auth fixture), so nothing
+    /// touches real TCC state, keychain, or Google. Destructive presses go
+    /// through their confirmation dialogs; the Accessibility reset also
+    /// covers the throwing seam's error branch.
+    static func generalTabPermissionResets(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("general-tab-permission-resets")
+        defaults.registerDefaults()
+        let updater = UpdaterViewModel(backend: UI2UpdaterBackend())
+        let auth = GoogleAuth(dependencies: .init(
+            loadCredential: { throw CoverageContext.Failure(description: "fixture") },
+            saveCredential: { _ in },
+            deleteCredential: {},
+            configuration: { .init(clientNumber: "fixture", clientSecret: "fixture-secret") },
+            request: { _ in throw CoverageContext.Failure(description: "fixture") },
+            openURL: { _ in false }
+        ))
+
+        var resetServices: [String] = []
+        // Mutable from the off-main Accessibility seam, so the counter and
+        // throw flag live on a reference type instead of captured vars.
+        final class AccessibilityRuns {
+            var count = 0
+            var shouldThrow = false
+        }
+        let accessibilityRuns = AccessibilityRuns()
+
+        func makeTab() -> UI2Hosted<some View> {
+            UI2Hosted(
+                GeneralTab(
+                    googleAuth: auth,
+                    launchAtLoginStatus: { false },
+                    setLaunchAtLogin: { _ in },
+                    resetNamedTCCPermission: { service, completion in
+                        resetServices.append(service)
+                        completion(0)
+                    },
+                    resetAccessibilityTCCPermission: {
+                        accessibilityRuns.count += 1
+                        if accessibilityRuns.shouldThrow {
+                            throw CoverageContext.Failure(description: "tccutil fixture failure")
+                        }
+                        return 0
+                    },
+                    googleConfigured: { true }
+                )
+                .environmentObject(updater)
+                .defaultAppStorage(defaults),
+                size: NSSize(width: 900, height: 1400)
+            )
+        }
+
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        let tab = makeTab()
+        defer { tab.close() }
+        await ui2Settle()
+        try context.expect(tab.text.contains("Permission Resets"), "General tab renders the Permission Resets section")
+        try context.expect(tab.text.contains("Reset Calendar Permission"), "Calendar reset button renders in the General tab")
+        try context.expect(tab.text.contains("Reset Notification Permission"), "Notification reset button renders in the General tab")
+        try context.expect(tab.text.contains("Reset Accessibility Permission"), "Accessibility reset button renders in the General tab")
+        try context.expect(tab.control("Reset Google Permission (Sign Out)") == nil, "Google sign-out stays hidden while signed out")
+
+        // Calendar reset: confirmation dialog first, then the named seam.
+        try tab.press("Reset Calendar Permission", context)
+        for _ in 0..<20 where !tab.sheetText().contains("Reset Calendar Permission?") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(resetServices.isEmpty, "Calendar reset waits for confirmation before touching TCC")
+        try context.expect(tab.sheetText().contains("Reset Calendar Permission?"), "Calendar reset presents its confirmation dialog")
+        try tab.alertPress("Reset Permission", context)
+        for _ in 0..<20 where !resetServices.contains("Calendar") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(resetServices.contains("Calendar"), "Confirmed calendar reset routes through the tccutil seam")
+        for _ in 0..<20 where defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Calendar reset disables the feature flag")
+        for _ in 0..<20 where tab.text.contains("Resetting…") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(tab.text.contains("Resetting…") == false, "Calendar reset flag clears after the seam completes")
+
+        // Notification reset: same confirm-through-dialog flow, clears the
+        // stored notification toggle.
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        await ui2Settle()
+        try tab.press("Reset Notification Permission", context)
+        for _ in 0..<20 where !tab.sheetText().contains("Reset Notification Permission?") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!resetServices.contains("Notifications"), "Notification reset waits for confirmation before touching TCC")
+        try tab.alertPress("Reset Permission", context)
+        for _ in 0..<20 where !resetServices.contains("Notifications") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(resetServices.contains("Notifications"), "Notification reset routes through the tccutil seam")
+        for _ in 0..<20 where defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureNotifications), "Notification reset clears the stored toggle")
+
+        // Accessibility reset: confirmation dialog first, then the throwing
+        // seam runs off-main and clears the badge feature flag. The reset
+        // completes asynchronously, so the second press waits for the button
+        // to re-enable before driving the success path.
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureBadges)
+        await ui2Settle()
+        try tab.press("Reset Accessibility Permission", context)
+        for _ in 0..<20 where !tab.sheetText().contains("Reset Accessibility Permission?") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(accessibilityRuns.count == 0, "Accessibility reset waits for confirmation before touching TCC")
+        try tab.alertPress("Reset Permission", context)
+        for _ in 0..<200 where accessibilityRuns.count == 0 {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.equal(accessibilityRuns.count, 1, "Accessibility reset runs the injected seam once")
+        for _ in 0..<20 where defaults.bool(forKey: BusinessBar.Constants.Defaults.featureBadges) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureBadges), "Accessibility reset disables the badge feature flag")
+        for _ in 0..<200 where tab.control("Reset Accessibility Permission")?.isAccessibilityEnabled() != true {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        // Throwing seam: the failure log path still restores the button.
+        accessibilityRuns.shouldThrow = true
+        try tab.press("Reset Accessibility Permission", context)
+        for _ in 0..<20 where !tab.sheetText().contains("Reset Accessibility Permission?") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try tab.alertPress("Reset Permission", context)
+        for _ in 0..<200 where accessibilityRuns.count == 1 {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.equal(accessibilityRuns.count, 2, "Throwing Accessibility reset still runs the seam")
+        for _ in 0..<200 where tab.control("Reset Accessibility Permission")?.isAccessibilityEnabled() != true {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(tab.text.contains("Reset Accessibility Permission"), "Accessibility reset button restores after the failure")
+
+        // Default seams coverage: a second tab keeps every tccutil default,
+        // so the production named runner executes against the fixture
+        // bundle id (which owns no TCC grants, same precedent as the
+        // generalTabDefaults TCC default). One confirmed calendar reset
+        // covers both the production runner body and its completion branch;
+        // the Google default reads the real config and stays false in the
+        // coverage binary.
+        let defaultTab = UI2Hosted(
+            GeneralTab(googleAuth: auth)
+                .environmentObject(updater)
+                .defaultAppStorage(defaults),
+            size: NSSize(width: 900, height: 1400)
+        )
+        defer { defaultTab.close() }
+        await ui2Settle()
+        defaults.set(true, forKey: BusinessBar.Constants.Defaults.featureCalendar)
+        await ui2Settle()
+        try defaultTab.press("Reset Calendar Permission", context)
+        for _ in 0..<20 where !defaultTab.sheetText().contains("Reset Calendar Permission?") {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try defaultTab.alertPress("Reset Permission", context)
+        for _ in 0..<40 where defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar) {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(!defaults.bool(forKey: BusinessBar.Constants.Defaults.featureCalendar), "Default calendar reset completes through the production tccutil runner")
+        try context.expect(defaultTab.text.contains("Resetting…"), "Default reset keeps the in-flight label until the async completion lands")
+    }
 }
 
 /// Reserves a locally closed port for fixture health checks. The probe
@@ -1947,4 +2119,105 @@ final class SocketProbe: @unchecked Sendable {
     }
 
     deinit { Darwin.close(fd) }
+}
+
+extension AppPreferencesUI2Scenarios {
+    /// AX-write seam evidence: setAccessibilityText on the hosted sheet
+    /// fields does NOT reach the SwiftUI bindings behind the ToolsSection
+    /// onChange closures (AppPreferencesUI2 rules onChange: :177 brave,
+    /// :182 tavily, :187 custom endpoint, :501 GitHub token). All four
+    /// getters are recorded before/after each AX write and asserted
+    /// unchanged in one combined expectation, so the scenario passes and
+    /// documents the seam. If the AX write path ever reaches the bindings,
+    /// this fails and flags a re-ruling of the ledger entry.
+    static func toolsSectionAXSpike(_ context: CoverageContext) async throws {
+        typealias Config = CompanionConfigService
+        let defaults = try context.defaults("tools-section-ax-spike")
+        let previousDefaults = Config.defaults
+        let previousStore = Config.chatProviderStore
+        let previousCredentials = Config.credentials
+        var secrets: [String: Data] = [:]
+        Config.defaults = defaults
+        Config.chatProviderStore = ChatProviderStore(defaults: defaults)
+        Config.credentials = .init(load: { secrets[$0] }, save: { secrets[$0] = $1 }, delete: { secrets.removeValue(forKey: $0) })
+        defer {
+            Config.defaults = previousDefaults
+            Config.chatProviderStore = previousStore
+            Config.credentials = previousCredentials
+        }
+
+        var observations: [(label: String, before: String, after: String)] = []
+        func probe<Content: View>(_ label: String, in sheet: UI2Hosted<Content>, fieldLabel: String, value: String, before: String, after: () -> String) async {
+            if let field = sheet.secureTextField(labeled: fieldLabel) {
+                field.setAccessibilityText(value)
+                await ui2Settle()
+                observations.append((label, before, after()))
+            } else {
+                observations.append((label, before, "field node not found in owned-AX"))
+            }
+        }
+
+        // Brave branch.
+        try Config.setSearchProviderKind("brave")
+        let braveSheet = UI2Hosted(WebSearchToolSheet(), size: NSSize(width: 520, height: 460))
+        defer { braveSheet.close() }
+        await ui2Settle()
+        let braveBefore = Config.braveKey()
+        await probe("braveKey", in: braveSheet, fieldLabel: "Brave API key", value: "spike-brave-value", before: braveBefore) {
+            Config.braveKey()
+        }
+
+        // Tavily branch.
+        try Config.setSearchProviderKind("tavily")
+        let tavilySheet = UI2Hosted(WebSearchToolSheet(), size: NSSize(width: 520, height: 460))
+        defer { tavilySheet.close() }
+        await ui2Settle()
+        let tavilyBefore = Config.tavilyKey()
+        await probe("tavilyKey", in: tavilySheet, fieldLabel: "Tavily API key", value: "spike-tavily-value", before: tavilyBefore) {
+            Config.tavilyKey()
+        }
+
+        // Custom endpoint.
+        Config.setSearchProviderKind("custom")
+        let customSheet = UI2Hosted(WebSearchToolSheet(), size: NSSize(width: 520, height: 460))
+        defer { customSheet.close() }
+        await ui2Settle()
+        let customBefore = Config.customSearchEndpoint()?.absoluteString
+        await probe("customEndpoint", in: customSheet, fieldLabel: "URL", value: "https://spike.invalid/search?q={query}", before: customBefore ?? "nil") {
+            Config.customSearchEndpoint()?.absoluteString ?? "nil"
+        }
+
+        // GitHub token.
+        let githubSheet = UI2Hosted(GitHubSearchToolSheet(), size: NSSize(width: 520, height: 460))
+        defer { githubSheet.close() }
+        await ui2Settle()
+        let tokenBefore = Config.githubSearchKey()
+        await probe("githubSearchKey", in: githubSheet, fieldLabel: "Personal access token", value: "spike-github-token", before: tokenBefore) {
+            Config.githubSearchKey()
+        }
+
+        // Combined seam assertion: the AX writes must NOT reach the bindings.
+        // The pairs are printed so the run log carries the verbatim evidence.
+        for observation in observations {
+            print("AX spike seam: \(observation.label) before=\(observation.before) after=\(observation.after)")
+        }
+        let changed = observations.filter { $0.before != $0.after }
+        try context.expect(changed.isEmpty, "AX spike seam: all four getters unchanged through AX writes — changed: \(changed.map { "\($0.label) before=\($0.before) after=\($0.after)" }.joined(separator: "; "))")
+    }
+}
+
+extension UI2Hosted {
+    /// Locates a text-entry node by matching its SecureField/TextField
+    /// placeholder text against AX labels/titles, falling back to the
+    /// first text-field-classed node in the tree.
+    fileprivate func secureTextField(labeled fragment: String) -> OwnedAccessibility.Element? {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        let elements = OwnedAccessibility.elements(in: host)
+        return elements.first { element in
+            guard let label = element.accessibilityLabel() ?? element.accessibilityTitle() else { return false }
+            return label.contains(fragment)
+        } ?? elements.first { $0.className().contains("TextField") || $0.className().contains("NSTextView") || $0.className().contains("SecureTextField") }
+    }
 }

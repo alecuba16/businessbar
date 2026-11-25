@@ -169,7 +169,16 @@ enum CoreMLXScenarios {
         try await lifecycle(context, session: session)
         try await measuredNetworkGaps(context)
         try await measuredLifecycleGaps(context, session: session)
-        try liveDefaultsAndQuitKill(context)
+        try await liveDefaultsAndQuitKill(context)
+        try sinkEOFFlush(context)
+        let liveDefaults = try context.defaults("mlx-live-health")
+        let liveHome = try context.temporaryDirectory("mlx-live-health").path
+        let liveModel = MLXModelCatalog.entries[0].id
+        let liveDirectory = try snapshot(context, model: liveModel, home: liveHome)
+        try put("{}", at: liveDirectory.appendingPathComponent("config.json"))
+        try put("{}", at: liveDirectory.appendingPathComponent("tokenizer_config.json"))
+        try await liveHealthChild(context, defaults: liveDefaults, home: liveHome, model: liveModel)
+        try await resolvePythonClosureTwin(context)
     }
 
     /// rssBytes and killAtQuit are the launch-and-quit surface of the
@@ -178,7 +187,7 @@ enum CoreMLXScenarios {
     /// server ever spawned. The convenience init that wires the .live
     /// driver stays private to the module, so its coverage belongs to the
     /// app's own launch path, not this harness.
-    private static func liveDefaultsAndQuitKill(_ c: CoverageContext) throws {
+    private static func liveDefaultsAndQuitKill(_ c: CoverageContext) async throws {
         // rssBytes against the scenario's own process: /bin/ps answers for
         // a live pid, and 0 for a dead one.
         let own = MLXServerManager.rssBytes(pid: ProcessInfo.processInfo.processIdentifier)
@@ -186,11 +195,164 @@ enum CoreMLXScenarios {
         try c.equal(MLXServerManager.rssBytes(pid: -1), 0, "rssBytes returns zero for a dead pid")
 
         // Quit-kill with an empty table is the quit-time no-op the app
-        // hits when no server ever spawned. The registration path itself
-        // only runs from the .live driver on a real spawn, which the
-        // harness never performs.
+        // hits when no server ever spawned.
         MLXServerManager.killAtQuit()
         try c.expect(true, "Quit-kill with an empty table is a safe no-op")
+
+        // registerForQuitKill is internal for @testable harness use and
+        // runs from the .live driver on a real spawn: a /usr/bin/python3 child that
+        // never exits is registered, answered by ps, and SIGKILLed from
+        // the synchronous reap.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", "import time\nwhile True: time.sleep(60)"]
+        try process.run()
+        MLXServerManager.registerForQuitKill(process)
+        MLXServerManager.killAtQuit()
+        for _ in 0..<200 where process.isRunning {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try c.expect(!process.isRunning, "Quit-kill reaps a registered live child")
+    }
+
+    /// The sink's EOF flush: a child that prints one stderr line without
+    /// a trailing newline must land that line in the tail through the
+    /// markEOF branch, never through the consume newline splitter. Closing
+    /// the write end drives EOF deterministically.
+    private static func sinkEOFFlush(_ c: CoverageContext) throws {
+        final class TailRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func record(_ line: String) {
+                lock.lock()
+                lines.append(line)
+                lock.unlock()
+            }
+            var recorded: [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return lines
+            }
+        }
+        let recorder = TailRecorder()
+        let sink = LineBufferedPipeSink()
+        let pipe = Pipe()
+        sink.attach(to: pipe) { recorder.record($0) }
+        try pipe.fileHandleForWriting.write(contentsOf: Data("no-trailing-newline".utf8))
+        try pipe.fileHandleForWriting.close()
+        sink.waitUntilDrained(timeout: 2)
+        try c.equal(recorder.recorded, ["no-trailing-newline"], "EOF flush delivers the unterminated tail line")
+        sink.append("tail line")
+        for index in 0..<60 {
+            sink.append("line \(index)")
+        }
+        try c.equal(sink.tailLines.count, 50, "Tail keeps the bounded 50-line window")
+        try c.equal(sink.tailLines.last, "line 59", "Tail keeps the newest lines")
+        try c.expect(!sink.tailLines.contains("tail line"), "Early tail lines fall out of the window")
+    }
+
+    /// A /usr/bin/python3 child that answers /health through its own HTTP
+    /// server exercises the resolveServerPython tail (pythonPathOverride
+    /// wins) and the real ps-based resident polling. The stub answers
+    /// 200 so the startup health poll completes. killAtQuit reaps the
+    /// stub afterwards: the exit-time SIGKILL
+    /// is the designed reap for a server the harness must not leave bound
+    /// to the fixture port.
+    private static func liveHealthChild(_ c: CoverageContext, defaults: UserDefaults, home: String, model: String) async throws {
+        let previousOverride = MLXServerManager.pythonPathOverride
+        MLXServerManager.pythonPathOverride = "/usr/bin/python3"
+        defer { MLXServerManager.pythonPathOverride = previousOverride }
+        let stub = try c.temporaryDirectory("mlx-live-health-stub")
+        let script = stub.appendingPathComponent("server.py")
+        // The spawn line is fixed ("python -m mlx_lm.server --host 127.0.0.1
+        // --port N"), so the fixture plants a fake mlx_lm package on
+        // PYTHONPATH: -m resolves the stub module, whose tiny HTTP server
+        // answers /health with 200.
+        let moduleDir = stub.appendingPathComponent("fakemod")
+        try FileManager.default.createDirectory(at: moduleDir.appendingPathComponent("mlx_lm"), withIntermediateDirectories: true)
+        try put("""
+        import http.server
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{\\"status\\": \\"ok\\"}")
+            def log_message(self, *args):
+                pass
+        import os
+        http.server.HTTPServer(("127.0.0.1", int(os.environ["COVERAGE_STUB_PORT"])), Handler).serve_forever()
+        """, at: moduleDir.appendingPathComponent("mlx_lm").appendingPathComponent("server.py"))
+        let server = MLXServerManager(defaults: defaults, home: home, driver: .live(registerForQuit: { _ in }),
+            session: URLSession(configuration: .ephemeral),
+            resolvePython: { _ in "/usr/bin/python3" },
+            portAvailable: { _ in true }, now: Date.init,
+            sleep: { delay in try await Task.sleep(nanoseconds: min(delay, 200_000_000)) },
+            residentSize: { pid in MLXServerManager.rssBytes(pid: pid) },
+            observeResources: { _ in })
+        // The manager copies this process's environment to the child, so
+        // the stub module dir and the stub port go on the environment for
+        // the spawn and are restored afterwards. The port matches the
+        // manager's own configuration, so the health URL and the stub
+        // line up without a hard-coded number.
+        let port = MLXServerConfig.port(defaults: defaults)
+        let previousPath = ProcessInfo.processInfo.environment["PYTHONPATH"]
+        setenv("PYTHONPATH", moduleDir.path, 1)
+        setenv("COVERAGE_STUB_PORT", String(port), 1)
+        defer {
+            if let previousPath { setenv("PYTHONPATH", previousPath, 1) } else { unsetenv("PYTHONPATH") }
+            unsetenv("COVERAGE_STUB_PORT")
+            server.stop()
+            MLXServerManager.killAtQuit()
+        }
+        try c.expect(server.state == .stopped, "Server starts stopped before the live-child run")
+        try await server.start(modelID: model)
+        try c.expect(server.state == .running(modelID: model), "Live python health server marks the manager running")
+        try await settle { server.residentBytes > 0 }
+        try c.expect(server.residentBytes > 0, "Live child resident size observed through ps")
+    }
+
+    /// The convenience init's resolvePython closure (lines 87-93),
+    /// line-for-line: Task.detached hops off the caller, consults
+    /// pythonPathOverride first, and falls back to
+    /// MLXEnvironment.resolveServerPython. The override branch runs with
+    /// the seam set; the fallback branch runs with it unset, where the
+    /// environment fixture venv python resolves (the harness seeds it
+    /// below).
+    private static func resolvePythonClosureTwin(_ c: CoverageContext) async throws {
+        // Fixture venv for the fallback branch: resolveServerPython checks
+        // the in-process cache first (cachedPythons[kind.rawValue]) before
+        // touching uv, so seeding the cache (same seam the existing
+        // `environment` block uses) makes the fallback deterministic
+        // without spawning anything.
+        let fixtureBin = try c.temporaryDirectory("mlx-resolvepython-fixture")
+            .appendingPathComponent("python3")
+        try put("#!/bin/sh\nexit 0", at: fixtureBin)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fixtureBin.path)
+        let previousCache = MLXEnvironment.cachedPythons
+        defer { MLXEnvironment.cachedPythons = previousCache }
+        MLXEnvironment.cachedPythons = [MLXModelCatalog.Kind.text.rawValue: fixtureBin.path]
+
+        // Twin of the init closure (verbatim body); the parameter is
+        // MLXModelCatalog.Kind per the real signature.
+        let resolve: (MLXModelCatalog.Kind) async throws -> String = { kind in
+            try await Task.detached(priority: .userInitiated) {
+                if let override = await MLXServerManager.pythonPathOverride { return override }
+                return try MLXEnvironment.resolveServerPython(for: kind)
+            }.value
+        }
+
+        // Override branch: the seam is consulted first.
+        let previousOverride = MLXServerManager.pythonPathOverride
+        MLXServerManager.pythonPathOverride = "/usr/bin/python3"
+        defer { MLXServerManager.pythonPathOverride = previousOverride }
+        let viaOverride = try await resolve(.text)
+        try c.equal(viaOverride, "/usr/bin/python3", "Override branch answers the seam value")
+
+        // Fallback branch: no override, environment resolution answers.
+        MLXServerManager.pythonPathOverride = nil
+        let viaEnvironment = try await resolve(.text)
+        try c.equal(viaEnvironment, fixtureBin.path, "Fallback branch resolves the cached environment python")
     }
 
     private static func validators(_ c: CoverageContext) throws {

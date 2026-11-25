@@ -11,7 +11,7 @@ jobs:
     # xcode-27 image: macOS 27 + Xcode 27 (Swift 6.4), matching the toolchain
     # this repo targets. The plugin helper is a no-op under full Xcode.
     runs-on: xcode-27
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -41,6 +41,11 @@ jobs:
       run: swift package resolve
 
     - name: Test full application and enforce coverage
+      # The scenarios battery grew past the 900s per-process default on
+      # runner hardware (CI runs roughly 2x slower than local), so the
+      # runner script's own override gets the CI budget explicitly.
+      env:
+        BUSINESSBAR_COVERAGE_TIMEOUT_SECONDS: '2400'
       run: bash scripts/test-coverage.sh --with-xctest --output-dir "$COVERAGE_OUTPUT"
 
     - name: Upload coverage evidence

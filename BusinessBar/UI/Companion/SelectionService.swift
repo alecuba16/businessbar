@@ -45,13 +45,82 @@ public final class SelectionService: @unchecked Sendable {
         }
     }
 
-    private let pasteboard = NSPasteboard.general
+    /// Test seam for the pasteboard the clipboard paths observe: the real
+    /// poster bodies still post synthetic keystrokes into the session, and
+    /// the user's actual frontmost app may copy its selection onto the real
+    /// pasteboard in response, so a fixture pasteboard keeps the
+    /// change-count poll deterministic. Nil = the real general pasteboard.
+    var pasteboardOverride: NSPasteboard?
+
+    private var pasteboard: NSPasteboard {
+        pasteboardOverride ?? NSPasteboard.general
+    }
 
     /// Test seam for the focused-element lookup, which the systemwide AX
     /// API only answers for the app holding keyboard focus. Harnesses
     /// point this at a fixture text view discovered through their own
     /// process's AX tree; production keeps the systemwide lookup.
     var focusedElementOverride: (() -> AXUIElement?)?
+
+    /// Frontmost-app facts the clipboard paths need; a value type because
+    /// NSRunningApplication cannot be instantiated outside the workspace.
+    struct FrontmostApplication {
+        let bundleIdentifier: String?
+        let processIdentifier: pid_t
+    }
+
+    /// Test seam for the frontmost-app lookup: the harness process is
+    /// .prohibited and never frontmost, so fixture apps drive the paths
+    /// that target it. Production keeps the real workspace lookup.
+    var frontmostApplicationOverride: (() -> FrontmostApplication?)?
+
+    /// Test seams for the keystroke posters: real CGEvent posts would type
+    /// Cmd+C/Cmd+V into the user's actual frontmost app. Nil = real post.
+    var copyPosterOverride: (() -> Bool)?
+    var menuCopyTriggerOverride: (() -> Bool)?
+    var pastePosterOverride: (() -> Bool)?
+
+    /// Test seams over the raw AX C calls; nil = the real call. Harnesses
+    /// script failures the fixture's AppKit element cannot produce
+    /// (Chromium-style selectedText rejection, phantom no-op writes).
+    static var axCopyAttribute: ((AXUIElement, String, UnsafeMutablePointer<CFTypeRef?>?) -> AXError)?
+    static var axSetAttribute: ((AXUIElement, String, CFTypeRef?) -> AXError)?
+    static var axPerformAction: ((AXUIElement, String) -> AXError)?
+
+    /// Static mirror of the instance frontmost seam for the static copy
+    /// paths (menu walk); same nil = workspace lookup contract.
+    static var frontmostApplicationOverride: (() -> FrontmostApplication?)?
+
+    static func copyAttr(
+        _ element: AXUIElement, _ attr: CFString, _ value: UnsafeMutablePointer<CFTypeRef?>?
+    ) -> AXError {
+        if let axCopyAttribute { return axCopyAttribute(element, attr as String, value) }
+        guard let value else { return .failure }
+        return AXUIElementCopyAttributeValue(element, attr, value)
+    }
+
+    static func setAttr(_ element: AXUIElement, _ attr: CFString, _ value: CFTypeRef?) -> AXError {
+        if let axSetAttribute { return axSetAttribute(element, attr as String, value) }
+        return AXUIElementSetAttributeValue(element, attr, value ?? kCFNull)
+    }
+
+    static func pressAction(_ element: AXUIElement, _ action: CFString) -> AXError {
+        if let axPerformAction { return axPerformAction(element, action as String) }
+        return AXUIElementPerformAction(element, action)
+    }
+
+    static func currentFrontmostApplication() -> FrontmostApplication? {
+        if let frontmostApplicationOverride { return frontmostApplicationOverride() }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        return FrontmostApplication(
+            bundleIdentifier: app.bundleIdentifier, processIdentifier: app.processIdentifier
+        )
+    }
+
+    private func currentFrontmostApplication() -> FrontmostApplication? {
+        if let frontmostApplicationOverride { return frontmostApplicationOverride() }
+        return Self.currentFrontmostApplication()
+    }
 
     // MARK: - Capture
 
@@ -91,19 +160,19 @@ public final class SelectionService: @unchecked Sendable {
 
         // Secure fields never expose content. Return "" (not nil) so the
         // clipboard fallback does not fire Cmd+C behind a password box.
-        if Self.elementIsSecure(element) { return "" }
+        if elementIsSecure(element) { return "" }
 
         var walkUp: CFTypeRef? = element
         var hops = 0
         while let current = walkUp, hops < 5 {
             var candidate: CFTypeRef?
-            if AXUIElementCopyAttributeValue(
+            if Self.copyAttr(
                 current as! AXUIElement, kAXSelectedTextAttribute as CFString, &candidate
             ) == .success, let text = candidate as? String {
                 return text
             }
             var parent: CFTypeRef?
-            if AXUIElementCopyAttributeValue(
+            if Self.copyAttr(
                 current as! AXUIElement, kAXParentAttribute as CFString, &parent
             ) == .success {
                 walkUp = parent
@@ -118,7 +187,7 @@ public final class SelectionService: @unchecked Sendable {
     private static func focusedElement() -> AXUIElement? {
         let systemElement = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        guard Self.copyAttr(
             systemElement, kAXFocusedUIElementAttribute as CFString, &focused
         ) == .success, focused != nil else { return nil }
         return unsafeBitCast(focused, to: AXUIElement.self)
@@ -132,9 +201,18 @@ public final class SelectionService: @unchecked Sendable {
         return Self.focusedElement()
     }
 
+    /// Test seam for the secure-field probe; AppKit exposes no fixture
+    /// element reporting AXSecureTextField over AX. Nil = real probe.
+    var secureElementOverride: ((AXUIElement) -> Bool)?
+
+    private func elementIsSecure(_ element: AXUIElement) -> Bool {
+        if let secureElementOverride { return secureElementOverride(element) }
+        return Self.elementIsSecure(element)
+    }
+
     private static func elementIsSecure(_ element: AXUIElement) -> Bool {
         var role: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        guard Self.copyAttr(
             element, kAXRoleAttribute as CFString, &role
         ) == .success, let roleString = role as? String else { return false }
         return roleString == "AXSecureTextField"
@@ -147,16 +225,16 @@ public final class SelectionService: @unchecked Sendable {
     /// transient marker tells clipboard managers to ignore the copy.
     private func captureViaClipboard() async -> String? {
         await MainActor.run { [self] in
-            guard let frontApp = NSWorkspace.shared.frontmostApplication,
+            guard let frontApp = currentFrontmostApplication(),
                   frontApp.bundleIdentifier != Bundle.main.bundleIdentifier else { return nil }
 
-            Self.wakeChromiumIfNeeded(bundleIdentifier: frontApp.bundleIdentifier)
+            Self.wakeChromiumIfNeeded(app: frontApp)
 
             let snapshot = snapshotPasteboard()
             let before = pasteboard.changeCount
             // Synthetic Cmd+C first; apps that swallow synthetic key events
             // (Terminal, some editors) get the menu-action Copy as fallback.
-            let posted = Self.simulateCopy() || Self.triggerMenuCopyAction()
+            let posted = postCopy() || triggerMenuCopy()
             guard posted else { return nil }
 
             let deadline = Date().addingTimeInterval(0.8)
@@ -171,6 +249,21 @@ public final class SelectionService: @unchecked Sendable {
             restore(from: snapshot)
             return nil
         }
+    }
+
+    private func postCopy() -> Bool {
+        if let copyPosterOverride { return copyPosterOverride() }
+        return Self.simulateCopy()
+    }
+
+    private func triggerMenuCopy() -> Bool {
+        if let menuCopyTriggerOverride { return menuCopyTriggerOverride() }
+        return Self.triggerMenuCopyAction()
+    }
+
+    private func postPaste() -> Bool {
+        if let pastePosterOverride { return pastePosterOverride() }
+        return Self.simulatePaste()
     }
 
     private func readPasteboardString() -> String? {
@@ -302,7 +395,7 @@ public final class SelectionService: @unchecked Sendable {
 
     private func replaceSelectionViaAX(_ newText: String) -> Bool {
         guard let element = currentFocusedElement() else { return false }
-        if Self.elementIsSecure(element) { return false }
+        if elementIsSecure(element) { return false }
 
         if let role = Self.role(of: element) {
             AppLogger.info("replaceSelection: focused element role=\(role)", category: "Companion")
@@ -319,13 +412,13 @@ public final class SelectionService: @unchecked Sendable {
         while let current = walkUp, hops < 5 {
             let candidate = unsafeBitCast(current, to: AXUIElement.self)
             let before = Self.value(of: candidate)
-            if AXUIElementSetAttributeValue(
+            if Self.setAttr(
                 candidate, kAXSelectedTextAttribute as CFString, newText as CFTypeRef
             ) == .success, Self.value(of: candidate) != before {
                 return true
             }
             var parent: CFTypeRef?
-            if AXUIElementCopyAttributeValue(
+            if Self.copyAttr(
                 candidate, kAXParentAttribute as CFString, &parent
             ) == .success {
                 walkUp = parent
@@ -353,7 +446,7 @@ public final class SelectionService: @unchecked Sendable {
         guard range.location + range.length <= nsOld.length else { return false }
         let newValue = nsOld.replacingCharacters(in: range, with: newText)
 
-        guard AXUIElementSetAttributeValue(
+        guard Self.setAttr(
             element, kAXValueAttribute as CFString, newValue as CFTypeRef
         ) == .success else { return false }
 
@@ -363,7 +456,7 @@ public final class SelectionService: @unchecked Sendable {
 
     private static func role(of element: AXUIElement) -> String? {
         var roleRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        guard Self.copyAttr(
             element, kAXRoleAttribute as CFString, &roleRef
         ) == .success else { return nil }
         return roleRef as? String
@@ -371,7 +464,7 @@ public final class SelectionService: @unchecked Sendable {
 
     private static func value(of element: AXUIElement) -> String? {
         var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        guard Self.copyAttr(
             element, kAXValueAttribute as CFString, &valueRef
         ) == .success else { return nil }
         return valueRef as? String
@@ -381,14 +474,14 @@ public final class SelectionService: @unchecked Sendable {
     /// clipboard, write the new text, post Cmd+V, then restore. The restore
     /// waits past one runloop tick so the target app has read the pasteboard.
     private func replaceViaPaste(_ newText: String) -> Bool {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+        guard let frontApp = currentFrontmostApplication(),
               frontApp.bundleIdentifier != Bundle.main.bundleIdentifier
         else { return false }
 
         let snapshot = snapshotPasteboard()
         pasteboard.clearContents()
         pasteboard.setString(newText, forType: .string)
-        guard Self.simulatePaste() else {
+        guard postPaste() else {
             restore(from: snapshot)
             return false
         }
@@ -462,7 +555,7 @@ public final class SelectionService: @unchecked Sendable {
     /// write restores the original range before falling through.
     private func insertAfterSelectionViaAX(_ newText: String) -> Bool {
         guard let element = currentFocusedElement() else { return false }
-        if Self.elementIsSecure(element) { return false }
+        if elementIsSecure(element) { return false }
 
         var walkUp: CFTypeRef? = element
         var hops = 0
@@ -473,10 +566,10 @@ public final class SelectionService: @unchecked Sendable {
                 // Collapse to the end of the selection, then insert there.
                 var caret = CFRange(location: range.location + range.length, length: 0)
                 if let axValue = AXValueCreate(.cfRange, &caret),
-                    AXUIElementSetAttributeValue(
+                    Self.setAttr(
                         candidate, kAXSelectedTextRangeAttribute as CFString, axValue
                     ) == .success,
-                    AXUIElementSetAttributeValue(
+                    Self.setAttr(
                         candidate, kAXSelectedTextAttribute as CFString, newText as CFTypeRef
                     ) == .success,
                     Self.value(of: candidate) != before {
@@ -486,7 +579,7 @@ public final class SelectionService: @unchecked Sendable {
                 Self.selectRange(range, in: candidate)
             }
             var parent: CFTypeRef?
-            if AXUIElementCopyAttributeValue(
+            if Self.copyAttr(
                 candidate, kAXParentAttribute as CFString, &parent
             ) == .success {
                 walkUp = parent
@@ -515,7 +608,7 @@ public final class SelectionService: @unchecked Sendable {
         let insertAt = NSRange(location: range.location + range.length, length: 0)
         let newValue = nsOld.replacingCharacters(in: insertAt, with: newText)
 
-        guard AXUIElementSetAttributeValue(
+        guard Self.setAttr(
             element, kAXValueAttribute as CFString, newValue as CFTypeRef
         ) == .success else { return false }
 
@@ -532,7 +625,7 @@ public final class SelectionService: @unchecked Sendable {
 
     private static func selectedTextRange(of element: AXUIElement) -> NSRange? {
         var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        guard Self.copyAttr(
             element, kAXSelectedTextRangeAttribute as CFString, &rangeRef
         ) == .success, let rangeRef else { return nil }
         let axValue = unsafeBitCast(rangeRef, to: AXValue.self)
@@ -544,7 +637,7 @@ public final class SelectionService: @unchecked Sendable {
     private static func selectRange(_ range: NSRange, in element: AXUIElement) {
         var cfRange = CFRange(location: range.location, length: range.length)
         if let axValue = AXValueCreate(.cfRange, &cfRange) {
-            AXUIElementSetAttributeValue(
+            Self.setAttr(
                 element, kAXSelectedTextRangeAttribute as CFString, axValue
             )
         }
@@ -569,38 +662,38 @@ public final class SelectionService: @unchecked Sendable {
     /// their menu, so this walks the AX menu bar and presses Copy in place of
     /// a synthetic Cmd+C.
     private static func triggerMenuCopyAction() -> Bool {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+        guard let app = currentFrontmostApplication() else { return false }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         var menus: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        guard Self.copyAttr(
             appElement, kAXMenuBarAttribute as CFString, &menus
         ) == .success, let menuBar = menus else { return false }
         guard let menuBarElement = menuBar as? [AXUIElement] else { return false }
 
         for menu in menuBarElement {
             var title: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(
+            guard Self.copyAttr(
                 menu, kAXTitleAttribute as CFString, &title
             ) == .success, (title as? String)?.lowercased() == "edit" else { continue }
 
             var children: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(
+            guard Self.copyAttr(
                 menu, kAXChildrenAttribute as CFString, &children
             ) == .success, let items = children as? [AXUIElement] else { continue }
 
             for item in items {
                 var itemTitle: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(
+                guard Self.copyAttr(
                     item, kAXTitleAttribute as CFString, &itemTitle
                 ) == .success,
                       let name = itemTitle as? String,
                       name.lowercased() == "copy"
                 else { continue }
                 var enabled: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(
+                guard Self.copyAttr(
                     item, kAXEnabledAttribute as CFString, &enabled
                 ) == .success, (enabled as? Bool) == true else { return false }
-                AXUIElementPerformAction(item, kAXPressAction as CFString)
+                Self.pressAction(item, kAXPressAction as CFString)
                 return true
             }
         }
@@ -609,13 +702,12 @@ public final class SelectionService: @unchecked Sendable {
 
     /// Electron apps ignore AX text queries until this attribute is set
     /// once; Chromium-based browsers and Slack both need the nudge.
-    private static func wakeChromiumIfNeeded(bundleIdentifier: String?) {
-        guard let id = bundleIdentifier,
-              id.contains("chromium") || id == "com.google.Chrome" || id.contains("slack"),
-              let app = NSWorkspace.shared.frontmostApplication
+    private static func wakeChromiumIfNeeded(app: FrontmostApplication) {
+        guard let id = app.bundleIdentifier,
+              id.contains("chromium") || id == "com.google.Chrome" || id.contains("slack")
         else { return }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetAttributeValue(
+        Self.setAttr(
             appElement, "AXEnhancedUserInterface" as CFString, true as CFTypeRef
         )
     }

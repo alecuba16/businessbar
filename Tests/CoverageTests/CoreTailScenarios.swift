@@ -16,6 +16,7 @@ enum CoreTailScenarios {
             ("MLX port probe", mlxPortProbe),
             ("MLX quit kill", mlxQuitKill),
             ("MLX server manager tails", mlxServerManagerTails),
+            ("MLX thermal guard", mlxThermalGuard),
             ("ACP stdio transport", acpStdioTransport),
             ("ACP concurrent spawn", acpConcurrentSpawn),
             ("search tails", searchTails)
@@ -152,6 +153,84 @@ enum CoreTailScenarios {
         MLXServerManager.killAtQuit()
         MLXServerManager.killAtQuit()
         try c.expect(MLXServerManager.shared.state == .stopped, "killAtQuit leaves the stopped state")
+    }
+
+    /// The thermal resource guard installed by the shared manager's
+    /// convenience init: a serious thermal transition while the server is
+    /// starting and idle stops it through the observer's Task path. The
+    /// manager never reaches .running (the fake driver's child is a bare
+    /// Process no port answers), and the guard only fires while state is
+    /// .starting or .running, so the stop lands from the startup window.
+    /// The notification is process-local: no real thermal state changes.
+    private static func mlxThermalGuard(_ c: CoverageContext) async throws {
+        final class ThermalChild {
+            var running = true
+            var terminations = 0
+            var child: Process?
+            var driver: MLXProcessDriver {
+                MLXProcessDriver(run: { process in
+                    self.child = process
+                    self.running = true
+                }, isRunning: { _ in self.running }, terminate: { _ in
+                    self.terminations += 1
+                    self.running = false
+                }, forceKill: { _ in self.running = false }, identifier: { _ in 123_456 },
+                   registerForQuit: { _ in }, terminationStatus: { _ in 1 })
+            }
+        }
+        // The sleep closure runs concurrently with the outer poll, so the
+        // arm flag lives behind a reference. Load can shift which sleep call
+        // observes the arm, and the flip must not fire before the outer
+        // poll has seen .starting, so the trigger is the observed state,
+        // not a specific delay value.
+        final class ThermalTrigger {
+            var armed = false
+            var fired = false
+        }
+        let trigger = ThermalTrigger()
+        let defaults = try c.defaults("mlx-thermal")
+        let home = try c.temporaryDirectory("mlx-thermal-home").path
+        let model = MLXModelCatalog.entries[0].id
+        let child = ThermalChild()
+        var thermalNow = ProcessInfo.ThermalState.nominal
+        var started = false
+        let manager = MLXServerManager(defaults: defaults, home: home, driver: child.driver,
+            session: URLSession(configuration: .ephemeral),
+            resolvePython: { _ in "/usr/bin/true" }, portAvailable: { _ in true },
+            now: { Date(timeIntervalSince1970: 2_000) },
+            sleep: { delay in
+                // Startup poll: flip the thermal state on the first sleep
+                // call after the outer poll has observed .starting, then
+                // keep the loop polling while the guard task runs on the
+                // main actor.
+                if trigger.armed && !trigger.fired {
+                    trigger.fired = true
+                    thermalNow = .serious
+                    NotificationCenter.default.post(name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }
+                try await Task.sleep(nanoseconds: min(delay, 50_000_000))
+            },
+            residentSize: { _ in 0 },
+            observeResources: { manager in manager.installResourceGuardsForCoverage(thermalState: { thermalNow }) })
+        defer { manager.stop() }
+        let directory = MLXModelCatalog.cacheDirectory(modelID: model, home: home).appendingPathComponent("snapshots/revision")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for name in MLXModelCatalog.requiredFiles {
+            try Data("{}".utf8).write(to: directory.appendingPathComponent(name))
+        }
+        let starting = Task { try await manager.start(modelID: model) }
+        for _ in 0..<800 where !started {
+            if manager.state == .starting { started = true; trigger.armed = true; break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try c.expect(manager.state == .starting, "Fake driver keeps the manager in the starting window")
+        for _ in 0..<800 {
+            if child.terminations > 0 { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try c.expect(child.terminations > 0, "Serious thermal state during startup stops the server child")
+        _ = try? await starting.value
     }
 
     /// The stdio transport against /bin/cat: start, one echoed line,

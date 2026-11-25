@@ -9,7 +9,9 @@ enum CoreCoverageScenarios {
             ("MLX", CoreMLXScenarios.run),
             ("badges/NoSleep", CoreSystemScenarios.run),
             ("meeting/utilities", CoreMeetingUtilitiesScenarios.run),
-            ("tail/mapping", CoreTailScenarios.run)
+            ("tail/mapping", CoreTailScenarios.run),
+            ("long-tail", CoreLongTailScenarios.run),
+            ("wave6-core", CoreWave6Scenarios.run)
         ]
         var failures: [String] = []
         for (name, scenario) in suites where focused == nil || focused == name {

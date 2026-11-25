@@ -59,7 +59,7 @@ final class PreferencesWindowController: NSWindowController {
 
 struct PreferencesView: View {
     struct TabContent {
-        var general: () -> GeneralTab = { GeneralTab() }
+        var general: (GoogleAuth) -> GeneralTab = { GeneralTab(googleAuth: $0) }
         var calendars: (MeetingManager, GoogleAuth) -> CalendarsTab = { CalendarsTab(meetingManager: $0, googleAuth: $1) }
         var noSleep: () -> NoSleepTab = { NoSleepTab() }
         var companion: () -> CompanionTab = { CompanionTab() }
@@ -112,7 +112,7 @@ struct PreferencesView: View {
                 .frame(minWidth: 180)
             } detail: {
                 switch selectedTab {
-                case .general:     tabContent.general()
+                case .general:     tabContent.general(googleAuth)
                 case .calendars:   tabContent.calendars(meetingManager, googleAuth)
                 case .badges:      BadgesTab(badgeManager: badgeManager)
                 case .noSleep:     tabContent.noSleep()

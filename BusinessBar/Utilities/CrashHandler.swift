@@ -41,6 +41,10 @@ final class CrashHandler {
     /// Previous signal handlers — stored so we could chain to them if needed.
     private var previousSignalHandlers: [Int32: (@convention(c) (Int32) -> Void)?] = [:]
 
+    /// Test seam for the signal-handler body: a real handler must write and
+    /// _exit, which would kill the harness. Nil = real write-and-exit path.
+    static var signalReportOverride: ((Int32) -> Void)?
+
     // MARK: - Public API
 
     /// Installs the crash handlers. Call **once**, early in
@@ -71,19 +75,26 @@ final class CrashHandler {
 
     private func installExceptionHandlers() {
         NSSetUncaughtExceptionHandler { exception in
-            // This callback is *not* async-signal-safe — Foundation is OK.
-            let stack = Thread.callStackSymbols.joined(separator: "\n")
-            let report = """
-            ===== Uncaught Exception =====
-            Name:   \(exception.name.rawValue)
-            Reason: \(exception.reason ?? "none")
-            User Info: \(exception.userInfo ?? [:])
-            Call Stack:
-            \(stack)
-            =============================
-            """
-            CrashHandler.shared.writeCrashReport(report)
+            CrashHandler.handleUncaughtException(exception)
         }
+    }
+
+    /// Body of the uncaught-exception callback, split out so the coverage
+    /// harness can exercise the report path without raising a real
+    /// NSException through the top level.
+    static func handleUncaughtException(_ exception: NSException) {
+        // This callback is *not* async-signal-safe — Foundation is OK.
+        let stack = Thread.callStackSymbols.joined(separator: "\n")
+        let report = """
+        ===== Uncaught Exception =====
+        Name:   \(exception.name.rawValue)
+        Reason: \(exception.reason ?? "none")
+        User Info: \(exception.userInfo ?? [:])
+        Call Stack:
+        \(stack)
+        =============================
+        """
+        CrashHandler.shared.writeCrashReport(report)
     }
 
     // MARK: - Signal Handlers
@@ -95,18 +106,28 @@ final class CrashHandler {
             let old = signal(sig) { sig in
                 // ⚠️ Async-signal-safe zone — NO malloc, NO Foundation, NO Swift
                 // string interpolation. Only write() and _exit() are safe.
-                CrashHandler.writeSignalReportASyncSafe(sig)
-                // Terminate so macOS generates its own DiagnosticReports entry.
-                _exit(128 + sig)
+                CrashHandler.handleSignal(sig)
             }
             previousSignalHandlers[sig] = old
         }
     }
 
+    static func handleSignal(_ sig: Int32) {
+        if let signalReportOverride {
+            signalReportOverride(sig)
+            return
+        }
+        writeSignalReportASyncSafe(sig)
+        // Terminate so macOS generates its own DiagnosticReports entry.
+        _exit(128 + sig)
+    }
+
     // MARK: - Writing Crash Reports
 
     /// Writes a full crash report (NSException path). Safe to use Foundation.
-    private func writeCrashReport(_ content: String) {
+    /// Internal so the coverage harness exercises the write directly; the
+    /// real uncaught-exception path would keep propagating and crash the host.
+    func writeCrashReport(_ content: String) {
         // Ensure directory exists.
         try? FileManager.default.createDirectory(
             at: logDirectoryURL,
@@ -127,10 +148,12 @@ final class CrashHandler {
     }
 
     /// Async-signal-safe crash report writer for signal handlers.
+    /// Internal so the harness exercises the real write() path directly;
+    /// the live path ends in _exit, which would kill the harness.
     /// Uses only `write()` syscall — no heap allocation, no Foundation.
     /// Swift variadic C interop (snprintf) is unavailable, so we build
     /// strings by copying CChar arrays manually.
-    private static func writeSignalReportASyncSafe(_ sig: Int32) {
+    static func writeSignalReportASyncSafe(_ sig: Int32) {
         // Resolve HOME — getenv is async-signal-safe.
         guard let home = getenv("HOME") else { return }
         let homeStr = String(cString: home)
@@ -186,6 +209,11 @@ extension CrashHandler {
 
     /// Presents a modal alert if a crash report from a previous session was
     /// found. Call from `applicationDidFinishLaunching` after `install()`.
+
+    /// Test seam for the modal loop: a real runModal would park the harness
+    /// behind a window nobody can see or dismiss. Nil = real modal.
+    static var runModalOverride: ((NSAlert) -> NSApplication.ModalResponse)?
+
     @MainActor
     func showCrashAlertIfNeeded() {
         guard let crashURL = pendingCrashReport() else { return }
@@ -206,7 +234,7 @@ extension CrashHandler {
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Reveal in Finder")
 
-        let response = alert.runModal()
+        let response = CrashHandler.runModalOverride?(alert) ?? alert.runModal()
         if response == .alertSecondButtonReturn {
             NSWorkspace.shared.selectFile(crashURL.path, inFileViewerRootedAtPath: "")
         }

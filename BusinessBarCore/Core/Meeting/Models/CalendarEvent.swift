@@ -14,6 +14,15 @@ public struct CalendarEvent: Identifiable, Hashable {
     public let attendees: [String]
     public let isAllDay: Bool
     public let status: EventStatus
+    /// For a recurring event, the original start of this occurrence
+    /// (EventKit) or the instance's original start (Google, falling back to
+    /// startDate when the instance omits it). Occurrences of one series
+    /// share `id`, so this field is what tells two of them apart.
+    public let occurrenceDate: Date?
+    /// True when the event belongs to a recurring series, even when this
+    /// instance is an edited exception. Exceptions keep the series id (both
+    /// backends), so identity alone cannot spot them.
+    public let isRecurring: Bool
     /// The signed-in user's own RSVP state on this event. `.pending` means
     /// an invitation is waiting for an answer. Events without attendee
     /// records (personal calendars) report `.accepted`, not `.pending`, so
@@ -64,7 +73,9 @@ public struct CalendarEvent: Identifiable, Hashable {
         attendees: [String],
         isAllDay: Bool = false,
         status: EventStatus = .confirmed,
-        myRSVPStatus: RSVPStatus = .accepted
+        myRSVPStatus: RSVPStatus = .accepted,
+        occurrenceDate: Date? = nil,
+        isRecurring: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -79,6 +90,8 @@ public struct CalendarEvent: Identifiable, Hashable {
         self.isAllDay = isAllDay
         self.status = status
         self.myRSVPStatus = myRSVPStatus
+        self.occurrenceDate = occurrenceDate
+        self.isRecurring = isRecurring
     }
 
     public init(from ekEvent: EKEvent, calendar: MBCalendar) {
@@ -95,6 +108,8 @@ public struct CalendarEvent: Identifiable, Hashable {
         self.organizer = ekEvent.organizer?.name
         self.attendees = ekEvent.attendees?.compactMap { $0.name } ?? []
         self.isAllDay = ekEvent.isAllDay
+        self.occurrenceDate = ekEvent.occurrenceDate
+        self.isRecurring = ekEvent.hasRecurrenceRules || ekEvent.isDetached
 
         switch ekEvent.status {
         case .none:

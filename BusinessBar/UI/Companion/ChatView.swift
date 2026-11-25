@@ -1296,12 +1296,6 @@ private struct StreamingDots: View {
 
 // MARK: - MarkdownContent
 
-private func openChatLink(_ url: URL) {
-    guard let scheme = url.scheme?.lowercased(),
-          MarkdownTextLinkPolicy.schemes.contains(scheme) else { return }
-    NSWorkspace.shared.open(url)
-}
-
 /// Renders one message: assistant messages parse as markdown into a
 /// single NSTextView document (selection spans every paragraph), user
 /// prompts stay verbatim in a plain SwiftUI Text.

@@ -36,6 +36,24 @@ enum AppCompanionViewScenarios {
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification, object: panel))
         try context.expect(commands.approvalRequest == nil, "Panel closing leaves no approval")
 
+        // The shared singleton runs the live-effects convenience chain:
+        // the default ChatStore (fixture home on disk), the default
+        // CommandToolController, and the .live Effects value. Its panel is
+        // never opened, so the live show/activate/shutdown closures stay
+        // stored, not executed.
+        try context.expect(CompanionPanelController.shared === CompanionPanelController.shared, "Shared panel controller resolves")
+
+        // togglePanel with no live panel opens the owned panel again;
+        // the second toggle closes it through the visible branch.
+        controller.open(clientProvider: { nil })
+        try context.expect(presented.count == 3, "Open after close reuses the owned panel")
+        // The panel stays ordered out (the injected show never orders it
+        // front), so togglePanel reads it hidden and opens instead of
+        // closing: same close-then-open shape as the earlier reopen.
+        controller.togglePanel(clientProvider: { nil })
+        try context.equal(presented.count, 4, "Hidden-panel toggle reopens the panel")
+        controller.close()
+
         // The hint renders only with zero selectable providers, but an
         // empty store re-seeds a Default provider from legacy constants.
         // One saved enabled: false provider pins the store non-empty while
@@ -88,6 +106,57 @@ enum AppCompanionViewScenarios {
         overlay.onClose()
         try context.equal([replacements, copies, closes], [2, 2, 2], "Overlay native controls and callbacks route actions")
         try attachments(context)
+        try await backgroundCommandDrain(context)
+    }
+
+    /// The stream pipeline's finished-background-command drain: a send
+    /// with pending results folds each completed command into the
+    /// conversation as a synthetic user message before the model request.
+    /// A fixture client yields one delta then finishes, so the drain lands
+    /// ahead of the assistant reply deterministically.
+    private static func backgroundCommandDrain(_ context: CoverageContext) async throws {
+        final class DrainClient: LLMClient, @unchecked Sendable {
+            let name = "Fixture Drain"
+            func stream(
+                messages: [ChatMessage],
+                onToolCall: ((String, String) async -> String)?,
+                reasoningEffortOverride: String?
+            ) async -> AsyncThrowingStream<CompanionEvent, Error> {
+                AsyncThrowingStream { continuation in
+                    continuation.yield(.delta("fixture reply"))
+                    continuation.yield(.finished(fullText: "fixture reply"))
+                    continuation.finish()
+                }
+            }
+        }
+        let disk = ChatSessionStore(directoryURL: try context.temporaryDirectory("panel-drain"))
+        let store = ChatStore(sessionStore: disk)
+        let commands = CommandToolController(presentation: .init(chooseWorkspace: { nil }, notify: { _ in }))
+        var pending: (() async -> [BackgroundCommandRegistry.CompletedResult])? = nil
+        pending = {
+            let results = [BackgroundCommandRegistry.CompletedResult(
+                handle: UUID(), sessionID: nil, command: "echo fixture",
+                exitCode: 3, endedReason: "fixture exit", output: "drain output"
+            )]
+            return results
+        }
+        store.send(
+            "fixture prompt",
+            client: DrainClient(),
+            pendingBackgroundResults: pending
+        )
+        for _ in 0..<400 {
+            if store.messages.contains(where: { $0.role == .assistant && $0.content == "fixture reply" }) { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(
+            store.messages.contains { $0.role == .user && $0.content.contains("[background command finished] echo fixture exited with code 3") },
+            "Finished background command folds into the conversation before the reply"
+        )
+        try context.expect(
+            store.messages.contains { $0.role == .assistant && $0.content == "fixture reply" },
+            "Reply lands after the background-command drain"
+        )
     }
 
     private static func render<V: View>(_ view: V, size: NSSize, context: CoverageContext, label: String, expected: [String] = [], press: [String] = [], contentDrivenHeight: Bool = false, contentDrivenWidth: Bool = false) async throws {
