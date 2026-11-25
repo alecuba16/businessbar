@@ -22,6 +22,22 @@ struct GeneralTab: View {
     /// TCC grants, or Library artifacts. Defaults keep the production
     /// behavior exactly.
     private let resetEffects: ResetEffects
+    /// Shared Google sign-in object from PreferencesWindow: sign-out only,
+    /// no second instance is ever constructed here.
+    @ObservedObject private var googleAuth: GoogleAuth
+    /// Test seam: runs tccutil for a named TCC service off the main
+    /// thread. The coverage fixture injects a recorded no-op; the default
+    /// keeps the production tccutil run exactly.
+    private let resetNamedTCCPermission: (_ service: String, _ completion: @escaping (Int) -> Void) -> Void
+    /// Test seam: throws variant of the tccutil runner for the
+    /// Accessibility reset, kept injectable so the coverage fixture can
+    /// drive both the success and the throwing completion without
+    /// touching real TCC state.
+    private let resetAccessibilityTCCPermission: () throws -> Int32
+    /// Seamed Google configuration check: the coverage binary runs
+    /// without bundled credentials, so the real check is false there and
+    /// the sign-out button renders only when a signed-in session exists.
+    private let googleConfigured: () -> Bool
 
     // MARK: - Logging configuration
     @AppStorage(Constants.Defaults.loggingEnabled)     private var loggingEnabled     = true
@@ -29,17 +45,55 @@ struct GeneralTab: View {
     @AppStorage(Constants.Defaults.logLevelRaw)         private var logLevelRaw        = Constants.DefaultValues.logLevelRaw
 
     @State private var showingResetConfirmation = false
+    @State private var isResettingCalendarPermission = false
+    @State private var isResettingNotificationPermission = false
+    @State private var isResettingAccessibilityPermission = false
+    @State private var showingCalendarResetConfirmation = false
+    @State private var showingNotificationResetConfirmation = false
+    @State private var showingAccessibilityResetConfirmation = false
+
+    @AppStorage(Constants.Defaults.featureCalendar) private var featureCalendarEnabled = true
+    @AppStorage(Constants.Defaults.featureBadges) private var featureBadgesEnabled = true
+    @AppStorage(Constants.Defaults.featureNotifications) private var meetingNotificationsEnabled = true
 
     init(
+        googleAuth: GoogleAuth,
         launchAtLoginStatus: @escaping () -> Bool = { LaunchAtLoginHelper.isEnabled },
         setLaunchAtLogin: @escaping (Bool) -> Void = { LaunchAtLoginHelper.setEnabled($0) },
         isRuntimeBundlePresent: Bool = RuntimeBundle.isPresent,
-        resetEffects: ResetEffects = ResetEffects()
+        resetEffects: ResetEffects = ResetEffects(),
+        resetNamedTCCPermission: @escaping (_ service: String, _ completion: @escaping (Int) -> Void) -> Void = { service, completion in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", service, Constants.bundleIdentifier]
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try task.run()
+                    task.waitUntilExit()
+                    completion(Int(task.terminationStatus))
+                } catch {
+                    completion(-1)
+                }
+            }
+        },
+        resetAccessibilityTCCPermission: @escaping () throws -> Int32 = {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", "Accessibility", Constants.bundleIdentifier]
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus
+        },
+        googleConfigured: @escaping () -> Bool = { GoogleAuthConfig.isConfigured }
     ) {
+        self.googleAuth = googleAuth
         self.launchAtLoginStatus = launchAtLoginStatus
         self.setLaunchAtLogin = setLaunchAtLogin
         self.isRuntimeBundlePresent = isRuntimeBundlePresent
         self.resetEffects = resetEffects
+        self.resetNamedTCCPermission = resetNamedTCCPermission
+        self.resetAccessibilityTCCPermission = resetAccessibilityTCCPermission
+        self.googleConfigured = googleConfigured
         _launchAtLogin = State(initialValue: launchAtLoginStatus())
     }
 
@@ -129,6 +183,38 @@ struct GeneralTab: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            // MARK: Permission Resets
+            Section {
+                Button(isResettingCalendarPermission ? "Resetting…" : "Reset Calendar Permission") {
+                    showingCalendarResetConfirmation = true
+                }
+                .disabled(isResettingCalendarPermission)
+
+                Button(isResettingNotificationPermission ? "Resetting…" : "Reset Notification Permission") {
+                    showingNotificationResetConfirmation = true
+                }
+                .disabled(isResettingNotificationPermission)
+
+                Button(isResettingAccessibilityPermission ? "Resetting…" : "Reset Accessibility Permission") {
+                    showingAccessibilityResetConfirmation = true
+                }
+                .disabled(isResettingAccessibilityPermission)
+
+                if googleConfigured() && googleAuth.isAuthenticated {
+                    Button("Reset Google Permission (Sign Out)") {
+                        googleAuth.signOut()
+                        featureCalendarEnabled = false
+                        notifyPreferencesChanged()
+                    }
+                }
+            } header: {
+                Text("Permission Resets")
+            } footer: {
+                Text("Revokes BusinessBar's macOS permissions (Calendar, Notifications, Accessibility) so you can grant them fresh. The Google sign-out applies only while a Google session is signed in.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
             // MARK: Version
             Section {
                 HStack {
@@ -153,6 +239,42 @@ struct GeneralTab: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This clears all settings, saved data, Google sign-in state, and attempts to reset granted permissions before relaunching BusinessBar.")
+        }
+        .confirmationDialog(
+            "Reset Calendar Permission?",
+            isPresented: $showingCalendarResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Permission", role: .destructive) {
+                resetCalendarPermission()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Revokes BusinessBar's calendar access. You will need to grant it again to see meetings.")
+        }
+        .confirmationDialog(
+            "Reset Notification Permission?",
+            isPresented: $showingNotificationResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Permission", role: .destructive) {
+                resetNotificationPermission()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Revokes BusinessBar's notification permission. Reminders will stop until granted again.")
+        }
+        .confirmationDialog(
+            "Reset Accessibility Permission?",
+            isPresented: $showingAccessibilityResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Permission", role: .destructive) {
+                resetAccessibilityPermission()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Revokes BusinessBar's accessibility access. Dock badge monitoring stops until granted again.")
         }
     }
 
@@ -246,6 +368,67 @@ struct GeneralTab: View {
         AppLogger.info("App state reset to fresh install — relaunching", category: "General")
 
         resetEffects.restartApp()
+    }
+
+    // MARK: - Permission resets
+
+    private func notifyPreferencesChanged() {
+        NotificationCenter.default.post(name: .businessBarPreferencesDidChange, object: nil)
+    }
+
+    private func resetCalendarPermission() {
+        guard !isResettingCalendarPermission else { return }
+        isResettingCalendarPermission = true
+        featureCalendarEnabled = false
+        notifyPreferencesChanged()
+
+        AppLogger.info("Resetting Calendar permission via tccutil", category: "Permissions")
+
+        resetNamedTCCPermission("Calendar") { [notifyPreferencesChanged] exitCode in
+            Task { @MainActor in
+                AppLogger.info("Calendar permission reset completed (exit code: \(exitCode))", category: "Permissions")
+                isResettingCalendarPermission = false
+                notifyPreferencesChanged()
+            }
+        }
+    }
+
+    private func resetNotificationPermission() {
+        guard !isResettingNotificationPermission else { return }
+        isResettingNotificationPermission = true
+        meetingNotificationsEnabled = false
+        notifyPreferencesChanged()
+
+        AppLogger.info("Resetting Notifications permission via tccutil", category: "Permissions")
+
+        resetNamedTCCPermission("Notifications") { [notifyPreferencesChanged] exitCode in
+            Task { @MainActor in
+                AppLogger.info("Notifications permission reset completed (exit code: \(exitCode))", category: "Permissions")
+                isResettingNotificationPermission = false
+                notifyPreferencesChanged()
+            }
+        }
+    }
+
+    private func resetAccessibilityPermission() {
+        guard !isResettingAccessibilityPermission else { return }
+        isResettingAccessibilityPermission = true
+        featureBadgesEnabled = false
+        notifyPreferencesChanged()
+
+        AppLogger.info("Resetting Accessibility permission via tccutil", category: "Permissions")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let code = try resetAccessibilityTCCPermission()
+                AppLogger.info("Accessibility permission reset completed (exit code: \(code))", category: "Permissions")
+            } catch {
+                AppLogger.error("Failed to run tccutil for Accessibility reset: \(error.localizedDescription)", category: "Permissions")
+            }
+            DispatchQueue.main.async {
+                isResettingAccessibilityPermission = false
+            }
+        }
     }
 
     private func cleanupUserLibraryArtifacts() {

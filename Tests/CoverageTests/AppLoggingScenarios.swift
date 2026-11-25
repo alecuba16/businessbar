@@ -10,7 +10,87 @@ enum AppLoggingScenarios {
         var failures: [String] = []
         do { try levels(context) } catch { failures.append("levels: \(error)") }
         do { try fileLog(context) } catch { failures.append("fileLog: \(error)") }
+        do { try staticsAndRotation(context) } catch { failures.append("staticsAndRotation: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
+    }
+
+    /// Static convenience entries and the rotation branches the happy-path
+    /// fileLog scenario cannot reach: debug/info need a zero threshold to
+    /// pass shouldLog, and the rotation shift needs a pre-existing destination
+    /// file to take the remove-before-move branch.
+    static func staticsAndRotation(_ context: CoverageContext) throws {
+        removeFixtureLogs()
+        UserDefaults.standard.set(true, forKey: "loggingEnabled")
+        UserDefaults.standard.set(true, forKey: "fileLoggingEnabled")
+        UserDefaults.standard.set(LogLevel.debug.rawValue, forKey: "logLevelRaw")
+        defer {
+            UserDefaults.standard.removeObject(forKey: "loggingEnabled")
+            UserDefaults.standard.removeObject(forKey: "fileLoggingEnabled")
+            UserDefaults.standard.removeObject(forKey: "logLevelRaw")
+        }
+
+        // Static debug/info bodies: zero threshold lets them through to osLog.
+        AppLogger.debug("static debug entry", category: "coverage")
+        AppLogger.info("static info entry", category: "coverage")
+        AppLogger.warning("static warning entry", category: "coverage")
+        AppLogger.error("static error entry", category: "coverage")
+        try context.equal(AppLogger.shared.logFileURLs().count, 0, "Debug and info never persist to files")
+
+        // osLog switch arms for debug/info run above; the level marker check
+        // keeps the assertions meaningful without depending on OSLog output.
+        try context.equal(LogLevel.debug.description, "DEBUG", "Debug level description stable")
+        try context.equal(LogLevel.info.description, "INFO", "Info level description stable")
+
+        // Rotation with a pre-existing destination: seed files so _0 is
+        // oversized and _1 already exists, forcing the remove-before-move
+        // branch in rotateLogFiles (_0 shifts onto the existing _1).
+        let logsDirectory = FileManager.default
+            .urls(for: .libraryDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("BusinessBar", isDirectory: true)
+        FileManager.default.createFile(
+            atPath: logsDirectory.appendingPathComponent("BusinessBar_0.log").path,
+            contents: Data(count: 1_048_576 + 1)
+        )
+        FileManager.default.createFile(
+            atPath: logsDirectory.appendingPathComponent("BusinessBar_1.log").path,
+            contents: Data("stale one".utf8)
+        )
+        AppLogger.shared.fatal("rotation over existing", category: "coverage")
+        let rotated = AppLogger.shared.logFileURLs()
+        try context.equal(rotated.count, 3, "Rotation shifts both seed files and opens a fresh current slot")
+        let oneContents = (try? String(contentsOf: logsDirectory.appendingPathComponent("BusinessBar_1.log"), encoding: .utf8)) ?? ""
+        try context.expect(oneContents.contains("rotation over existing") == false, "Oversized seed moved out of the current slot")
+        let twoExists = FileManager.default.fileExists(atPath: logsDirectory.appendingPathComponent("BusinessBar_2.log").path)
+        try context.expect(twoExists, "Seed _1 shifted to _2 during rotation")
+        if let current = rotated.first {
+            let contents = (try? String(contentsOf: current, encoding: .utf8)) ?? ""
+            try context.expect(contents.contains("rotation over existing"), "New entry starts the fresh current file")
+        }
+
+        // Handle-open failure: a directory at the current log path makes
+        // FileHandle(forWritingTo:) throw, exercising the fputs error path.
+        removeFixtureLogs()
+        let directoryAsLog = logsDirectory.appendingPathComponent("BusinessBar_0.log")
+        try? FileManager.default.createDirectory(at: directoryAsLog, withIntermediateDirectories: true)
+        AppLogger.shared.fatal("open failure path", category: "coverage")
+        try context.expect(FileManager.default.fileExists(atPath: directoryAsLog.path), "Blocked path kept its directory shape")
+        try? FileManager.default.removeItem(at: directoryAsLog)
+
+        // Create failure: remove the log directory itself so the write's
+        // parent path is missing and createFile returns false (fputs branch).
+        // The instance fatal writes synchronously on the caller's turn, so
+        // the failure lands before the directory is restored.
+        try? FileManager.default.removeItem(at: logsDirectory)
+        AppLogger.shared.fatal("create failure path", category: "coverage")
+        try context.expect(!FileManager.default.fileExists(atPath: logsDirectory.appendingPathComponent("BusinessBar_0.log").path), "Missing parent keeps the current file absent")
+        // Restore the directory so later suites keep their logging surface.
+        try? FileManager.default.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
+        // Static fatal entry: its MainActor Task persists after this turn;
+        // the call itself covers the static body's guard and osLog path.
+        AppLogger.fatal("static fatal entry", category: "coverage")
+        removeFixtureLogs()
+        try context.equal(AppLogger.shared.logFileURLs().count, 0, "Cleaned after handle-failure fixture")
     }
 
     static func levels(_ context: CoverageContext) throws {

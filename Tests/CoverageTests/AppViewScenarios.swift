@@ -539,7 +539,7 @@ enum AppViewScenarios {
         let event = makeEvent(id: "meeting", title: "Menu meeting", location: nil, url: URL(string: "https://meet.google.com/aaa-bbbb-ccc"))
         let plain = makeEvent(id: "plain", title: "No meeting URL", location: nil, url: nil)
         func build(events: [CalendarEvent], loading: Bool = false, showEvents: Bool = true, showNoSleep: Bool = true, companion: Bool = true, pending: [CalendarEvent] = [], recent: [CalendarEvent] = [], changed: [CalendarEvent] = [], onAnswer: (() -> Void)? = nil) -> NSMenu {
-            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onMarkRecentAsRead: { read.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, recentEvents: recent, timeChangedEvents: changed, defaults: defaults)
+            MenuBuilder.build(events: events, nextEvent: events.first, isLoading: loading, noSleepManager: manager, onJoinMeeting: { joined.append($0.id) }, onDismissEvent: { dismissed.append($0) }, onMarkRecentAsRead: { read.append($0) }, onToggleNoSleep: { callbacks.append("toggle") }, onActivateNoSleep: { durations.append($0) }, onDeactivateNoSleep: { callbacks.append("deactivate") }, onShowPreferences: { callbacks.append("preferences") }, onQuit: { callbacks.append("quit") }, onToggleCompanionChat: { callbacks.append("chat") }, showEvents: showEvents, showNoSleep: showNoSleep, showCompanion: companion, pendingRSVPEvents: pending, onAnswerInvites: onAnswer ?? { callbacks.append("answer") }, recentEvents: recent, timeChangedEvents: changed, onMarkAllRecentAsRead: { callbacks.append("read-all") }, onDismissAllRecentEvents: { callbacks.append("dismiss-recent-all") }, onMarkTimeChangedAsRead: { _ in callbacks.append("ack-change") }, onMarkAllTimeChangedAsRead: { callbacks.append("ack-change-all") }, onDismissAllTimeChanged: { callbacks.append("dismiss-change-all") }, defaults: defaults)
         }
         let menu = build(events: [event, plain])
         try context.expect(menu.items.contains(where: { $0.title.contains("Menu meeting") && $0.submenu != nil }), "Meeting gets join submenu")
@@ -597,6 +597,20 @@ enum AppViewScenarios {
         }
         handler.markRecentAsRead(plainRead)
         try context.equal(read, [event.id, plain.id], "Unlinked recent row still markable as read")
+        // Bulk rows close the section: Mark all as read and Dismiss all
+        // route through their own actions, and no payload means no fire.
+        let invalidPayload = NSMenuItem(title: "Invalid payload", action: nil, keyEquivalent: "")
+        guard let recentReadAll = recentMenu.item(withTitle: "Mark all as read"),
+              let recentDismissAll = recentMenu.item(withTitle: "Dismiss all") else {
+            throw CoverageContext.Failure(description: "Recent region missing bulk rows")
+        }
+        let readAllBefore = callbacks.count
+        handler.markAllRecentAsRead(recentReadAll)
+        handler.dismissAllRecentEvents(recentDismissAll)
+        try context.equal(callbacks[readAllBefore...], ["read-all", "dismiss-recent-all"], "Bulk recent rows fire their own callbacks")
+        handler.markAllRecentAsRead(invalidPayload)
+        handler.dismissAllRecentEvents(invalidPayload)
+        try context.equal(callbacks.count, readAllBefore + 2, "Wrong payload never runs a bulk recent action")
         let tomorrowStart = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date()))!.addingTimeInterval(3600)
         let tomorrow = CalendarEvent(id: "tomorrow", title: "Tomorrow fixture", startDate: tomorrowStart, endDate: tomorrowStart.addingTimeInterval(1800), location: nil, notes: nil, url: nil, calendar: event.calendar, organizer: nil, attendees: [])
         defaults.set(true, forKey: Constants.Defaults.showTomorrowEvents)
@@ -662,15 +676,29 @@ enum AppViewScenarios {
         try context.expect(!changedHeader.isEnabled, "Changed-times header is a disabled label")
         try context.expect(changedJoinRow.representedObject is MenuAction && changedPlainRow.representedObject is MenuAction, "Each changed row carries a payload")
         try context.expect(changedJoinRow.submenu != nil, "Changed row with a link keeps its join submenu")
-        try context.expect(changedPlainRow.submenu == nil, "Changed row without a link has no submenu")
-        if let changedJoin = changedJoinRow.submenu?.item(withTitle: "Join Meeting"), let changedDismiss = changedJoinRow.submenu?.item(withTitle: "Dismiss") {
+        try context.expect(changedPlainRow.submenu != nil, "Changed row without a link keeps the acknowledge submenu")
+        if let changedJoin = changedJoinRow.submenu?.item(withTitle: "Join Meeting"), let changedDismiss = changedJoinRow.submenu?.item(withTitle: "Dismiss"), let changedAck = changedJoinRow.submenu?.item(withTitle: "Acknowledge change") {
             handler.joinMeeting(changedJoin)
             try context.equal(joined.last, event.id, "Changed row join routes through the join callback")
             handler.dismissEvent(changedDismiss)
             try context.equal(dismissed.last, event.id, "Changed row dismiss routes through the dismiss callback")
+            let ackBefore = callbacks.count
+            handler.markRecentAsRead(changedAck)
+            try context.equal(callbacks[ackBefore...], ["ack-change"], "Acknowledge routes through the acknowledge callback")
         } else {
-            throw CoverageContext.Failure(description: "Changed row missing join/dismiss submenu")
+            throw CoverageContext.Failure(description: "Changed row missing join/acknowledge/dismiss submenu")
         }
+        guard let changedAckAll = changedMenu.item(withTitle: "Acknowledge all"),
+              let changedDismissAll = changedMenu.item(withTitle: "Dismiss all") else {
+            throw CoverageContext.Failure(description: "Changed times section missing bulk rows")
+        }
+        let changedBulkBefore = callbacks.count
+        handler.markAllTimeChangedAsRead(changedAckAll)
+        handler.dismissAllTimeChanged(changedDismissAll)
+        try context.equal(callbacks[changedBulkBefore...], ["ack-change-all", "dismiss-change-all"], "Bulk changed rows fire their own callbacks")
+        handler.markAllTimeChangedAsRead(invalidPayload)
+        handler.dismissAllTimeChanged(invalidPayload)
+        try context.equal(callbacks.count, changedBulkBefore + 2, "Wrong payload never runs a bulk changed action")
         handler.eventClicked(changedJoinRow)
         try context.equal(joined.count > 3, true, "Changed row click also joins")
         try context.expect(build(events: []).item(withTitle: "Changed times") == nil, "No changed events means no section")
@@ -703,7 +731,7 @@ enum AppViewScenarios {
         var launchEnabled = false
         var launchChanges: [Bool] = []
         let content = PreferencesView.TabContent(
-            general: { GeneralTab(launchAtLoginStatus: { launchEnabled }, setLaunchAtLogin: { launchEnabled = $0; launchChanges.append($0) }) },
+            general: { GeneralTab(googleAuth: $0, launchAtLoginStatus: { launchEnabled }, setLaunchAtLogin: { launchEnabled = $0; launchChanges.append($0) }) },
             calendars: { CalendarsTab(meetingManager: $0, googleAuth: $1, defaults: defaults, calendarAuthorization: { .denied }, notificationAuthorization: { $0(false) }) },
             noSleep: { NoSleepTab(accessibilityStatus: { false }) },
             companion: { CompanionTab(templateStore: TemplateStore(defaults: defaults), accessibilityStatus: { false }) }
@@ -718,7 +746,7 @@ enum AppViewScenarios {
             try host.render(context)
             try context.expect(host.text.contains(detailLabels[tab]!), "Initial preferences tab renders its own detail: \(tab.rawValue)")
         }
-        let general = Hosted(content.general().environmentObject(updater).defaultAppStorage(defaults), size: NSSize(width: 800, height: 1100))
+        let general = Hosted(content.general(auth).environmentObject(updater).defaultAppStorage(defaults), size: NSSize(width: 800, height: 1100))
         defer { general.close() }
         await settle()
         try general.press("Launch at login", context)
@@ -810,13 +838,6 @@ enum AppViewScenarios {
         let defaults = try context.defaults("badges-deep")
         var requests = 0
         var settingsOpens = 0
-        // Mutable from the off-main tccutil seam, so the counter and throw
-        // flag live on a reference type instead of captured vars.
-        final class ResetRuns {
-            var count = 0
-            var shouldThrow = false
-        }
-        let resetRuns = ResetRuns()
         let monitor = BadgeBoundary()
         let badges = BadgeManager(
             defaults: defaults, notifications: NotificationCenter(), trust: { true }, monitor: monitor,
@@ -863,65 +884,50 @@ enum AppViewScenarios {
             requestPermission: { requests += 1 },
             openSettings: { _ in settingsOpens += 1 }
         )
+
+        // Feature toggle without permission: enabling the badge feature on
+        // an untrusted manager flips the flag back off and routes straight
+        // to the request + settings boundaries (BadgesTab lines 47-50).
+        let toggleHost = Hosted(BadgesTab(badgeManager: denied).defaultAppStorage(deniedDefaults), size: NSSize(width: 800, height: 1100))
+        defer { toggleHost.close() }
+        await settle()
+        try toggleHost.render(context)
+        deniedDefaults.set(false, forKey: Constants.Defaults.featureBadges)
+        await settle()
+        deniedDefaults.set(true, forKey: Constants.Defaults.featureBadges)
+        await settle()
+        for _ in 0..<200 where deniedDefaults.bool(forKey: Constants.Defaults.featureBadges) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(!deniedDefaults.bool(forKey: Constants.Defaults.featureBadges), "Unpermitted feature toggle flips itself back off")
+        try context.equal(requests, 1, "Feature toggle on untrusted manager requests permission")
+        try context.equal(settingsOpens, 1, "Feature toggle on untrusted manager opens settings")
+        deniedDefaults.set(false, forKey: Constants.Defaults.featureBadges)
+        await settle()
+
+        // Monitored row with an icon path: the List renders lazily, so the
+        // icon branch (line 107) is asserted through the manager storing
+        // the path, the same boundary the picker flow writes.
+        let iconApp = MonitoredApp(bundleIdentifier: "coverage.badges.icon", displayName: "Icon App", badgeCount: 0, iconPath: "/System/Library/CoreServices/Dock.app/Resources/Dock.icns")
+        denied.addApp(iconApp)
+        try context.expect(denied.monitoredApps.first { $0.bundleIdentifier == "coverage.badges.icon" }?.iconPath != nil, "Icon path stored on the monitored row")
+
         let deniedHost = Hosted(BadgesTab(badgeManager: denied).defaultAppStorage(deniedDefaults), size: NSSize(width: 800, height: 1100))
         defer { deniedHost.close() }
         await settle()
         try deniedHost.render(context)
         try deniedHost.press("Open System Settings", context)
         try deniedHost.press("Request Permission", context)
-        try context.equal(requests, 1, "Request Permission uses the injected request boundary")
-        try context.equal(settingsOpens, 1, "Open System Settings uses the injected settings boundary")
-        // Reset Permission routes through the injected tccutil seam: the
-        // press disables the feature flag, runs the reset off-main, and
-        // restores the button once the reset answers.
-        let resetHost = Hosted(BadgesTab(
-            badgeManager: denied,
-            resetTCCPermission: {
-                resetRuns.count += 1
-                if resetRuns.shouldThrow {
-                    throw CoverageContext.Failure(description: "tccutil fixture failure")
-                }
-                return 0
-            }
-        ).defaultAppStorage(deniedDefaults), size: NSSize(width: 800, height: 1100))
-        defer { resetHost.close() }
-        await settle()
-        try resetHost.render(context)
-        deniedDefaults.set(true, forKey: Constants.Defaults.featureBadges)
-        await settle()
-        try resetHost.press("Reset Permission", context)
-        for _ in 0..<200 where resetRuns.count == 0 {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        try context.equal(resetRuns.count, 1, "Reset Permission runs the injected tccutil once")
-        try context.expect(deniedDefaults.bool(forKey: Constants.Defaults.featureBadges) == false, "Reset disables the badge feature flag")
+        try context.equal(requests, 2, "Request Permission uses the injected request boundary")
+        try context.equal(settingsOpens, 2, "Open System Settings uses the injected settings boundary")
+        // The Accessibility reset button moved to the General tab
+        // (Permission Resets section); its seam coverage moved to
+        // AppPreferencesUI2Scenarios.generalTabPermissionResets.
+        try context.expect(deniedHost.control("Reset Permission") == nil, "Badges tab no longer renders the Accessibility reset")
 
-        // The reset completes asynchronously; wait for the button to
-        // re-enable before pressing again so the throw path is not
-        // swallowed by the reentry guard.
-        for _ in 0..<200 where resetHost.control("Reset Permission")?.isAccessibilityEnabled() != true {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-
-        // Throwing seam: the failure log path still restores the button.
-        resetRuns.shouldThrow = true
-        try resetHost.press("Reset Permission", context)
-        for _ in 0..<200 where resetRuns.count == 1 {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        try context.equal(resetRuns.count, 2, "Throwing reset still runs the seam")
-        for _ in 0..<200 where resetHost.control("Reset Permission")?.isAccessibilityEnabled() != true {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        try context.expect(resetHost.text.contains("Reset Permission"), "Reset button restores after the failure")
-
-        // Feature toggle wiring: disabled panes dim and stays observable.
         deniedDefaults.set(false, forKey: Constants.Defaults.featureBadges)
         await settle()
         try context.expect(deniedHost.control("Add App")?.isAccessibilityEnabled() == false, "Disabled badge feature disables Add App")
-        // The granted manager started monitoring once at init (feature on,
-        // trusted); the denied manager polls permission instead, and the
-        // feature-off flip only stops, so the whole scenario lands on one.
         try context.equal(monitor.starts, 1, "Only the granted manager starts monitoring")
     }
 

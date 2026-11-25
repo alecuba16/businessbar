@@ -32,6 +32,18 @@ public actor BackgroundCommandRegistry {
         public let exitCode: Int32
         public let endedReason: String
         public let output: String
+
+        /// Coverage seam: the memberwise initializer stays internal, so the
+        /// coverage fixtures (which drain synthetic completed commands)
+        /// construct results directly instead of spawning real processes.
+        public init(handle: UUID, sessionID: UUID?, command: String, exitCode: Int32, endedReason: String, output: String) {
+            self.handle = handle
+            self.sessionID = sessionID
+            self.command = command
+            self.exitCode = exitCode
+            self.endedReason = endedReason
+            self.output = output
+        }
     }
 
     public struct HandleInfo: Sendable {

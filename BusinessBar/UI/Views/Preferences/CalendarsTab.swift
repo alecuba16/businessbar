@@ -14,7 +14,6 @@ struct CalendarsTab: View {
     private let calendarAuthorization: () -> EKAuthorizationStatus
     private let notificationAuthorization: (@escaping (Bool) -> Void) -> Void
     private let openSettingsURL: (URL) -> Void
-    private let resetTCCPermission: (_ service: String, _ completion: @escaping (Int) -> Void) -> Void
     private let notificationCenterAuthorizationStatus: (@escaping (UNAuthorizationStatus) -> Void) -> Void
     private let notificationCenterRequestAuthorization: (@escaping (Bool) -> Void) -> Void
     /// Seamed Google credential configuration: the coverage binary runs
@@ -47,10 +46,6 @@ struct CalendarsTab: View {
     /// answer: requestNotificationAccess completes it once the status lands.
     @State private var pendingConfirmationAssign: ((Bool) -> Void)?
     @State private var isRequestingAccess = false
-    @State private var isResettingCalendarPermission = false
-    @State private var isResettingNotificationPermission = false
-    @State private var showingCalendarResetConfirmation = false
-    @State private var showingNotificationResetConfirmation = false
 
     @AppStorage(Constants.Defaults.featureCalendar) private var featureCalendarEnabled = true
     @AppStorage(Constants.Defaults.notificationMinutesBefore) private var notificationMinutes = Constants.DefaultValues.notificationMinutesBefore
@@ -90,20 +85,6 @@ struct CalendarsTab: View {
         openSettingsURL: @escaping (URL) -> Void = { url in
             NSWorkspace.shared.open(url)
         },
-        resetTCCPermission: @escaping (_ service: String, _ completion: @escaping (Int) -> Void) -> Void = { service, completion in
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-            task.arguments = ["reset", service, Constants.bundleIdentifier]
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    try task.run()
-                    task.waitUntilExit()
-                    completion(Int(task.terminationStatus))
-                } catch {
-                    completion(-1)
-                }
-            }
-        },
         notificationCenterAuthorizationStatus: @escaping (@escaping (UNAuthorizationStatus) -> Void) -> Void = { receive in
             UNUserNotificationCenter.current().getNotificationSettings { settings in
                 receive(settings.authorizationStatus)
@@ -123,7 +104,6 @@ struct CalendarsTab: View {
         self.calendarAuthorization = calendarAuthorization
         self.notificationAuthorization = notificationAuthorization
         self.openSettingsURL = openSettingsURL
-        self.resetTCCPermission = resetTCCPermission
         self.notificationCenterAuthorizationStatus = notificationCenterAuthorizationStatus
         self.notificationCenterRequestAuthorization = notificationCenterRequestAuthorization
         self.isRuntimeBundlePresent = isRuntimeBundlePresent
@@ -183,12 +163,6 @@ struct CalendarsTab: View {
                             openCalendarPrivacySettings()
                         }
                         .buttonStyle(.bordered)
-
-                        Button(isResettingCalendarPermission ? "Resetting…" : "Reset Permission") {
-                            showingCalendarResetConfirmation = true
-                        }
-                        .disabled(isResettingCalendarPermission)
-                        .buttonStyle(.bordered)
                     }
                 } else {
                     if !googleConfigured() {
@@ -203,12 +177,6 @@ struct CalendarsTab: View {
                             Text("Google Calendar connected")
                                 .foregroundColor(.secondary)
                         }
-                        Button("Reset Permission (Sign Out)") {
-                            googleAuth.signOut()
-                            featureCalendarEnabled = false
-                            notifyPreferencesChanged()
-                        }
-                        .buttonStyle(.bordered)
                     } else {
                         Button("Grant Permission (Sign in with Google)") {
                             Task { await signInWithGoogle() }
@@ -234,12 +202,6 @@ struct CalendarsTab: View {
                     Button("Open Notification Settings") {
                         openNotificationSettings()
                     }
-                    .buttonStyle(.bordered)
-
-                    Button(isResettingNotificationPermission ? "Resetting…" : "Reset Permission") {
-                        showingNotificationResetConfirmation = true
-                    }
-                    .disabled(isResettingNotificationPermission)
                     .buttonStyle(.bordered)
                 }
             }
@@ -275,7 +237,7 @@ struct CalendarsTab: View {
 
             Section("Meeting Display") {
                 Toggle("Show tomorrow's events", isOn: $showTomorrowEvents)
-                Toggle("Show declined events (dimmed)", isOn: $showDeclinedEvents)
+                Toggle("Show declined events", isOn: $showDeclinedEvents)
 
                 Picker("Fetch events up to:", selection: Binding(
                     get: { fetchHorizonDays },
@@ -371,30 +333,6 @@ struct CalendarsTab: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .padding()
-        .confirmationDialog(
-            "Reset Calendar Permission?",
-            isPresented: $showingCalendarResetConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Reset Permission", role: .destructive) {
-                resetCalendarPermission()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Revokes BusinessBar's calendar access. You will need to grant it again to see meetings.")
-        }
-        .confirmationDialog(
-            "Reset Notification Permission?",
-            isPresented: $showingNotificationResetConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Reset Permission", role: .destructive) {
-                resetNotificationPermission()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Revokes BusinessBar's notification permission. Reminders will stop until granted again.")
-        }
         .onAppear(perform: refreshAuthStatus)
         .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
             refreshAuthStatus()
@@ -623,42 +561,6 @@ struct CalendarsTab: View {
         } catch {
             AppLogger.error("Google sign-in failed: \(error.localizedDescription)", category: "Permissions")
             featureCalendarEnabled = false
-        }
-    }
-
-    private func resetCalendarPermission() {
-        guard !isResettingCalendarPermission else { return }
-        isResettingCalendarPermission = true
-        featureCalendarEnabled = false
-        notifyPreferencesChanged()
-
-        AppLogger.info("Resetting Calendar permission via tccutil", category: "Permissions")
-
-        resetTCCPermission("Calendar") { [notifyPreferencesChanged] exitCode in
-            Task { @MainActor in
-                AppLogger.info("Calendar permission reset completed (exit code: \(exitCode))", category: "Permissions")
-                isResettingCalendarPermission = false
-                refreshAuthStatus()
-                notifyPreferencesChanged()
-            }
-        }
-    }
-
-    private func resetNotificationPermission() {
-        guard !isResettingNotificationPermission else { return }
-        isResettingNotificationPermission = true
-        meetingNotificationsEnabled = false
-        notifyPreferencesChanged()
-
-        AppLogger.info("Resetting Notifications permission via tccutil", category: "Permissions")
-
-        resetTCCPermission("Notifications") { [notifyPreferencesChanged] exitCode in
-            Task { @MainActor in
-                AppLogger.info("Notifications permission reset completed (exit code: \(exitCode))", category: "Permissions")
-                isResettingNotificationPermission = false
-                refreshAuthStatus()
-                notifyPreferencesChanged()
-            }
         }
     }
 

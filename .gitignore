@@ -49,3 +49,7 @@ BusinessBar/Resources/credentials.local.json
 # SwiftUI macro plugins stashed from Xcode (Apple binaries, do not commit)
 Vendor/SwiftMacroPlugins/
 Vendor/*.dylib
+
+# Python bytecode from scripts/ helpers
+__pycache__/
+*.pyc

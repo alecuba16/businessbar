@@ -21,6 +21,8 @@ enum AppUIMiscScenarios {
         do { try markdownTextView(context) } catch { failures.append("markdownTextView: \(error)") }
         do { try await permissionsStepDeep(context) } catch { failures.append("permissionsStepDeep: \(error)") }
         do { try await permissionsStepRequests(context) } catch { failures.append("permissionsStepRequests: \(error)") }
+        do { try await permissionsStepUnknownStatus(context) } catch { failures.append("permissionsStepUnknownStatus: \(error)") }
+        do { try await permissionsStepOnboardingGrant(context) } catch { failures.append("permissionsStepOnboardingGrant: \(error)") }
         do { try notificationManagerLiveGuard(context) } catch { failures.append("notificationManagerLiveGuard: \(error)") }
         do { try preferencesWindowController(context) } catch { failures.append("preferencesWindowController: \(error)") }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
@@ -224,6 +226,17 @@ enum AppUIMiscScenarios {
         try context.expect(MarkdownAttributedStringLoader.attributedString(for: "").length == 0, "Empty markdown renders empty")
         try context.expect(MarkdownAttributedStringLoader.attributedString(for: "   \n  \n").length >= 0, "Whitespace-only markdown renders without crashing")
 
+        // Thematic break as its own block: the main fixture's "---" sits
+        // inside an unterminated fence, so the standalone line here drives
+        // the break parse plus the separator rendering.
+        let breakFixture = "before\n\n---\n\nafter"
+        let breakRendered = MarkdownAttributedStringLoader.attributedString(for: breakFixture)
+        try context.expect(breakRendered.string.contains("―――"), "Standalone thematic break renders the separator")
+        try context.expect(breakRendered.string.contains("before") && breakRendered.string.contains("after"), "Thematic break keeps surrounding paragraphs")
+
+        // List marker without a following space keeps the raw line text.
+        try context.expect(MarkdownAttributedStringLoader.attributedString(for: "-nospace").string.contains("-nospace"), "Marker without space renders unstripped")
+
         // Hosting through the real representable applies the same pipeline
         // inside an owned NSView: the chat's own display path.
         let hosted = UI2MiscHosted(MarkdownTextHostingView(markdown: fixture), size: NSSize(width: 420, height: 600))
@@ -417,6 +430,47 @@ enum AppUIMiscScenarios {
         }
         try context.equal(accessibilityPrompts, 1, "Accessibility grant prompts through the seam")
         try context.expect(badgeUngrantedDefaults.bool(forKey: Constants.Defaults.featureBadges), "Granted accessibility enables the badges feature")
+    }
+
+    /// The @unknown default branch of the notification status switch: the
+    /// future-proofing case clears the granted state and the stored flag.
+    private static func permissionsStepUnknownStatus(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("permissions-notify-unknown")
+        defaults.set(true, forKey: Constants.Defaults.featureNotifications)
+        let unknownTab = UI2MiscHosted(PermissionsStep(
+            onBack: {},
+            onNext: {},
+            permissionStatus: { .init(calendar: true, notifications: false, accessibility: true) },
+            notificationCenterStatus: { receive in receive(UNAuthorizationStatus(rawValue: 99) ?? .notDetermined) },
+            isRuntimeBundlePresent: true
+        ).defaultAppStorage(defaults), size: NSSize(width: 750, height: 900))
+        defer { unknownTab.close() }
+        await miscSettle()
+        try unknownTab.press("Grant Permission", context)
+        for _ in 0..<100 {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try context.expect(!defaults.bool(forKey: Constants.Defaults.featureNotifications), "Unknown notification status clears the feature flag")
+    }
+
+    /// The production default seams of PermissionsStep: the default
+    /// notification status closure runs its UNUserNotificationCenter round
+    /// trip (the bare coverage binary answers notDetermined, so the request
+    /// path follows it), and a fresh step leaves the ungranted defaults
+    /// intact. The shipped default closures are the integration surface
+    /// between the view and UNUserNotificationCenter; only their contract is
+    /// asserted (they answer without trapping), not host-specific values.
+    private static func permissionsStepOnboardingGrant(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("permissions-onboarding-defaults")
+        var finished = 0
+        let step = UI2MiscHosted(PermissionsStep(
+            onBack: {},
+            onNext: { finished += 1 }
+        ).defaultAppStorage(defaults), size: NSSize(width: 750, height: 900))
+        defer { step.close() }
+        await miscSettle()
+        try context.expect(step.text.contains("Grant Permission"), "Default-status step still renders the grant rows")
+        try context.expect(finished == 0, "No navigation from the passive default step")
     }
 
     // MARK: - NotificationManager live guard

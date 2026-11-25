@@ -17,9 +17,9 @@ enum AppCrashAcpScenarios {
 
     static func crashHandler(_ context: CoverageContext) throws {
         // pendingCrashReport reads the standard defaults, which the isolated
-        // fixture home owns, and purges the flag exactly once. install() and
-        // showCrashAlertIfNeeded() stay uncalled: they replace real signal
-        // handlers and present a real modal alert.
+        // fixture home owns, and purges the flag exactly once. The install and
+        // alert paths run through the signal-report and modal seams; a real
+        // invocation would _exit the harness or park it behind a modal.
         let missingKey = "BusinessBar.lastCrashReportPath"
         UserDefaults.standard.removeObject(forKey: missingKey)
         try context.expect(CrashHandler.shared.pendingCrashReport() == nil, "No stored path yields no report")
@@ -40,6 +40,111 @@ enum AppCrashAcpScenarios {
         try context.expect(CrashHandler.shared.pendingCrashReport() == nil, "Missing report file yields no report")
         try context.expect(UserDefaults.standard.string(forKey: missingKey) == nil, "Missing-file path still purges the flag")
         try? FileManager.default.removeItem(at: report)
+
+        // --- Exception report body: build the report text and write it through
+        // the extracted handler, then verify the pending-report round trip.
+        let exception = NSException(
+            name: NSExceptionName(rawValue: "CoverageFixtureException"),
+            reason: "fixture reason",
+            userInfo: ["fixture": true]
+        )
+        CrashHandler.handleUncaughtException(exception)
+        let exceptionURL = CrashHandler.shared.pendingCrashReport()
+        try context.expect(exceptionURL != nil, "Exception report write records a pending crash")
+        let exceptionContent = try exceptionURL.map { try String(contentsOf: $0, encoding: .utf8) }
+        try context.expect(
+            exceptionContent?.contains("CoverageFixtureException") == true,
+            "Exception report carries the exception name"
+        )
+        try context.expect(
+            exceptionContent?.contains("fixture reason") == true,
+            "Exception report carries the reason"
+        )
+        try? FileManager.default.removeItem(at: exceptionURL!)
+
+        // --- Signal report writer: the async-signal-safe write() path runs
+        // directly; it must not _exit, which only the live handler does.
+        // The writer's mkdir is single-level, and the isolated home has no
+        // Library/Logs parent, so the test creates it first like a real
+        // user home always has.
+        let signalDirectory = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("BusinessBar", isDirectory: true)
+        try FileManager.default.createDirectory(at: signalDirectory, withIntermediateDirectories: true)
+        CrashHandler.writeSignalReportASyncSafe(SIGSEGV)
+        let signalURL = CrashHandler.shared.pendingCrashReport()
+        try context.expect(signalURL != nil, "Signal writer records a pending crash")
+        let signalContent = try signalURL.map { try String(contentsOf: $0, encoding: .utf8) }
+        try context.expect(
+            signalContent?.contains("Fatal signal") == true,
+            "Signal report carries the fatal-signal line"
+        )
+        try? FileManager.default.removeItem(at: signalURL!)
+
+        // --- Handler install: the override redirects the handler body so no
+        // process dies; both branches of handleSignal run (seam and default
+        // tail are separate calls, the default tail only through the writer
+        // above).
+        var handledSignals: [Int32] = []
+        CrashHandler.signalReportOverride = { handledSignals.append($0) }
+        CrashHandler.shared.install()
+        defer {
+            CrashHandler.signalReportOverride = nil
+        }
+        CrashHandler.handleSignal(SIGABRT)
+        CrashHandler.handleSignal(SIGTRAP)
+        try context.equal(handledSignals, [SIGABRT, SIGTRAP], "Signal seam intercepts handler bodies")
+
+        // OS-entered path: raise() delivers SIGABRT synchronously on this
+        // thread, so the closure body registered with signal() executes for
+        // real. The override keeps the process alive.
+        raise(SIGABRT)
+        try context.equal(handledSignals, [SIGABRT, SIGTRAP, SIGABRT], "OS-entered closure routes through the installed handler")
+        try context.expect(UserDefaults.standard.string(forKey: missingKey) == nil, "Seam interception leaves the crash flag unset")
+
+        // --- Registered exception handler: NSGetUncaughtExceptionHandler
+        // returns the closure install() registered; calling it directly runs
+        // the registration body without raising a top-level exception.
+        let handler = NSGetUncaughtExceptionHandler()
+        try context.expect(handler != nil, "install registers an uncaught-exception handler")
+        handler?(NSException(name: NSExceptionName(rawValue: "CoverageRegistered"), reason: "fixture", userInfo: nil))
+        let registeredURL = CrashHandler.shared.pendingCrashReport()
+        try context.expect(registeredURL != nil, "Registered handler wrote a pending report")
+        try? FileManager.default.removeItem(at: registeredURL!)
+
+        // --- Alert paths: the modal seam answers both buttons. Reveal in
+        // Finder with a fixture file is a no-op reveal, not a modal.
+        let alertDirectory = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("BusinessBar", isDirectory: true)
+            .appendingPathComponent("Logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: alertDirectory, withIntermediateDirectories: true)
+        let alertReport = alertDirectory.appendingPathComponent("crash_alert_fixture.log")
+        try "alert fixture".write(to: alertReport, atomically: true, encoding: .utf8)
+        UserDefaults.standard.set(alertReport.path, forKey: missingKey)
+        CrashHandler.runModalOverride = { _ in .alertFirstButtonReturn }
+        CrashHandler.shared.showCrashAlertIfNeeded()
+        try context.expect(UserDefaults.standard.string(forKey: missingKey) == nil, "First-button alert consumes the pending report")
+
+        UserDefaults.standard.set(alertReport.path, forKey: missingKey)
+        CrashHandler.runModalOverride = { _ in .alertSecondButtonReturn }
+        CrashHandler.shared.showCrashAlertIfNeeded()
+        try context.expect(UserDefaults.standard.string(forKey: missingKey) == nil, "Reveal-button alert also consumes the pending report")
+
+        CrashHandler.runModalOverride = nil
+        // No pending report left: the guard branch returns without any modal.
+        CrashHandler.shared.showCrashAlertIfNeeded()
+        try context.expect(UserDefaults.standard.string(forKey: missingKey) == nil, "No-report alert is a no-op")
+        try? FileManager.default.removeItem(at: alertReport)
+
+        // --- Report write failure: a plain file at the Logs path makes the
+        // directory create and the write both fail, exercising the error
+        // branch without a real disk fault.
+        let logsPath = directory.path
+        try? FileManager.default.removeItem(at: directory)
+        try Data("blocked".utf8).write(to: URL(fileURLWithPath: logsPath))
+        CrashHandler.shared.writeCrashReport("fixture failure report")
+        try context.expect(UserDefaults.standard.string(forKey: missingKey) == nil, "Failed write leaves the crash flag unset")
+        try? FileManager.default.removeItem(atPath: logsPath)
     }
 
     static func acpSession(_ context: CoverageContext) async throws {

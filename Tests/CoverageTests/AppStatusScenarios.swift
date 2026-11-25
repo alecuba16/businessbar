@@ -80,6 +80,19 @@ enum AppStatusScenarios {
         try c.expect(button.image?.tiffRepresentation != nil, "Timed cup and clock render offscreen")
         let timedIcon = button.image
         try c.expect(timedIcon != nil && timedIcon !== infiniteIcon, "Timed NoSleep has separate icon")
+        // Remaining-time description: scheduled duration takes the h/m branch,
+        // infinite activation takes the ∞ branch.
+        try c.equal(f.controller.noSleepTimeDescriptionForCoverage, "30m", "Scheduled NoSleep describes remaining minutes")
+        f.noSleep.activate(duration: 7200)
+        try c.equal(f.controller.noSleepTimeDescriptionForCoverage, "2h 0m", "Longer schedule describes hours and minutes")
+        f.noSleep.activate(duration: nil)
+        try c.equal(f.controller.noSleepTimeDescriptionForCoverage, "∞", "Infinite activation describes the infinity symbol")
+        f.noSleep.activate(duration: 1800)
+        // Missing-symbol fallback: SF Symbols ship with the OS so the
+        // production name always resolves; the coverage hook drives the
+        // branch with a nonexistent name and must fall back to the app icon.
+        let pendingFallback = f.controller.pendingRSVPIconFallbackForCoverage()
+        try c.expect(pendingFallback === f.controller.cachedAppIconForCoverage, "Missing pending symbol falls back to the branded icon")
         f.preferencesChanged()
         await settle()
         try c.expect(button.image === timedIcon, "Timed NoSleep icon is cached")

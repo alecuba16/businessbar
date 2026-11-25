@@ -36,6 +36,16 @@ enum AppRSVPScenarios {
         }
     }
 
+    /// Row titles of one menu region: everything after the named header
+    /// until the next separator. Section-scoped assertions keep rows with the
+    /// same "Title · time" shape in other regions from blurring the check.
+    private static func sectionRows(of menu: NSMenu, after header: String) -> [String] {
+        guard let headerIndex = menu.items.firstIndex(where: { $0.title == header }) else { return [] }
+        return menu.items[(headerIndex + 1)...]
+            .prefix { !$0.isSeparatorItem }
+            .map(\.title)
+    }
+
     /// Pending-event store recording every RSVP reply.
     private final class Store: EventStoreProtocol {
         var events: [CalendarEvent] = []
@@ -277,22 +287,25 @@ enum AppRSVPScenarios {
         await settle()
         try c.expect(button.attributedTitle.string.contains("2!"), "Two moved events carry the combined suffix")
 
-        // Idle badge: shift both windows into the past so no next event
-        // shows. The past windows differ from the last observation, so the
-        // changed count survives and the icon branch renders.
+        // Idle badge: the changed meetings leave the agenda window entirely.
+        // The moved meeting drifts into the past (a moved meeting that
+        // already ended asks nothing of the user, so it never flags), and the
+        // second stays inside the fetch horizon but beyond the agenda cut,
+        // where a fresh shift keeps the changed count above zero without a
+        // next meeting. The status item falls back to the icon layout.
         let pastMoving = CalendarEvent(
             id: shifted.id, title: shifted.title,
             startDate: now.addingTimeInterval(-7200), endDate: now.addingTimeInterval(-6600),
             location: shifted.location, notes: shifted.notes, url: shifted.meetingLink, calendar: calendar,
             organizer: shifted.organizer, attendees: shifted.attendees, myRSVPStatus: .accepted
         )
-        let pastSecond = CalendarEvent(
-            id: secondShifted.id, title: secondShifted.title,
-            startDate: now.addingTimeInterval(-5400), endDate: now.addingTimeInterval(-4800),
-            location: secondShifted.location, notes: secondShifted.notes, url: secondShifted.meetingLink, calendar: calendar,
-            organizer: secondShifted.organizer, attendees: secondShifted.attendees, myRSVPStatus: .accepted
+        let farSecond = CalendarEvent(
+            id: second.id, title: second.title,
+            startDate: now.addingTimeInterval(4 * 86400), endDate: now.addingTimeInterval(4 * 86400 + 3600),
+            location: second.location, notes: second.notes, url: second.meetingLink, calendar: calendar,
+            organizer: second.organizer, attendees: second.attendees, myRSVPStatus: .accepted
         )
-        store.events = [pastMoving, pastSecond]
+        store.events = [pastMoving, farSecond]
         await meetings.refreshEvents()
         await settle()
         try c.expect(button.imagePosition == .imageOnly, "Idle with changes shows the icon layout")
@@ -302,29 +315,24 @@ enum AppRSVPScenarios {
         // branch with a nonexistent name and must fall back to the app icon.
         let fallbackIcon = controller.timeChangedIconFallbackForCoverage()
         try c.expect(fallbackIcon === controller.cachedAppIconForCoverage, "Missing symbol falls back to the branded icon")
-
-        // The controller keeps a persistent menu on the backing; when the
-        // fixture backing has none yet, hand it one so menuWillOpen can
-        // populate it the same way AppKit does on a real click.
+        // The past move itself never flags: its row stays out of the menu
+        // while the far-horizon shift keeps its row in.
         if items[0].menu == nil { items[0].menu = NSMenu() }
         guard let menu = items[0].menu else { throw CoverageContext.Failure(description: "Status backing has no menu") }
         controller.menuWillOpen(menu)
+        let changedRows = Self.sectionRows(of: menu, after: "Changed times")
         try c.expect(menu.item(withTitle: "Changed times") != nil, "Changed times header appears in the menu")
-        try c.expect(menu.items.contains(where: { $0.title.hasPrefix("Moved meeting ·") }), "Changed row lists the moved event")
+        try c.expect(changedRows.contains { $0.hasPrefix("Second meeting ·") }, "Changed rows list the far shifted event")
+        try c.expect(!changedRows.contains { $0.hasPrefix("Moved meeting ·") }, "Past-ended move stays out of the changed section")
 
-        // Windows move back to upcoming: every seen event differs again,
-        // and neither was dismissed, so the text layout resumes with a
-        // "2!" suffix before the final stable fetch clears it.
-        store.events = [reshifted, secondShifted]
+        // A stable repeat of the same far window clears the changed count,
+        // and the status item keeps the icon layout with nothing left to say.
+        store.events = [pastMoving, farSecond]
         await meetings.refreshEvents()
         await settle()
-        try c.expect(button.attributedTitle.string.contains("2!"), "Moved-back windows count as changed again")
-
-        // Everything back to a stable window: suffix disappears.
-        store.events = [reshifted, secondShifted]
-        await meetings.refreshEvents()
-        await settle()
-        try c.expect(!button.attributedTitle.string.contains("!"), "Stable windows clear the suffix")
+        try c.expect(button.imagePosition == .imageOnly, "Idle without changes keeps the icon layout")
+        controller.menuWillOpen(menu)
+        try c.expect(menu.item(withTitle: "Changed times") == nil, "Stable far window drops the changed section")
     }
 
     /// Iterate panel: present with two invites, answer both, verify the

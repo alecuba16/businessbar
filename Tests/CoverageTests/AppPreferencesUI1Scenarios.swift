@@ -199,6 +199,7 @@ enum AppPreferencesUI1Scenarios {
         await timed("companionTab") { try await companionTab(context) }
         await timed("companionTabSheets") { try await companionTabSheets(context) }
         await timed("generalTab") { try await generalTab(context) }
+        await timed("generalTabDefaults") { try await generalTabDefaults(context) }
         await timed("generalTabReset") { try await generalTabReset(context) }
         await timed("launchAtLoginHelper") { try launchAtLoginHelper(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
@@ -377,9 +378,10 @@ enum AppPreferencesUI1Scenarios {
         let defaults = try context.defaults("general-tab")
         let boundary = UpdaterBackendBoundary()
         let updater = UpdaterViewModel(backend: boundary)
+        let auth = GoogleAuth(dependencies: .init(loadCredential: { throw CoverageContext.Failure(description: "fixture") }, saveCredential: { _ in }, deleteCredential: {}, configuration: { .init(clientNumber: "YOUR_FIXTURE", clientSecret: "YOUR_FIXTURE") }, request: { _ in throw CoverageContext.Failure(description: "fixture") }, openURL: { _ in false }))
         var launchEnabled = false
         let tab = Hosted(
-            GeneralTab(launchAtLoginStatus: { launchEnabled }, setLaunchAtLogin: { enabled in
+            GeneralTab(googleAuth: auth, launchAtLoginStatus: { launchEnabled }, setLaunchAtLogin: { enabled in
                 launchEnabled = enabled
             })
             .environmentObject(updater)
@@ -476,6 +478,7 @@ enum AppPreferencesUI1Scenarios {
         let defaults = try context.defaults("general-tab-reset")
         let boundary = UpdaterBackendBoundary()
         let updater = UpdaterViewModel(backend: boundary)
+        let resetAuth = GoogleAuth(dependencies: .init(loadCredential: { throw CoverageContext.Failure(description: "fixture") }, saveCredential: { _ in }, deleteCredential: {}, configuration: { .init(clientNumber: "YOUR_FIXTURE", clientSecret: "YOUR_FIXTURE") }, request: { _ in throw CoverageContext.Failure(description: "fixture") }, openURL: { _ in false }))
         updater.automaticallyChecksForUpdates = true
 
         let fm = FileManager.default
@@ -515,6 +518,7 @@ enum AppPreferencesUI1Scenarios {
 
         let tab = Hosted(
             GeneralTab(
+                googleAuth: resetAuth,
                 launchAtLoginStatus: { true },
                 setLaunchAtLogin: { enabled in launchChanges.append(enabled) },
                 isRuntimeBundlePresent: true,
@@ -562,6 +566,7 @@ enum AppPreferencesUI1Scenarios {
         failingEffects.restartApp = { failingRecorder.restarted += 1 }
         let failingTab = Hosted(
             GeneralTab(
+                googleAuth: resetAuth,
                 launchAtLoginStatus: { true },
                 setLaunchAtLogin: { enabled in failingLaunches.append(enabled) },
                 isRuntimeBundlePresent: false,
@@ -623,5 +628,132 @@ enum AppPreferencesUI1Scenarios {
         LaunchAtLoginHelper.setEnabled(false)
         try context.expect(FileManager.default.fileExists(atPath: plist.path) == false, "Disable removes the LaunchAgent plist")
         try context.expect(LaunchAtLoginHelper.isEnabled == false, "isEnabled reflects removal")
+
+        // Removal of an already-absent plist covers the removal error branch
+        // (removeItem throws ENOENT, the error log fires, state stays off).
+        LaunchAtLoginHelper.setEnabled(false)
+        try context.expect(LaunchAtLoginHelper.isEnabled == false, "Second disable still reports disabled")
+    }
+
+    /// GeneralTab seams the other hosted tabs never take: the default
+    /// launch-at-login closures (wrapping LaunchAtLoginHelper, whose bare
+    /// binary branch runs above), the Open Log Directory button action
+    /// (openLogDirectory against the fixture home), and the ResetEffects
+    /// TCC default. The other destructive defaults (defaults wipe, real
+    /// keychain delete, notification purge, relaunch) stay recorded no-ops
+    /// exactly like generalTabReset: this block only adds the paths that
+    /// could run safely.
+    static func generalTabDefaults(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("general-tab-defaults")
+        let boundary = UpdaterBackendBoundary()
+        let updater = UpdaterViewModel(backend: boundary)
+        let defaultsAuth = GoogleAuth(dependencies: .init(loadCredential: { throw CoverageContext.Failure(description: "fixture") }, saveCredential: { _ in }, deleteCredential: {}, configuration: { .init(clientNumber: "YOUR_FIXTURE", clientSecret: "YOUR_FIXTURE") }, request: { _ in throw CoverageContext.Failure(description: "fixture") }, openURL: { _ in false }))
+        // Default launch closures: a hosted tab with no injected closures
+        // reads the helper in init, then the reset presses the default
+        // setter (disable through the bare-binary path).
+        let tab = Hosted(
+            GeneralTab(googleAuth: defaultsAuth)
+                .environmentObject(updater)
+                .defaultAppStorage(defaults),
+            size: NSSize(width: 800, height: 1200)
+        )
+        defer { tab.close() }
+        await settle()
+        try context.expect(tab.text.contains("Launch at login"), "Default-closure tab renders")
+
+        // Both logging toggles default on: the Open Log Directory button is
+        // enabled and its press runs openLogDirectory against the fixture
+        // home (directory creation; the Finder reveal is a no-op in the
+        // headless harness).
+        try tab.press("Open Log Directory in Finder", context)
+        await settle()
+        let logDir = FileManager.default
+            .urls(for: .libraryDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("BusinessBar", isDirectory: true)
+        try context.expect(logDir.map { FileManager.default.fileExists(atPath: $0.path) } == true, "Log directory created before reveal")
+
+        // TCC default against the fixture bundle id: tccutil succeeds on
+        // macOS 15+ (measured on this host), so this covers the success log
+        // branch of the production closure. The fixture bundle id owns no
+        // real TCC grants, so the reset is harmless. Every other effect is
+        // a no-op: the defaults are destructive for the harness (default
+        // clearNotifications calls UNUserNotificationCenter.current(),
+        // which aborts without a bundle proxy, and the default restartApp
+        // spawns a child binary and terminates NSApp, killing the suite).
+        var tccRan = false
+        var effects = ResetEffects()
+        let productionTCC = effects.resetTCCPermissions
+        effects.resetTCCPermissions = {
+            tccRan = true
+            productionTCC()
+        }
+        effects.wipeDefaults = {}
+        effects.deleteOAuthKeychain = {}
+        effects.clearNotifications = {}
+        effects.synchronizeDefaults = {}
+        effects.restartApp = {}
+        let resetTab = Hosted(
+            GeneralTab(googleAuth: defaultsAuth, launchAtLoginStatus: { true }, setLaunchAtLogin: { _ in }, resetEffects: effects)
+                .environmentObject(updater)
+                .defaultAppStorage(defaults),
+            size: NSSize(width: 800, height: 1200)
+        )
+        defer { resetTab.close() }
+        await settle()
+        try resetTab.press("Reset All Settings to Defaults", context)
+        await settle()
+        try resetTab.alertPress("Reset", context)
+        await settle()
+        for _ in 0..<40 where tccRan == false {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(tccRan, "Reset flow reaches the TCC default closure")
+
+        // removeItemIfExists error branch: the blocker is a plain file the
+        // explicit sweep still lists (LaunchAgents path), so removeItem
+        // throws and the flow continues to the restart no-op.
+        let fm = FileManager.default
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let bundleID = Constants.bundleIdentifier
+        let blocker = home.appendingPathComponent("Library/LaunchAgents/\(bundleID).plist/blocker")
+        var reachedRestart = false
+        var cleanupEffects = ResetEffects()
+        cleanupEffects.libraryHome = { home }
+        cleanupEffects.wipeDefaults = {}
+        cleanupEffects.deleteOAuthKeychain = {}
+        cleanupEffects.clearNotifications = {}
+        cleanupEffects.resetTCCPermissions = {}
+        cleanupEffects.synchronizeDefaults = {}
+        cleanupEffects.restartApp = { reachedRestart = true }
+        _ = blocker // the LaunchAgents plist path from the reset above is a
+        // directory-throwing file target: the previous tab's reset already
+        // wrote and removed it, so the explicit path is recreated as a
+        // directory to force the remove failure.
+        try fm.createDirectory(at: home.appendingPathComponent("Library/LaunchAgents/\(bundleID).plist"), withIntermediateDirectories: true)
+        let cleanupTab = Hosted(
+            GeneralTab(googleAuth: defaultsAuth, launchAtLoginStatus: { true }, setLaunchAtLogin: { _ in }, isRuntimeBundlePresent: false, resetEffects: cleanupEffects)
+                .environmentObject(updater)
+                .defaultAppStorage(defaults),
+            size: NSSize(width: 800, height: 1200)
+        )
+        defer { cleanupTab.close() }
+        await settle()
+        try cleanupTab.press("Reset All Settings to Defaults", context)
+        await settle()
+        try cleanupTab.alertPress("Reset", context)
+        await settle()
+        for _ in 0..<40 where reachedRestart == false {
+            await Task.yield()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try context.expect(reachedRestart, "Cleanup reset completes past remove failures")
+        try? fm.removeItem(at: home.appendingPathComponent("Library/LaunchAgents/\(bundleID).plist"))
+        LaunchAtLoginHelper.setEnabled(false)
+        try fm.createDirectory(
+            at: home.appendingPathComponent("Library/Logs/BusinessBar", isDirectory: true),
+            withIntermediateDirectories: true
+        )
     }
 }

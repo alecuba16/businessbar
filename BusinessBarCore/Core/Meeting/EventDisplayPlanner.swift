@@ -17,7 +17,8 @@ public enum EventDisplayPlanner {
         return (startOfToday, end)
     }
 
-    /// Applies dismissed-ID and declined-event visibility rules.
+    /// Applies dismissed-ID, declined-RSVP, and canceled-event visibility
+    /// rules.
     public static func filter(
         _ events: [CalendarEvent],
         dismissedIDs: Set<String>,
@@ -25,7 +26,10 @@ public enum EventDisplayPlanner {
     ) -> [CalendarEvent] {
         events.filter { event in
             guard !dismissedIDs.contains(event.id) else { return false }
-            if !showDeclined && event.status == .canceled { return false }
+            if !showDeclined {
+                if event.status == .canceled { return false }
+                if event.myRSVPStatus == .declined { return false }
+            }
             return true
         }
     }

@@ -373,7 +373,9 @@ public final class MLXServerManager: ObservableObject {
     private static let quitLock = NSLock()
     private static var quitKillTable: [Process] = []
 
-    private static func registerForQuitKill(_ process: Process) {
+    // Internal, not public: the coverage harness imports this module
+    // @testable, so this stays out of the published interface.
+    static func registerForQuitKill(_ process: Process) {
         quitLock.lock()
         quitKillTable.removeAll { !$0.isRunning }
         quitKillTable.append(process)
@@ -448,6 +450,31 @@ public final class MLXServerManager: ObservableObject {
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var thermalObserver: NSObjectProtocol?
+
+    // Internal, not public: the coverage harness imports this module
+    // @testable, so this stays out of the published interface. Resource
+    // guards with the thermal state injected, so scenarios exercise the
+    // guard without changing real thermal state.
+    func installResourceGuardsForCoverage(thermalState: @escaping () -> ProcessInfo.ThermalState) {
+        memoryPressureSource = nil
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.state.isRunning || self.state == .starting else { return }
+                guard thermalState() == .serious else { return }
+                // The idle window only gates the running-server case; a
+                // serious thermal state during startup stops immediately.
+                if self.state.isRunning {
+                    guard self.now().timeIntervalSince(self.lastRequestAt) > 10 else { return }
+                }
+                Self.log.warning("thermal state serious, stopping idle mlx server")
+                self.stop()
+            }
+        }
+    }
 
     // MARK: - Helpers
 

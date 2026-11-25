@@ -223,6 +223,21 @@ final class GCEventStoreAdapter: EventStoreProtocol {
             let statusRaw = item["status"] as? String
             let status: CalendarEvent.EventStatus = (statusRaw == "cancelled") ? .canceled : .confirmed
 
+            // singleEvents=true expands each recurring instance into its
+            // own item: recurring instances carry "recurringEventId" plus
+            // their "originalStartTime", and their "id" is the instance id
+            // (which ends with the series id and a time-based suffix).
+            // Standalone events carry neither field, so recurringEventId
+            // alone decides recurrence.
+            let recurringEventID = item["recurringEventId"] as? String
+            let originalStartTimeDict = item["originalStartTime"] as? [String: Any]
+            let originalStartTime = (originalStartTimeDict?["dateTime"] as? String)
+                .flatMap { isoFull.date(from: $0) }
+                ?? (originalStartTimeDict?["date"] as? String)
+                    .flatMap { isoDate.date(from: $0) }
+                ?? recurringEventID.flatMap { _ in startDate }
+            let isRecurring = recurringEventID != nil
+
             return CalendarEvent(
                 id: id,
                 title: title,
@@ -236,7 +251,9 @@ final class GCEventStoreAdapter: EventStoreProtocol {
                 attendees: attendees,
                 isAllDay: isAllDay,
                 status: status,
-                myRSVPStatus: rsvpStatus
+                myRSVPStatus: rsvpStatus,
+                occurrenceDate: originalStartTime,
+                isRecurring: isRecurring
             )
         }
     }

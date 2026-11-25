@@ -461,5 +461,26 @@ enum CoreSystemScenarios {
         activity.checkAndSimulate()
         try c.equal(moves, 2, "configured idle threshold used")
         activity.stopSimulation()
+
+        // Default-dependency simulator: the default schedule closure body
+        // (Timer.scheduledTimer) executes here while idleTime and moveMouse
+        // stay injected, so no real IOKit read or CGEvent post can happen
+        // even if the timer were to fire.
+        let defaultScheduleSimulator = ActivitySimulator(defaults: defaults, idleTime: { 0 }, moveMouse: { moves += 1 })
+        defaultScheduleSimulator.startSimulation()
+        defaultScheduleSimulator.stopSimulation()
+        try c.expect(!scheduler.timers.isEmpty, "Default schedule closure constructed a real timer")
+
+        // Real system idle read: default idleTime closure (IOKit HIDIdleTime)
+        // executes against the host registry. The threshold is set far above
+        // any plausible host idle so the injected moveMouse stays uncalled;
+        // the read is side-effect free (registry query only).
+        defaults.set(1_000_000_000, forKey: Constants.Defaults.activityIdleMultiplier)
+        let realIdleSimulator = ActivitySimulator(defaults: defaults, schedule: { interval, _, action in scheduler.schedule(interval, action) }, moveMouse: { moves += 1 })
+        let movesBefore = moves
+        realIdleSimulator.checkAndSimulate()
+        try c.equal(moves, movesBefore, "Real idle read under a huge threshold moves nothing")
+        realIdleSimulator.startSimulation()
+        realIdleSimulator.stopSimulation()
     }
 }

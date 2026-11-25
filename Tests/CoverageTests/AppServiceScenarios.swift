@@ -413,6 +413,15 @@ enum AppServiceScenarios {
         try context.expect(delegate.getMeetingManager() == nil && delegate.getNoSleepManager() == nil, "No managers eagerly started")
         delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
         try context.equal(terminations, 1, "Termination delegates synchronously without killing real services")
+
+        // The convenience-init quit chain runs the live synchronous kills:
+        // every quit table is empty in this harness, so each killAtQuit is
+        // a no-op drain, and the ACP shutdown reads no cached client. This
+        // covers the closure body the plain init stores (lines the injected
+        // terminateServices above never execute).
+        let quitDelegate = AppDelegate()
+        quitDelegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        try context.expect(quitDelegate.getMeetingManager() == nil, "Quit-path delegate stays lazy")
     }
 
     private static func calendars(_ context: CoverageContext) async throws {
@@ -672,10 +681,22 @@ private extension AppServiceScenarios {
         let live = AppDelegate.Dependencies.live
         try context.expect(live.googleConfigured() == false, "Live Google configuration reads the absent bundle credentials")
         _ = live.axTrusted() // reads TCC state; answer not asserted (host-dependent)
+        // UserDefaults.standard persists through cfprefsd across runs, even
+        // under an isolated HOME, and PromptTemplate.defaults draws fresh
+        // UUIDs per process, so an earlier run's stored list never compares
+        // equal. Clear the key for this check, restore it afterwards.
+        let templateKey = "companion.promptTemplates"
+        let previousTemplates = UserDefaults.standard.data(forKey: templateKey)
+        UserDefaults.standard.removeObject(forKey: templateKey)
         let templates = live.loadTemplates()
         try context.expect(templates == PromptTemplate.defaults, "Live template store loads the shipped defaults")
         live.saveTemplates(templates)
         try context.expect(live.loadTemplates() == templates, "Live template store round-trips through the fixture home")
+        if let previousTemplates {
+            UserDefaults.standard.set(previousTemplates, forKey: templateKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: templateKey)
+        }
 
         let auth = GoogleAuth(dependencies: .init(
             loadCredential: { throw FixtureError.unavailable }, saveCredential: { _ in }, deleteCredential: {},
@@ -707,6 +728,35 @@ private extension AppServiceScenarios {
         // registerURL installs the handler on this process only; no event
         // is ever delivered to the coverage binary.
         live.registerURL(plainInit)
+
+        // The two modal alerts the app presents through AppKit. NSAlert must
+        // be created on the main thread, so the closures run on the main
+        // queue; runModal then blocks that queue, and this scenario (already
+        // off-main in its async task) watches for the new alert window and
+        // hops back to main to stop the session. runModal returns the first
+        // button response ("Open Settings" / OK) without user interaction.
+        let windowsBeforeAlerts = Set(NSApp.windows.map(ObjectIdentifier.init))
+        func stopModalOnceWindowAppears() async {
+            for _ in 0..<600 {
+                if NSApp.windows.contains(where: { !windowsBeforeAlerts.contains(ObjectIdentifier($0)) && $0.isVisible }) {
+                    DispatchQueue.main.async { NSApp.stopModal() }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            DispatchQueue.main.async { NSApp.stopModal() }
+        }
+        DispatchQueue.main.async {
+            _ = live.permissionAlert()
+        }
+        await stopModalOnceWindowAppears()
+        DispatchQueue.main.async {
+            live.preferencesError()
+        }
+        await stopModalOnceWindowAppears()
+        // Give the main queue a beat to unwind runModal before the next
+        // main-queue work in this scenario.
+        for _ in 0..<50 { await Task.yield() }
 
         // enqueue/after dispatch on the main queue; drain both.
         var enqueued = false
@@ -961,6 +1011,31 @@ private extension AppServiceScenarios {
         manager.dispatchAction("JOIN_ACTION", userInfo: ["meetingLink": "https://fixture.invalid/join"])
         try context.equal(opened.last?.absoluteString, "https://fixture.invalid/join", "Dispatch entry routes join links")
 
+        // The system delegate entry itself: the DEBUG bridge builds the
+        // UNNotificationResponse the harness process cannot otherwise
+        // construct, so the real callback (Task hop plus completion) runs.
+        let response = NotificationManager.responseForCoverage(
+            action: "RSVP_DECLINE",
+            userInfo: ["eventID": "delegate-1", "calendarID": "rsvp-cal"]
+        )
+        var delegateCompletions = 0
+        // The harness process has no bundle proxy, so UNUserNotificationCenter
+        // .current() aborts. The callback never dereferences its center
+        // argument, so a null reference (explicitly unsafe, DEBUG-only
+        // harness) reaches the real delegate body.
+        let nullCenter = unsafeBitCast(0, to: UNUserNotificationCenter.self)
+        manager.userNotificationCenter(
+            nullCenter,
+            didReceive: response,
+            withCompletionHandler: { delegateCompletions += 1 }
+        )
+        for _ in 0..<100 where rsvpReplies.count < 3 || delegateCompletions < 1 {
+            try await settleRSVP()
+        }
+        try context.equal(rsvpReplies.last?.0, "delegate-1", "Delegate callback forwards the payload fields")
+        try context.equal(rsvpReplies.last?.2, .declined, "Delegate callback maps the action to its status")
+        try context.equal(delegateCompletions, 1, "Delegate callback runs the completion handler")
+
         // Back available: the time-change banner lands with its own shape.
         center.post(name: .businessBarEventTimesChanged, object: nil, userInfo: ["events": [fresh]])
         try await settleRSVP()
@@ -984,6 +1059,79 @@ private extension AppServiceScenarios {
         try context.expect(!liveManager.dependenciesForCoverage.isNewEventsEnabled(), "Live new-events flag follows the stored value")
         try context.expect(!liveManager.dependenciesForCoverage.isPendingInvitesEnabled(), "Live pending-invites flag follows the stored value")
         try context.expect(!liveManager.dependenciesForCoverage.isEventTimeChangesEnabled(), "Live time-changes flag follows the stored value")
+        UserDefaults.standard.removeObject(forKey: BusinessBar.Constants.Defaults.notifyNewEvents)
+        UserDefaults.standard.removeObject(forKey: BusinessBar.Constants.Defaults.notifyPendingInvites)
+        UserDefaults.standard.removeObject(forKey: BusinessBar.Constants.Defaults.notifyEventTimeChanges)
+
+        // The standard domain persists through cfprefsd across runs, even
+        // under an isolated HOME (same trap as the template key above), so
+        // the "unset" premise is enforced: snapshot, clear, assert, restore.
+        let previousFeatureNotifications = UserDefaults.standard.object(forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        UserDefaults.standard.removeObject(forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        try context.expect(liveManager.dependenciesForCoverage.isEnabled(), "Live enable flag defaults on without a stored value")
+        UserDefaults.standard.set(false, forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        try context.expect(!liveManager.dependenciesForCoverage.isEnabled(), "Live enable flag follows the stored value")
+        if let previousFeatureNotifications {
+            UserDefaults.standard.set(previousFeatureNotifications, forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        } else {
+            UserDefaults.standard.removeObject(forKey: BusinessBar.Constants.Defaults.featureNotifications)
+        }
+
+        // The preference-change observer: disabled state must purge every
+        // pending notification when the preferences bus fires.
+        var purged = 0
+        var purgeAdded: [String] = []
+        var purgeDependencies = NotificationManager.Dependencies(
+            isAvailable: { true }, isEnabled: { false }, now: { now },
+            configure: { _, _ in }, authorize: {},
+            add: { purgeAdded.append($0.content.body) }, remove: { _ in }, removeAll: { purged += 1 },
+            openURL: { _ in }, notificationCenter: center,
+            isNewEventsEnabled: { true }, isPendingInvitesEnabled: { true },
+            isEventTimeChangesEnabled: { true }
+        )
+        let purgeManager = NotificationManager(dependencies: purgeDependencies)
+        center.post(name: .businessBarPreferencesDidChange, object: nil)
+        for _ in 0..<40 where purged < 1 {
+            try await settleRSVP()
+        }
+        try context.equal(purged, 1, "Preferences change with notifications off purges pending requests")
+
+        // Organized invites carry the organizer in the body; the earlier
+        // fixture posts all had one, but the local re-add path above ran with
+        // a nil-organizer event only through other entry points. Post a
+        // nil-organizer invite so the empty-organizer branch of the body
+        // line runs once too.
+        let bareInvite = CalendarEvent(
+            id: "invite-bare", title: "Bare sync",
+            startDate: now.addingTimeInterval(3600), endDate: now.addingTimeInterval(7200),
+            location: nil, notes: nil, url: nil, calendar: calendar,
+            organizer: nil, attendees: [], myRSVPStatus: .pending
+        )
+        // Dependencies is a value copy captured at init: the enabled invite
+        // path needs a fresh manager whose sink guards see enabled flags.
+        let bareManager = NotificationManager(dependencies: NotificationManager.Dependencies(
+            isAvailable: { true }, isEnabled: { true }, now: { now },
+            configure: { _, _ in }, authorize: {},
+            add: { purgeAdded.append($0.content.body) }, remove: { _ in }, removeAll: { purged += 1 },
+            openURL: { _ in }, notificationCenter: center,
+            isNewEventsEnabled: { true }, isPendingInvitesEnabled: { true },
+            isEventTimeChangesEnabled: { true }
+        ))
+        center.post(name: .businessBarPendingRSVPsAppeared, object: nil, userInfo: ["events": [bareInvite]])
+        for _ in 0..<40 where purgeAdded.isEmpty {
+            try await settleRSVP()
+        }
+        try context.expect(purgeAdded.first?.contains(" from ") == false, "Nil-organizer invite body omits the from fragment")
+
+        // DEBUG coder bridges: the required convenience coder inits answer
+        // nil without decoding (they exist only to satisfy the system
+        // subclassing contract).
+        try context.expect(UNNotificationForCoverage(coder: CoverageCoder()) == nil, "Notification coverage coder init declines decoding")
+        try context.expect(UNNotificationResponseForCoverage(coder: CoverageCoder()) == nil, "Response coverage coder init declines decoding")
+        try context.expect(!CoverageCoder().containsValue(forKey: "missing"), "Coder containment follows stored values")
+        try context.expect(!CoverageCoder().decodeBool(forKey: "missing"), "Coder bool default is false")
+        try context.equal(CoverageCoder().decodeInt64(forKey: "missing"), 0, "Coder int default is zero")
+        try context.equal(CoverageCoder().decodeDouble(forKey: "missing"), 0, "Coder double default is zero")
     }
 
     private static func settleRSVP() async {
