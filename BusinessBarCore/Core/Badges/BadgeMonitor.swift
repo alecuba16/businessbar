@@ -303,8 +303,13 @@ final class BadgeMonitor: BadgeMonitoring {
         trust()
     }
 
+    /// Opens the Accessibility pane through the injectable seam; coverage
+    /// fixtures replace it so the host never launches System Settings.
     static func requestAccessibilityPermission() {
-        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        _ = AXIsProcessTrustedWithOptions(options)
+        requestAccessibilityPane.map { $0() } ?? {
+            NSWorkspace.shared.open(BadgeManager.accessibilityPaneURL)
+        }()
     }
+
+    nonisolated(unsafe) static var requestAccessibilityPane: (() -> Void)?
 }

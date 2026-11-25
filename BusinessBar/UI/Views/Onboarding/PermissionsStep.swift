@@ -289,10 +289,16 @@ struct PermissionsStep: View {
     private func requestAccessibilityAccess() {
         requestAccessibility()
         Task { @MainActor in
-            await accessibilityRefreshDelay()
-            await refreshPermissions()
-            if accessibilityGranted {
-                featureBadgesEnabled = true
+            // The grant happens in System Settings, outside our control; poll
+            // briefly instead of checking once after a fixed delay, so the
+            // toggle can appear even while this window stays in the background.
+            for _ in 0..<10 {
+                await accessibilityRefreshDelay()
+                await refreshPermissions()
+                if accessibilityGranted {
+                    featureBadgesEnabled = true
+                    return
+                }
             }
         }
     }

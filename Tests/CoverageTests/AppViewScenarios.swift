@@ -295,9 +295,15 @@ enum AppViewScenarios {
             try context.expect(permissions.control("Calendar") != nil && permissions.control("Meeting Notifications") != nil, "Only the fake accessibility permission remains ungranted")
             try context.expect(!permissionDefaults.bool(forKey: Constants.Defaults.featureBadges), "Badges start disabled before the permission request")
             try permissions.press("Grant Permission", context)
-            await settle()
+            // The polling loop runs on the main actor; pump until it finishes
+            // (granted exits after one pair, denied runs the full window).
+            let expectedDelays = grantAfterRequest ? 1 : 10
+            for _ in 0..<100 where events.filter { $0 == "delay" }.count < expectedDelays {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
             try context.equal(requests, 1, "Accessibility grant invokes only its fake request boundary")
-            try context.equal(Array(events.suffix(3)), ["request", "delay", "refresh"], "Request waits for delay and the refreshed permission snapshot")
+            try context.expect(events.firstIndex(of: "request").map { Array(events[$0...$0+2]) } == ["request", "delay", "refresh"], "Request polls the delayed permission snapshot")
+            try context.equal(events.filter { $0 == "delay" }.count, expectedDelays, "Permission request polls until granted or window exhausted")
             try context.equal(permissionDefaults.bool(forKey: Constants.Defaults.featureBadges), grantAfterRequest, "Only a completed granted refresh enables badges")
             if grantAfterRequest {
                 try context.expect(permissions.control("Badge Monitoring") != nil, "Granted accessibility exposes the named badge toggle")

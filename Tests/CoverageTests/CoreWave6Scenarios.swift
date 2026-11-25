@@ -54,8 +54,14 @@ enum CoreWave6Scenarios {
     /// second monitor passes a fake pid and nil element: AXObserverCreate
     /// fails, covering the error-return guard.
     private static func badgePermissionPaths(_ c: CoverageContext) throws {
+        // The pane open is injected so the fixture never launches
+        // System Settings on the host.
+        var paneOpens = 0
+        BadgeMonitor.requestAccessibilityPane = { paneOpens += 1 }
+        defer { BadgeMonitor.requestAccessibilityPane = nil }
         BadgeManager.requestAccessibilityPermission()
         BadgeMonitor.requestAccessibilityPermission()
+        try c.equal(paneOpens, 2, "Each static permission request opens the Accessibility pane")
 
         let defaults = try c.defaults("wave6-badge-monitor")
         var refreshed = 0
