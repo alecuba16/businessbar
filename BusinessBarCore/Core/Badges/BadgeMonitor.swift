@@ -14,7 +14,7 @@ import os.log
 final class BadgeMonitor: BadgeMonitoring {
     // MARK: - Internal
 
-    var onBadgeUpdate: ((String, Int) -> Void)?
+    var onBadgeUpdate: ((String, BadgeValue?) -> Void)?
 
     private static let logger = Logger(subsystem: "com.businessbar.app", category: "BadgeMonitor")
 
@@ -29,7 +29,7 @@ final class BadgeMonitor: BadgeMonitoring {
     private var axObserver: AXObserver?
 
     /// Last badge value reported per app — used to suppress duplicate poll logs.
-    private var lastLoggedBadges: [String: Int] = [:]
+    private var lastLoggedBadges: [String: BadgeValue?] = [:]
 
     // MARK: - Lifecycle
 
@@ -169,9 +169,12 @@ final class BadgeMonitor: BadgeMonitoring {
     func pollBadges() {
         for (bundleID, element) in appElements {
             let badge = getBadgeValue(from: element)
-            let previous = lastLoggedBadges[bundleID] ?? 0
+            // Flatten BadgeValue?? to BadgeValue?: a missing entry must read
+            // as nil, not .some(nil), or the first badge-less poll delivers
+            // a spurious clear.
+            let previous = lastLoggedBadges[bundleID] ?? nil
             guard badge != previous else { continue }
-            Self.logger.debug("poll — \(bundleID): \(previous) → \(badge)")
+            Self.logger.debug("poll — \(bundleID): \(previous.map { String(describing: $0) } ?? "none") → \(String(describing: badge))")
             lastLoggedBadges[bundleID] = badge
             onBadgeUpdate?(bundleID, badge)
         }
@@ -280,14 +283,18 @@ final class BadgeMonitor: BadgeMonitoring {
         return nil
     }
 
-    private func getBadgeValue(from element: AXUIElement) -> Int {
+    private func getBadgeValue(from element: AXUIElement) -> BadgeValue? {
         return Self.parseBadge(attribute(element, "AXStatusLabel") as? String)
     }
 
-    static func parseBadge(_ text: String?) -> Int {
-        guard let badgeText = text else { return 0 }
+    /// nil = no badge, .unknown = label with no digits (dot state),
+    /// .known(n) = label with a real count. Digit overflow beyond Int clamps
+    /// to .unknown rather than inventing a number.
+    static func parseBadge(_ text: String?) -> BadgeValue? {
+        guard let badgeText = text, !badgeText.isEmpty else { return nil }
         let digits = badgeText.prefix(while: { $0.isNumber })
-        return Int(digits) ?? (badgeText.isEmpty ? 0 : 1)
+        guard let count = Int(digits) else { return .unknown }
+        return count > 0 ? .known(count) : nil
     }
 
     // MARK: - Permission

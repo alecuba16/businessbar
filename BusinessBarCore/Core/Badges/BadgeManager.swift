@@ -5,7 +5,7 @@ import Foundation
 import os.log
 
 public protocol BadgeMonitoring: AnyObject {
-    var onBadgeUpdate: ((String, Int) -> Void)? { get set }
+    var onBadgeUpdate: ((String, BadgeValue?) -> Void)? { get set }
     func startMonitoring(apps: [MonitoredApp])
     func stopMonitoring()
     func updateAppElements(for apps: [MonitoredApp])
@@ -15,7 +15,7 @@ public protocol BadgeMonitoring: AnyObject {
 @MainActor
 public final class BadgeManager: ObservableObject {
     @Published public private(set) var monitoredApps: [MonitoredApp] = []
-    @Published public private(set) var badges: [String: Int] = [:]
+    @Published public private(set) var badges: [String: BadgeValue] = [:]
     /// Reflects `AXIsProcessTrusted()` — updated every 2 s via a poll timer.
     @Published public private(set) var isAccessibilityGranted: Bool = false
 
@@ -159,25 +159,25 @@ public final class BadgeManager: ObservableObject {
     // MARK: - Badge monitor wiring
 
     private func setupBadgeMonitor() {
-        badgeMonitor.onBadgeUpdate = { [weak self] bundleID, count in
+        badgeMonitor.onBadgeUpdate = { [weak self] bundleID, badge in
             Task { @MainActor [weak self] in
-                self?.updateBadge(for: bundleID, count: count)
+                self?.updateBadge(for: bundleID, badge: badge)
             }
         }
     }
 
-    func updateBadge(for bundleID: String, count: Int) {
-        let previous = badges[bundleID] ?? 0
-        if count != previous {
-            Self.logger.debug("badge changed — \(bundleID): \(previous) → \(count)")
+    func updateBadge(for bundleID: String, badge: BadgeValue?) {
+        let previous = badges[bundleID]
+        if badge != previous {
+            Self.logger.debug("badge changed — \(bundleID): \(String(describing: previous)) → \(String(describing: badge))")
         }
-        if count > 0 {
-            badges[bundleID] = count
+        if let badge {
+            badges[bundleID] = badge
         } else {
             badges.removeValue(forKey: bundleID)
         }
         if let index = monitoredApps.firstIndex(where: { $0.bundleIdentifier == bundleID }) {
-            monitoredApps[index].badgeCount = count
+            monitoredApps[index].badgeCount = badge.persistedCount
         }
     }
 

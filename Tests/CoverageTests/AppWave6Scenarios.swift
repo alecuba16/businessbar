@@ -366,7 +366,7 @@ private final class URLProtocolStub: URLProtocol {
 /// Inert badge monitor: the BadgeMonitoring contract needs one, but no AX
 /// reads happen because no apps are added.
 private final class Wave6BadgeMonitor: BadgeMonitoring {
-    var onBadgeUpdate: ((String, Int) -> Void)?
+    var onBadgeUpdate: ((String, BadgeValue?) -> Void)?
     private var apps: [MonitoredApp] = []
     func startMonitoring(apps: [MonitoredApp]) { self.apps = apps }
     func stopMonitoring() { apps = [] }

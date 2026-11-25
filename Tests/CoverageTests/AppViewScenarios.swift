@@ -145,10 +145,20 @@ enum AppViewScenarios {
                     try context.expect(host.text.contains(count > 99 ? "99+" : "\(count)"), "Badge bubble count label")
                 }
             }
-            let toast = Hosted(ToastView(icon: count == 0 ? nil : image, count: count), size: NSSize(width: 160, height: 60))
-            defer { toast.close() }
-            try toast.render(context)
-            try context.expect(toast.text.contains(count > 99 ? "99+" : "\(count)"), "Toast count label")
+            let toastCases: [(BadgeValue?, String, Int?)] = [
+                (nil, "", 0),
+                (.known(count), count > 99 ? "99+" : "\(count)", count),
+                (.unknown, "", nil)
+            ]
+            for (badge, label, raw) in toastCases {
+                let toast = Hosted(ToastView(icon: raw == nil || raw! > 0 ? image : nil, badge: badge), size: NSSize(width: 160, height: 60))
+                defer { toast.close() }
+                try toast.render(context)
+                if !label.isEmpty {
+                    try context.expect(toast.text.contains(label), "Toast label for badge \(badge)")
+                }
+                try context.expect(!toast.text.contains("New notification"), "Dot badge shows no invented count")
+            }
         }
         var selected: String?
         let app = MonitoredApp(bundleIdentifier: "com.businessbar.coverage.uninstalled", displayName: "Coverage fixture")
@@ -964,7 +974,7 @@ enum AppViewScenarios {
     }
 
     private final class BadgeBoundary: BadgeMonitoring {
-        var onBadgeUpdate: ((String, Int) -> Void)?
+        var onBadgeUpdate: ((String, BadgeValue?) -> Void)?
         var starts = 0
         func startMonitoring(apps: [MonitoredApp]) { starts += 1 }
         func stopMonitoring() {}

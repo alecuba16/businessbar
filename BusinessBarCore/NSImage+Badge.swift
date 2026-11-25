@@ -2,8 +2,11 @@ import AppKit
 import CoreImage
 
 public extension NSImage {
+    /// Draws the image at menu bar size with a count bubble in the corner.
+    /// The bubble is deliberately small (10 pt on an 18 pt icon) so the app
+    /// icon stays identifiable when several apps are badged at once.
     func withBadge(count: Int) -> NSImage {
-        let badgeSize: CGFloat = 16
+        let badgeSize: CGFloat = 10
         let imageSize = NSSize(width: 18, height: 18)
 
         let newImage = NSImage(size: imageSize)
@@ -12,40 +15,82 @@ public extension NSImage {
         let imageRect = NSRect(x: 0, y: 0, width: imageSize.width, height: imageSize.height)
         self.draw(in: imageRect)
 
-        let badgeRect = NSRect(
-            x: imageSize.width - badgeSize,
-            y: imageSize.height - badgeSize,
-            width: badgeSize,
-            height: badgeSize
-        )
-
-        NSColor.systemRed.setFill()
-        let badgePath = NSBezierPath(ovalIn: badgeRect)
-        badgePath.fill()
-
-        let countString = count > 99 ? "99+" : "\(count)"
+        let label = count > 99 ? "99+" : "\(count)"
+        let font = NSFont.systemFont(ofSize: 7, weight: .bold)
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
 
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+            .font: font,
             .foregroundColor: NSColor.white,
             .paragraphStyle: paragraphStyle
         ]
 
-        let textSize = countString.size(withAttributes: attributes)
+        let textSize = label.size(withAttributes: attributes)
+        let padding: CGFloat = 1
+        let capsuleWidth = max(badgeSize, textSize.width + padding * 2)
+
+        let badgeRect = NSRect(
+            x: imageSize.width - capsuleWidth,
+            y: imageSize.height - badgeSize,
+            width: capsuleWidth,
+            height: badgeSize
+        )
+
+        NSColor.systemRed.setFill()
+        NSBezierPath(roundedRect: badgeRect, xRadius: badgeSize / 2, yRadius: badgeSize / 2).fill()
+
         let textRect = NSRect(
             x: badgeRect.midX - textSize.width / 2,
             y: badgeRect.midY - textSize.height / 2,
             width: textSize.width,
             height: textSize.height
         )
-
-        countString.draw(in: textRect, withAttributes: attributes)
+        label.draw(in: textRect, withAttributes: attributes)
 
         newImage.unlockFocus()
         // Must be false: template images are rendered as a solid-colour silhouette
         // by AppKit, which destroys the red badge and app-icon colours.
+        newImage.isTemplate = false
+
+        return newImage
+    }
+
+    /// Draws the image with a plain dot in the corner: notifications exist but
+    /// the Dock label carries no count. The 1 pt white ring keeps the red dot
+    /// readable on dark app icons, where red-on-dark alone can disappear.
+    func withDot() -> NSImage {
+        let imageSize = NSSize(width: 18, height: 18)
+
+        let newImage = NSImage(size: imageSize)
+        newImage.lockFocus()
+
+        let imageRect = NSRect(x: 0, y: 0, width: imageSize.width, height: imageSize.height)
+        self.draw(in: imageRect)
+
+        let dotDiameter: CGFloat = 7
+        let ringDiameter: CGFloat = dotDiameter + 2
+        let ringRect = NSRect(
+            x: imageSize.width - ringDiameter,
+            y: imageSize.height - ringDiameter,
+            width: ringDiameter,
+            height: ringDiameter
+        )
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: ringRect).fill()
+
+        let dotRect = NSRect(
+            x: ringRect.midX - dotDiameter / 2,
+            y: ringRect.midY - dotDiameter / 2,
+            width: dotDiameter,
+            height: dotDiameter
+        )
+        NSColor.systemRed.setFill()
+        NSBezierPath(ovalIn: dotRect).fill()
+
+        newImage.unlockFocus()
+        // Same as withBadge: template rendering would flatten the dot to a
+        // silhouette and lose the ring contrast.
         newImage.isTemplate = false
 
         return newImage
