@@ -32,6 +32,11 @@ public final class BadgeManager: ObservableObject {
     /// Timer that polls AX trust status until permission is granted, then
     /// auto-starts monitoring and stops itself.
     private var axPermissionTimer: Timer?
+    /// True between requestAccessibilityPermission() and the observed grant
+    /// or a feature-off transition, so the poll timer keeps running even while
+    /// the badges toggle is still off (BadgesTab flips the flag off before
+    /// requesting, and PermissionsStep enables it only after a grant).
+    private var awaitingAccessibilityGrant = false
     private var lastFeatureState: Bool
 
     public init(defaults: UserDefaults = .standard,
@@ -98,23 +103,27 @@ public final class BadgeManager: ObservableObject {
         }
     }
 
+    /// Deep link to System Settings > Privacy & Security > Accessibility.
+    /// macOS 13+ resolves `PrivacySecurity.extension`; the older
+    /// `com.apple.preference.security` form is the pre-Ventura fallback.
+    static let accessibilityPaneURL = URL(
+        string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility")!
+
     /// Open System Settings to the Accessibility privacy pane.
     public func openAccessibilitySettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-        openSettings(url)
+        openSettings(Self.accessibilityPaneURL)
     }
 
-    /// Prompt the user for AX access (shows the system dialog on older macOS;
-    /// on macOS 14+ opens System Settings automatically).
+    /// Opens System Settings at Privacy & Security > Accessibility and polls
+    /// trust status until a grant is detected, regardless of the badges toggle.
     public func requestAccessibilityPermission() {
+        awaitingAccessibilityGrant = true
         requestPermission()
-        if badgeFeatureEnabled() {
-            startPermissionPolling()   // begin checking in case they grant it
-        }
+        startPermissionPolling()
     }
 
-    /// Static convenience for requesting AX permission without a BadgeManager instance
-    /// (e.g. from the onboarding flow before any monitored apps are configured).
+    /// Opens the Accessibility pane via the static seam; used from flows
+    /// without a BadgeManager instance (onboarding before any app is added).
     public static func requestAccessibilityPermission() {
         BadgeMonitor.requestAccessibilityPermission()
     }
@@ -125,8 +134,9 @@ public final class BadgeManager: ObservableObject {
     /// and cancels the timer.
     private func startPermissionPolling() {
         guard axPermissionTimer == nil else { return }
-        // Don't waste CPU polling for a permission that won't be used.
-        guard badgeFeatureEnabled() else { return }
+        // The explicit-request flag keeps the timer alive while the badges
+        // toggle is off; otherwise we would never notice the grant.
+        guard badgeFeatureEnabled() || awaitingAccessibilityGrant else { return }
         axPermissionTimer = schedule(2.0) { [weak self] in
             Task { @MainActor [weak self] in
                 self?.checkAccessibilityPermission()
@@ -143,7 +153,7 @@ public final class BadgeManager: ObservableObject {
         let trusted = trust()
         let wasGranted = isAccessibilityGranted
         isAccessibilityGranted = trusted
-        guard badgeFeatureEnabled() else {
+        guard badgeFeatureEnabled() || awaitingAccessibilityGrant else {
             // Feature was disabled while we were polling — stop the timer
             // so we don't keep waking up every 2 s for nothing.
             stopPermissionPolling()
@@ -151,8 +161,13 @@ public final class BadgeManager: ObservableObject {
         }
         if trusted && !wasGranted {
             Self.logger.info("Accessibility permission granted — starting monitoring")
-            startMonitoring()
+            awaitingAccessibilityGrant = false
             stopPermissionPolling()
+            // An explicit request can complete while the badges toggle is
+            // still off; publish the grant, but don't start polling the Dock.
+            if badgeFeatureEnabled() {
+                startMonitoring()
+            }
         }
     }
 
@@ -209,7 +224,12 @@ public final class BadgeManager: ObservableObject {
                     guard enabled else {
                         self.badges.removeAll()
                         self.badgeMonitor.stopMonitoring()
-                        self.stopPermissionPolling()
+                        // A pending permission request survives the feature
+                        // flipping off (BadgesTab disables the toggle before
+                        // requesting), so the grant is still detected.
+                        if !self.awaitingAccessibilityGrant {
+                            self.stopPermissionPolling()
+                        }
                         return
                     }
 
