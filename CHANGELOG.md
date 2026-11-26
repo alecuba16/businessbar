@@ -5,6 +5,13 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.5] - 2026-11-26
+### Added
+- Tutorial walkthrough opened from a Take the Tutorial button in General preferences: a 7-page paged tour reusing the onboarding window pattern, and it runs nothing while closed
+### Fixed
+- RSVP answers on EventKit calendars that failed with no visible feedback now open Calendar.app so the reply happens in the supported UI, with a message saying so
+- An event no longer appears in both Recently added and Changed times: while a row still sits in Recently added its time changes stay out of Changed times and post no notification, and the suppressed change is consumed and never replays once the row leaves the region
+
 ## [1.8.4] - 2026-11-26
 ### Added
 - Badge indicator size preference (Small / Medium / Large) under Badges and Appearance: it scales the red circle and the number font of the unread-count bubble and the dot, independent from the badge icon size that keeps controlling the app icon
