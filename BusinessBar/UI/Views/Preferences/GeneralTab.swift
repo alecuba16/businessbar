@@ -38,6 +38,9 @@ struct GeneralTab: View {
     /// without bundled credentials, so the real check is false there and
     /// the sign-out button renders only when a signed-in session exists.
     private let googleConfigured: () -> Bool
+    /// Seamed tutorial window presentation so the coverage fixture can
+    /// record it without opening a real window.
+    private let showTutorial: @MainActor () -> Void
 
     // MARK: - Logging configuration
     @AppStorage(Constants.Defaults.loggingEnabled)     private var loggingEnabled     = true
@@ -84,7 +87,8 @@ struct GeneralTab: View {
             task.waitUntilExit()
             return task.terminationStatus
         },
-        googleConfigured: @escaping () -> Bool = { GoogleAuthConfig.isConfigured }
+        googleConfigured: @escaping () -> Bool = { GoogleAuthConfig.isConfigured },
+        showTutorial: @escaping @MainActor () -> Void = { TutorialWindowController.present() }
     ) {
         self.googleAuth = googleAuth
         self.launchAtLoginStatus = launchAtLoginStatus
@@ -94,6 +98,7 @@ struct GeneralTab: View {
         self.resetNamedTCCPermission = resetNamedTCCPermission
         self.resetAccessibilityTCCPermission = resetAccessibilityTCCPermission
         self.googleConfigured = googleConfigured
+        self.showTutorial = showTutorial
         _launchAtLogin = State(initialValue: launchAtLoginStatus())
     }
 
@@ -115,6 +120,10 @@ struct GeneralTab: View {
                     updaterViewModel.checkForUpdates()
                 }
                 .disabled(!updaterViewModel.canCheckForUpdates)
+
+                Button("Take the Tutorial") {
+                    showTutorial()
+                }
             }
 
             // MARK: Keyboard shortcuts

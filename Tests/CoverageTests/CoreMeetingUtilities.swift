@@ -154,6 +154,8 @@ enum CoreMeetingUtilitiesScenarios {
         catch { failures.append("time changes past and recurrence: \(error)") }
         do { try await recentBulkActions(context) }
         catch { failures.append("recent bulk actions: \(error)") }
+        do { try await recentAndTimeChangeOverlap(context) }
+        catch { failures.append("recent and time-change overlap: \(error)") }
         do { try ekParticipantMapping(context) }
         catch { failures.append("participant mapping: \(error)") }
         do { try await ekRespond(context) }
@@ -585,6 +587,9 @@ enum CoreMeetingUtilitiesScenarios {
         await manager.refreshEvents()
         try context.equal(manager.timeChangedEvents.map(\.id), [], "First fetch has no change baseline")
         try context.equal(changedPosts.count, 0, "No time-change notification on first sight")
+        // The recent region now suppresses change flags for rows still inside
+        // it, so clear the region before exercising the raw flagging rules.
+        manager.markAllRecentAsRead()
 
         // Same window again: still nothing.
         await manager.refreshEvents()
@@ -616,6 +621,9 @@ enum CoreMeetingUtilitiesScenarios {
         await manager.refreshEvents()
         try context.equal(manager.timeChangedEvents.map(\.id), [], "Reappearing event is fresh, not changed")
         try context.equal(changedPosts.count, 2, "Reappearing event posts nothing")
+        // The reappearance re-entered the recent region; clear it again so
+        // the next move flags against the raw rules.
+        manager.markAllRecentAsRead()
 
         // Feature off: the disabled refresh clears the published set.
         store.events = [stable, event("moving", start: 9000, end: 9600)]
@@ -692,6 +700,9 @@ enum CoreMeetingUtilitiesScenarios {
         await manager.refreshEvents()
         try context.equal(manager.timeChangedEvents.map(\.id), [], "Series occurrences first-seen without a change")
         try context.equal(manager.nextEvent?.id, "series", "Future occurrence is the next event")
+        // Both occurrences just entered the recent region; clear it so the
+        // move below exercises the raw change rules.
+        manager.markAllRecentAsRead()
 
         // Both occurrences move at once: only the future one flags.
         let movedPastOccurrence = event("series", start: -50 * 3600 - 600, end: -50 * 3600, occurrence: pastOccurrenceDate, recurring: true)
@@ -720,6 +731,8 @@ enum CoreMeetingUtilitiesScenarios {
         store.events = [movedPastOccurrence, event("series", start: 27 * 3600, end: 27 * 3600 + 600, occurrence: futureOccurrenceDate, recurring: true), otherEvent]
         await manager.refreshEvents()
         try context.equal(manager.timeChangedEvents.map(\.id), [], "First-seen event and stable series flag nothing")
+        // The new event entered the recent region; clear it before the move.
+        manager.markAllRecentAsRead()
         store.events = [movedPastOccurrence, event("series", start: 28 * 3600, end: 28 * 3600 + 600, occurrence: futureOccurrenceDate, recurring: true), event("other", start: 31 * 3600, end: 31 * 3600 + 600)]
         await manager.refreshEvents()
         try context.equal(Set(manager.timeChangedEvents.map(\.id)), Set(["series", "other"]), "Both moved rows flag together")
@@ -777,6 +790,75 @@ enum CoreMeetingUtilitiesScenarios {
         await manager.refreshEvents()
         try context.equal(manager.events.map(\.id), [], "Dismiss all hides the events from the agenda")
         try context.equal(manager.recentEvents.map(\.id), [], "Dismissed rows cannot come back on refresh")
+    }
+
+    /// Overlap between the Recently added and Changed times regions: while
+    /// an event still sits in the recent region, its time moves must not
+    /// flag as changes. Once it leaves the region (marked read here, or the
+    /// window passing), a later move flags again. A move suppressed while
+    /// in the region is consumed: the window bookkeeping keeps updating, so
+    /// it is never replayed after the event leaves the region without a
+    /// further move.
+    private static func recentAndTimeChangeOverlap(_ context: CoverageContext) async throws {
+        let defaults = try context.defaults("meeting-recent-change-overlap")
+        defaults.set(true, forKey: Constants.Defaults.featureCalendar)
+        defaults.set(try JSONEncoder().encode([calendar.id]), forKey: Constants.Defaults.selectedCalendars)
+        let notifications = NotificationCenter()
+        let store = CoverageEventStore()
+        store.calendars = [calendar]
+        var now = instant
+        let manager = MeetingManager(eventStore: store, nowProvider: { now }, defaults: defaults, notificationCenter: notifications)
+        await Task.yield()
+
+        var changedPosts: [[CalendarEvent]] = []
+        let changedObserver = notifications.publisher(for: .businessBarEventTimesChanged).sink { note in
+            if let events = note.userInfo?["events"] as? [CalendarEvent] { changedPosts.append(events) }
+        }
+        defer { changedObserver.cancel() }
+
+        // First fetch seeds both regions: the event is recent, no change
+        // baseline exists yet. The event sits 30 h out so the whole sequence
+        // below stays inside the 7-day fetch window while `now` advances
+        // past the 24 h recent window.
+        store.events = [event("overlap", start: 30 * 3600, end: 30 * 3600 + 600)]
+        await manager.refreshEvents()
+        try context.equal(manager.recentEvents.map(\.id), ["overlap"], "Overlap event feeds the recent region")
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "First fetch seeds no change baseline")
+        try context.equal(changedPosts.count, 0, "First fetch posts no time-change notification")
+
+        // Time moves while the event is still recent: the flag and the
+        // notification are suppressed, the row stays only in the recent
+        // region, no duplicate row appears.
+        store.events = [event("overlap", start: 30 * 3600 + 1200, end: 30 * 3600 + 1800)]
+        await manager.refreshEvents()
+        try context.equal(manager.recentEvents.map(\.id), ["overlap"], "Event still recent after its suppressed move")
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Move while recent does not flag as changed")
+        try context.equal(changedPosts.count, 0, "Suppressed move posts no notification")
+
+        // The suppressed change is consumed: marking the row read and
+        // refreshing with the held times does not replay it, the window
+        // memory already holds the current times.
+        manager.markRecentAsRead("overlap")
+        await manager.refreshEvents()
+        try context.equal(manager.recentEvents.map(\.id), [], "Read row stays out of the recent region")
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Held window does not replay the suppressed change")
+        try context.equal(changedPosts.count, 0, "No replay post for the suppressed change")
+
+        // The recent window passes without a further move: the event keeps
+        // its absolute times and stays inside the fetch window, the memory
+        // already holds them, so nothing replays.
+        now = instant.addingTimeInterval(25 * 3600)
+        await manager.refreshEvents()
+        try context.equal(manager.recentEvents.map(\.id), [], "Recent window expired for the read row")
+        try context.equal(manager.timeChangedEvents.map(\.id), [], "Expired recent window does not replay the suppressed change")
+        try context.equal(changedPosts.count, 0, "No replay post after the window expires")
+
+        // Regression guard: an event outside the recent region flags a time
+        // move exactly as before the suppression rule existed.
+        store.events = [event("overlap", start: 30 * 3600 + 2400, end: 30 * 3600 + 3000)]
+        await manager.refreshEvents()
+        try context.equal(manager.timeChangedEvents.map(\.id), ["overlap"], "Non-recent event flags its move as before")
+        try context.equal(changedPosts.count, 1, "Non-recent move posts as before")
     }
 
     private static func ekParticipantMapping(_ context: CoverageContext) throws {

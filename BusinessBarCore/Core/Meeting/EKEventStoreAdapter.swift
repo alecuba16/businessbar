@@ -1,6 +1,7 @@
 import AppKit
 import EventKit
 import Foundation
+import os.log
 
 @MainActor
 public protocol CalendarStoreBackend {
@@ -80,6 +81,8 @@ private final class NativeCalendarStoreBackend: CalendarStoreBackend {
 
 @MainActor
 public final class EKEventStoreAdapter: EventStoreProtocol {
+    private static let logger = Logger(subsystem: "com.businessbar.app", category: "RSVP")
+
     private let backend: CalendarStoreBackend
 
     public convenience init() {
@@ -127,17 +130,27 @@ public final class EKEventStoreAdapter: EventStoreProtocol {
     // MARK: - RSVP
 
     public func respond(toEventID eventID: String, calendarID: String, status: CalendarEvent.RSVPStatus) async -> Bool {
-        guard backend.hasAccess else { return false }
-        guard let event = backend.event(withID: eventID) else { return false }
+        guard backend.hasAccess else {
+            Self.logger.warning("RSVP failed: calendar access not granted (event \(eventID, privacy: .public))")
+            return false
+        }
+        guard let event = backend.event(withID: eventID) else {
+            Self.logger.warning("RSVP failed: event not found for id \(eventID, privacy: .public)")
+            return false
+        }
         do {
             // EventKit on macOS exposes no public RSVP setter; Calendar.app
             // drives the same change through the private participationStatus
             // property. Used only here, guarded by responds(to:), with the
             // save as the failure point if the platform ever rejects it.
             let selector = NSSelectorFromString("setParticipationStatus:")
-            guard event.responds(to: selector) else { return false }
+            guard event.responds(to: selector) else {
+                Self.logger.warning("RSVP failed: setParticipationStatus selector unavailable on event \(eventID, privacy: .public)")
+                return false
+            }
             switch status {
             case .pending, .unknown:
+                Self.logger.warning("RSVP failed: status \(status.rawValue, privacy: .public) is not answerable (event \(eventID, privacy: .public))")
                 return false
             case .accepted:
                 (event as NSObject).setValue(EKParticipantStatus.accepted.rawValue, forKey: "participationStatus")
@@ -146,8 +159,15 @@ public final class EKEventStoreAdapter: EventStoreProtocol {
             case .tentative:
                 (event as NSObject).setValue(EKParticipantStatus.tentative.rawValue, forKey: "participationStatus")
             }
-            return try backend.save(event)
+            let saved = try backend.save(event)
+            if saved {
+                Self.logger.info("RSVP saved: status \(status.rawValue, privacy: .public) for event \(eventID, privacy: .public)")
+            } else {
+                Self.logger.warning("RSVP failed: backend save returned false for event \(eventID, privacy: .public)")
+            }
+            return saved
         } catch {
+            Self.logger.error("RSVP failed: save threw \(String(describing: error), privacy: .public) for event \(eventID, privacy: .public)")
             return false
         }
     }

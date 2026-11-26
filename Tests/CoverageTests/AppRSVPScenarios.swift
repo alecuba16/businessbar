@@ -244,6 +244,10 @@ enum AppRSVPScenarios {
         // Baseline fetch: the event is first-seen, nothing changed yet.
         try c.expect(button.attributedTitle.string.contains("!") == false, "No change yet means no bang suffix")
 
+        // While the event sits in Recently added its moves are suppressed,
+        // so clear the region before moving it: the bang then flags.
+        meetings.markAllRecentAsRead()
+
         // Window moves: the live meeting text carries the orange "1!".
         let shifted = CalendarEvent(
             id: moving.id, title: moving.title,
@@ -268,6 +272,10 @@ enum AppRSVPScenarios {
         await meetings.refreshEvents()
         await settle()
         try c.expect(!button.attributedTitle.string.contains("2!"), "First-seen second event is not counted as changed")
+
+        // The second event is still in Recently added, where moves are
+        // suppressed; clear the region so both moves below flag.
+        meetings.markAllRecentAsRead()
 
         // Both move in the same fetch: "2!" suffix appears.
         let secondShifted = CalendarEvent(
@@ -345,6 +353,7 @@ enum AppRSVPScenarios {
         var pending = [first, second]
         var responses: [(String, CalendarEvent.RSVPStatus)] = []
         var presentedPanels = 0
+        var calendarOpens = 0
         let controller = RSVPPanelController(effects: .init(
             makePanel: {
                 presentedPanels += 1
@@ -360,7 +369,8 @@ enum AppRSVPScenarios {
                 responses.append((event.id, status))
                 return store.respondResult
             },
-            pendingEvents: { pending }
+            pendingEvents: { pending },
+            openCalendar: { calendarOpens += 1 }
         ))
 
         // Empty pending list never creates a panel.
@@ -387,8 +397,9 @@ enum AppRSVPScenarios {
         store.respondResult = false
         panelStore.answer(.declined)
         await settle()
-        try c.expect(panelStore.lastError != nil, "Failed answer surfaces the error message")
+        try c.expect(panelStore.lastError == "Could not send the answer. Calendar is opening so you can reply there.", "Failed answer surfaces the Calendar fallback message")
         try c.equal(panelStore.progressText, "2 of 2", "Failed answer stays on the same invite")
+        try c.equal(calendarOpens, 1, "Failed answer opens Calendar for the reply")
 
         store.respondResult = true
         panelStore.answer(.tentative)
