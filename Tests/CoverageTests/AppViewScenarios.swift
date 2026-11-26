@@ -145,6 +145,58 @@ enum AppViewScenarios {
                     try context.expect(host.text.contains(count > 99 ? "99+" : "\(count)"), "Badge bubble count label")
                 }
             }
+            // Indicator size setting: the bubble circle and its number font
+            // scale with the preference while the app icon stays fixed.
+            let defaultImage = image.withBadge(count: count, indicatorScale: 1)
+            let smallImage = image.withBadge(count: count, indicatorScale: 0.8)
+            let largeImage = image.withBadge(count: count, indicatorScale: 1.4)
+            try context.equal(defaultImage.size, image.withBadge(count: count).size, "Omitted indicator scale keeps historical default")
+            try context.equal(defaultImage.size, smallImage.size, "Indicator scale keeps badge canvas size")
+            try context.equal(defaultImage.size, largeImage.size, "Large indicator keeps badge canvas size")
+            if count > 0 {
+                func redPixelMass(_ badgeImage: NSImage) throws -> Int {
+                    guard let data = badgeImage.tiffRepresentation, let pixels = NSBitmapImageRep(data: data) else { throw CoverageContext.Failure(description: "Indicator badge has no raster") }
+                    var redPixels = 0
+                    for x in 0..<pixels.pixelsWide {
+                        for y in 0..<pixels.pixelsHigh {
+                            guard let color = pixels.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                            if color.alphaComponent > 0.5 && color.redComponent > color.blueComponent + 0.2 && color.redComponent > color.greenComponent + 0.2 {
+                                redPixels += 1
+                            }
+                        }
+                    }
+                    return redPixels
+                }
+                let defaultMass = try redPixelMass(defaultImage)
+                let smallMass = try redPixelMass(smallImage)
+                let largeMass = try redPixelMass(largeImage)
+                try context.expect(smallMass < defaultMass, "Small indicator shrinks the red circle")
+                try context.expect(largeMass > defaultMass, "Large indicator grows the red circle")
+                // The number font scales with the circle: white text pixels on
+                // the blue fixture grow with the indicator scale.
+                func whiteTextMass(_ badgeImage: NSImage) throws -> Int {
+                    guard let data = badgeImage.tiffRepresentation, let pixels = NSBitmapImageRep(data: data) else { throw CoverageContext.Failure(description: "Indicator badge has no raster") }
+                    var whitePixels = 0
+                    for x in 0..<pixels.pixelsWide {
+                        for y in 0..<pixels.pixelsHigh {
+                            guard let color = pixels.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                            if color.alphaComponent > 0.5 && color.redComponent > 0.8 && color.greenComponent > 0.8 && color.blueComponent > 0.8 {
+                                whitePixels += 1
+                            }
+                        }
+                    }
+                    return whitePixels
+                }
+                let defaultTextMass = try whiteTextMass(defaultImage)
+                let smallTextMass = try whiteTextMass(smallImage)
+                let largeTextMass = try whiteTextMass(largeImage)
+                try context.expect(largeTextMass > defaultTextMass, "Large indicator number font grows")
+                try context.expect(smallTextMass < defaultTextMass, "Small indicator number font shrinks")
+            }
+            // Dot indicator follows the same scale while the icon stays put.
+            let dotDefault = image.withDot()
+            let dotLarge = image.withDot(indicatorScale: 1.4)
+            try context.equal(dotDefault.size, dotLarge.size, "Dot scale keeps canvas size")
             let toastCases: [(BadgeValue?, String, Int?)] = [
                 (nil, "", 0),
                 (.known(count), count > 99 ? "99+" : "\(count)", count),

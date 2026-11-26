@@ -90,7 +90,8 @@ final class StatusBarController: NSObject {
     private var cachedNoSleepInfiniteIcon: NSImage?
     private var cachedNoSleepTimedIcon: NSImage?
     /// Tracks the last-rendered badge image per app to avoid redundant CIFilter work.
-    private var renderedBadgeImages: [String: (badge: BadgeValue?, image: NSImage)] = [:]
+    /// Includes the indicator scale so changing only the bubble size re-renders.
+    private var renderedBadgeImages: [String: (badge: BadgeValue?, indicatorScale: CGFloat, image: NSImage)] = [:]
 
     private let meetingManager: MeetingManager
     private let badgeManager: BadgeManager
@@ -145,6 +146,14 @@ final class StatusBarController: NSObject {
     private var badgeIconDimension: CGFloat {
         let setting = defaults.string(forKey: Constants.Defaults.badgeIconSize) ?? "small"
         return setting == "medium" ? 18 : 14
+    }
+
+    /// Scale of the count bubble / dot overlaid on a badge icon, independent of
+    /// the icon size: one preference drives the red circle diameter and the
+    /// number font together.
+    private var badgeIndicatorScale: CGFloat {
+        let setting = defaults.string(forKey: Constants.Defaults.badgeIndicatorSize) ?? "medium"
+        return setting == "small" ? 0.8 : (setting == "large" ? 1.4 : 1)
     }
 
     init(meetingManager: MeetingManager, badgeManager: BadgeManager, noSleepManager: NoSleepManager, defaults: UserDefaults = .standard, notifications: NotificationCenter = .default, effects: Effects? = nil, onShowPreferences: @escaping () -> Void) {
@@ -624,6 +633,7 @@ final class StatusBarController: NSObject {
         let hideWhenNotRunning     = defaults.bool(forKey: Constants.Defaults.hideIconWhenNotRunning)
         let hideWhenNoNotification = defaults.bool(forKey: Constants.Defaults.hideIconWhenNoNotification)
         let iconSize = badgeIconDimension
+        let indicatorScale = badgeIndicatorScale
 
         // Only query running apps when the preference that needs it is enabled.
         let runningBundleIDs: Set<String> = hideWhenNotRunning
@@ -710,7 +720,7 @@ final class StatusBarController: NSObject {
 
             let badge = badges[bundleID]
             let cached = renderedBadgeImages[bundleID]
-            if cached?.badge == badge, button.image != nil {
+            if cached?.badge == badge, cached?.indicatorScale == indicatorScale, button.image != nil {
                 continue
             }
 
@@ -718,14 +728,14 @@ final class StatusBarController: NSObject {
             let newImage: NSImage
             switch badge {
             case .some(.known(let count)):
-                newImage = resized(icon, to: iconRect).withBadge(count: count)
+                newImage = resized(icon, to: iconRect).withBadge(count: count, indicatorScale: indicatorScale)
             case .some(.unknown):
-                newImage = resized(icon, to: iconRect).withDot()
+                newImage = resized(icon, to: iconRect).withDot(indicatorScale: indicatorScale)
             case .none:
                 newImage = resized(icon, to: iconRect).grayscalePreservingAlpha()
             }
             button.image = newImage
-            renderedBadgeImages[bundleID] = (badge: badge, image: newImage)
+            renderedBadgeImages[bundleID] = (badge: badge, indicatorScale: indicatorScale, image: newImage)
         }
     }
 

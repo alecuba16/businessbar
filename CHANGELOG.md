@@ -5,6 +5,10 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- Badge indicator size preference (Small / Medium / Large) under Badges and Appearance: it scales the red circle and the number font of the unread-count bubble and the dot, independent from the badge icon size that keeps controlling the app icon
+
 ## [1.8.3] - 2026-11-25
 ### Fixed
 - The badge "Grant Permission" buttons work again on macOS 14+: the request still used the deprecated system prompt that macOS ignores, so nothing opened and a grant was never noticed. Every request now opens System Settings at Privacy & Security > Accessibility, and the trust poll keeps running while a request is pending even with the badges toggle off, because the Badges tab flips the toggle off right before requesting. The onboarding step also polls for the grant for a few seconds instead of checking once, so the toggle lights up without focusing the window back

@@ -22,6 +22,7 @@ import Foundation
         static let activityIdleMultiplier = Constants.Defaults.activityIdleMultiplier
         static let badgePollInterval = Constants.Defaults.badgePollInterval
         static let badgeIconSize = Constants.Defaults.badgeIconSize
+        static let badgeIndicatorSize = Constants.Defaults.badgeIndicatorSize
         static let timeFormat = Constants.Defaults.timeFormat
         static let timeRoundingThreshold = Constants.Defaults.timeRoundingThreshold
         static let calendarProvider = Constants.Defaults.calendarProvider
@@ -72,6 +73,7 @@ extension UserDefaults {
             DefaultsKeys.activityIdleMultiplier: Constants.DefaultValues.activityIdleMultiplier,
             DefaultsKeys.badgePollInterval: Constants.DefaultValues.badgePollInterval,
             DefaultsKeys.badgeIconSize: "medium",
+            DefaultsKeys.badgeIndicatorSize: "medium",
             DefaultsKeys.timeFormat: "relative",
             DefaultsKeys.timeRoundingThreshold: Constants.DefaultValues.timeRoundingThreshold,
             DefaultsKeys.calendarProvider: CalendarProvider.eventKit.rawValue,

@@ -8,6 +8,7 @@ struct AppearanceTab: View {
     // MARK: - Badge icon appearance
 
     @AppStorage(Constants.Defaults.badgeIconSize) private var badgeIconSize = "small"
+    @AppStorage(Constants.Defaults.badgeIndicatorSize) private var badgeIndicatorSize = "medium"
     @AppStorage(Constants.Defaults.grayscaleWhenNoNotifications) private var grayscaleWhenNoNotifications = true
 
     // MARK: - Status bar text
@@ -70,6 +71,18 @@ struct AppearanceTab: View {
                 .pickerStyle(.radioGroup)
                 .onChange(of: badgeIconSize) { _, _ in notifyPreferencesChanged() }
 
+                Picker("Badge indicator size:", selection: $badgeIndicatorSize) {
+                    Text("Small").tag("small")
+                    Text("Medium").tag("medium")
+                    Text("Large").tag("large")
+                }
+                .pickerStyle(.radioGroup)
+                .onChange(of: badgeIndicatorSize) { _, _ in notifyPreferencesChanged() }
+
+                Text("The indicator size scales the red circle and its number, leaving the app icon untouched.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
                 Toggle("Grayscale when no notifications", isOn: $grayscaleWhenNoNotifications)
                     .onChange(of: grayscaleWhenNoNotifications) { _, _ in notifyPreferencesChanged() }
 
@@ -127,6 +140,7 @@ struct AppearanceTab: View {
     private func badgePreview(count: Int, label: String, forceGrayscale: Bool = false) -> some View {
         VStack(spacing: 6) {
             let size: CGFloat = badgeIconSize == "medium" ? 18 : 14
+            let indicatorScale: CGFloat = badgeIndicatorSize == "small" ? 0.8 : (badgeIndicatorSize == "large" ? 1.4 : 1)
 
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
@@ -146,9 +160,9 @@ struct AppearanceTab: View {
                             .foregroundColor(.accentColor)
 
                         Text("\(count)")
-                            .font(.system(size: size * 0.5, weight: .bold, design: .rounded))
+                            .font(.system(size: size * 0.5 * indicatorScale, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
-                            .padding(2)
+                            .padding(2 * indicatorScale)
                             .background(Color.red)
                             .clipShape(Capsule())
                             .offset(x: size * 0.2, y: -size * 0.2)

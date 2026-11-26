@@ -24,6 +24,7 @@ enum Constants {
         static let activityIdleMultiplier = "activityIdleMultiplier"
         static let badgePollInterval = "badgePollInterval"
         static let badgeIconSize = "badgeIconSize"
+        static let badgeIndicatorSize = "badgeIndicatorSize"
         static let timeFormat = "timeFormat"
         static let timeRoundingThreshold = "timeRoundingThreshold"
         // Calendar provider selection ("EventKit" or "Google")
