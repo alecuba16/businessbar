@@ -50,6 +50,7 @@ enum AppCoverageScenarios {
         await run("calendars-wave2", focused: focused, failures: &failures) { try await AppCalendarsWave2Scenarios.run(context) }
         await run("companion-wave2", focused: focused, failures: &failures) { try await AppCompanionWave2Scenarios.run(context) }
         await run("wave6", focused: focused, failures: &failures) { try await AppWave6Scenarios.run(context) }
+        await run("tutorial", focused: focused, failures: &failures) { try await AppTutorialScenarios.run(context) }
         if !failures.isEmpty { throw CoverageContext.Failure(description: failures.joined(separator: "\n")) }
     }
 
