@@ -345,6 +345,7 @@ enum AppRSVPScenarios {
         var pending = [first, second]
         var responses: [(String, CalendarEvent.RSVPStatus)] = []
         var presentedPanels = 0
+        var calendarOpens = 0
         let controller = RSVPPanelController(effects: .init(
             makePanel: {
                 presentedPanels += 1
@@ -360,7 +361,8 @@ enum AppRSVPScenarios {
                 responses.append((event.id, status))
                 return store.respondResult
             },
-            pendingEvents: { pending }
+            pendingEvents: { pending },
+            openCalendar: { calendarOpens += 1 }
         ))
 
         // Empty pending list never creates a panel.
@@ -387,8 +389,9 @@ enum AppRSVPScenarios {
         store.respondResult = false
         panelStore.answer(.declined)
         await settle()
-        try c.expect(panelStore.lastError != nil, "Failed answer surfaces the error message")
+        try c.expect(panelStore.lastError == "Could not send the answer. Calendar is opening so you can reply there.", "Failed answer surfaces the Calendar fallback message")
         try c.equal(panelStore.progressText, "2 of 2", "Failed answer stays on the same invite")
+        try c.equal(calendarOpens, 1, "Failed answer opens Calendar for the reply")
 
         store.respondResult = true
         panelStore.answer(.tentative)

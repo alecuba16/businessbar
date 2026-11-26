@@ -47,6 +47,16 @@ final class RSVPPanelController: NSObject, NSWindowDelegate {
         }
         var respond: @MainActor (CalendarEvent, CalendarEvent.RSVPStatus) async -> Bool
         var pendingEvents: @MainActor () -> [CalendarEvent]
+        // RuntimeBundle guard keeps the coverage fixture (a bare executable)
+        // from ever launching Calendar.app.
+        var openCalendar: @MainActor () -> Void = {
+            guard RuntimeBundle.isPresent else { return }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            let calendarURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.calendar")
+                ?? URL(fileURLWithPath: "/System/Applications/Calendar.app")
+            NSWorkspace.shared.openApplication(at: calendarURL, configuration: configuration)
+        }
 
         static var live: Effects {
             Effects(
@@ -79,10 +89,13 @@ final class RSVPPanelController: NSObject, NSWindowDelegate {
 
     func present() {
         let pending = effects.pendingEvents()
-        guard !pending.isEmpty else { return }
+        guard !pending.isEmpty else {
+            AppLogger.warning("RSVP panel present() returned: no pending invitations", category: "RSVP")
+            return
+        }
 
         let effects = self.effects
-        store = RSVPPanelStore(events: pending, respond: effects.respond)
+        store = RSVPPanelStore(events: pending, respond: effects.respond, openCalendar: effects.openCalendar)
 
         if panel == nil {
             let p = effects.makePanel()
@@ -133,13 +146,17 @@ final class RSVPPanelStore: ObservableObject {
     @Published private(set) var lastError: String?
 
     private let respond: @MainActor (CalendarEvent, CalendarEvent.RSVPStatus) async -> Bool
+    /// Opened when the private-API write fails so the user can reply in the
+    /// supported Calendar.app UI.
+    private let openCalendar: @MainActor () -> Void
     /// Replaced by the panel controller once the view is on screen so the
     /// last answer closes the panel instead of leaving a dead card up.
     var onFinish: () -> Void = {}
 
-    init(events: [CalendarEvent], respond: @escaping @MainActor (CalendarEvent, CalendarEvent.RSVPStatus) async -> Bool) {
+    init(events: [CalendarEvent], respond: @escaping @MainActor (CalendarEvent, CalendarEvent.RSVPStatus) async -> Bool, openCalendar: @escaping @MainActor () -> Void = {}) {
         self.events = events
         self.respond = respond
+        self.openCalendar = openCalendar
     }
 
     var current: CalendarEvent? {
@@ -161,7 +178,9 @@ final class RSVPPanelStore: ObservableObject {
             if ok {
                 self.advance()
             } else {
-                self.lastError = "Could not send the answer. Try again or answer from Calendar."
+                AppLogger.error("RSVP answer failed for event \(event.id)", category: "RSVP")
+                self.lastError = "Could not send the answer. Calendar is opening so you can reply there."
+                self.openCalendar()
             }
         }
     }
