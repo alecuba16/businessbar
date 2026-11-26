@@ -20,6 +20,7 @@ struct BadgesTab: View {
     @AppStorage(Constants.Defaults.hideIconWhenNoNotification) private var hideWhenNoNotification = false
     @AppStorage(Constants.Defaults.badgePollInterval)          private var badgePollInterval      = Constants.DefaultValues.badgePollInterval
     @AppStorage(Constants.Defaults.badgeIconSize)              private var badgeIconSize          = "small"
+    @AppStorage(Constants.Defaults.badgeIndicatorSize)         private var badgeIndicatorSize     = "medium"
 
     init(
         badgeManager: BadgeManager,
@@ -141,6 +142,18 @@ struct BadgesTab: View {
                 }
                 .pickerStyle(.radioGroup)
                 .onChange(of: badgeIconSize) { _, _ in notifyPreferencesChanged() }
+
+                 Picker("Badge indicator size:", selection: $badgeIndicatorSize) {
+                    Text("Small").tag("small")
+                    Text("Medium").tag("medium")
+                    Text("Large").tag("large")
+                }
+                .pickerStyle(.radioGroup)
+                .onChange(of: badgeIndicatorSize) { _, _ in notifyPreferencesChanged() }
+
+                Text("The indicator size controls the red circle and its number, not the app icon.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Picker("Badge check frequency:", selection: $badgePollInterval) {

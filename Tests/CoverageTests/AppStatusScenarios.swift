@@ -159,6 +159,25 @@ enum AppStatusScenarios {
         f.preferencesChanged()
         await settle()
         try c.equal(badge.length, 18, "Medium preference updates existing backing width")
+        // Indicator size preference: changing only the bubble scale re-renders
+        // the badge image without touching the icon backing width.
+        f.badges.updateBadge(for: app.id, badge: .known(3))
+        await settle()
+        let mediumIndicatorImage = badge.ownedButton.image
+        try c.expect(mediumIndicatorImage != nil, "Known count renders before indicator change")
+        f.defaults.set("large", forKey: Constants.Defaults.badgeIndicatorSize)
+        f.preferencesChanged()
+        await settle()
+        try c.equal(badge.length, 18, "Indicator preference never changes icon backing width")
+        try c.expect(badge.ownedButton.image != nil && badge.ownedButton.image !== mediumIndicatorImage, "Indicator preference re-renders cached badge image")
+        let largeIndicatorImage = badge.ownedButton.image
+        f.preferencesChanged()
+        await settle()
+        try c.expect(badge.ownedButton.image === largeIndicatorImage, "Unchanged indicator reuses cached image")
+        f.defaults.set("medium", forKey: Constants.Defaults.badgeIndicatorSize)
+        f.preferencesChanged()
+        await settle()
+        try c.expect(badge.ownedButton.image !== nil && badge.ownedButton.image !== largeIndicatorImage, "Reverting indicator re-renders again")
         // Dot state: unknown count keeps the item visible (dot beats nil),
         // renders its own image, and a later known count re-renders.
         f.badges.updateBadge(for: app.id, badge: .unknown)

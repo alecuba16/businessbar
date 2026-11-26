@@ -9,11 +9,15 @@ struct BadgeIconView: View {
     let icon: NSImage?
     let badgeCount: Int
     let iconSize: CGFloat
+    /// Scale of the bubble/dot indicator itself, independent of the icon:
+    /// 1.0 keeps the historical proportions tied to the icon size.
+    let indicatorScale: CGFloat
 
-    init(icon: NSImage?, badgeCount: Int, iconSize: CGFloat = 16) {
+    init(icon: NSImage?, badgeCount: Int, iconSize: CGFloat = 16, indicatorScale: CGFloat = 1) {
         self.icon = icon
         self.badgeCount = badgeCount
         self.iconSize = iconSize
+        self.indicatorScale = max(0.5, min(indicatorScale, 2))
     }
 
     var body: some View {
@@ -35,7 +39,7 @@ struct BadgeIconView: View {
 
             // Badge bubble
             if badgeCount > 0 {
-                BadgeBubble(count: badgeCount, iconSize: iconSize)
+                BadgeBubble(count: badgeCount, iconSize: iconSize, indicatorScale: indicatorScale)
                     .offset(x: badgeOffset, y: -badgeOffset)
             }
         }
@@ -51,6 +55,7 @@ struct BadgeIconView: View {
 private struct BadgeBubble: View {
     let count: Int
     let iconSize: CGFloat
+    let indicatorScale: CGFloat
 
     var body: some View {
         Text(labelText)
@@ -67,17 +72,20 @@ private struct BadgeBubble: View {
         count > 99 ? "99+" : "\(count)"
     }
 
-    private var fontSize: CGFloat { iconSize * 0.55 }
-    private var bubbleMinSize: CGFloat { iconSize * 0.65 }
-    private var horizontalPadding: CGFloat { count < 10 ? 1 : 2 }
+    private var fontSize: CGFloat { iconSize * 0.55 * indicatorScale }
+    private var bubbleMinSize: CGFloat { iconSize * 0.65 * indicatorScale }
+    private var horizontalPadding: CGFloat { (count < 10 ? 1 : 2) * indicatorScale }
 }
 
 // MARK: - NSImage convenience (status-bar rendering)
 
 extension NSImage {
     /// Returns an NSImage combining `self` (at `iconSize`) with a red badge
-    /// overlay, suitable for use in an NSStatusItem button.
-    func statusBarImage(badgeCount: Int, iconSize: CGFloat = 16) -> NSImage {
+    /// overlay, suitable for use in an NSStatusItem button. `indicatorScale`
+    /// grows the badge circle and its number font together, leaving the icon
+    /// at `iconSize`.
+    func statusBarImage(badgeCount: Int, iconSize: CGFloat = 16, indicatorScale: CGFloat = 1) -> NSImage {
+        let scale = max(0.5, min(indicatorScale, 2))
         let totalSize = NSSize(width: iconSize + iconSize * 0.36,
                                height: iconSize + iconSize * 0.36)
         let result = NSImage(size: totalSize)
@@ -92,7 +100,7 @@ extension NSImage {
 
         if badgeCount > 0 {
             // Badge circle dimensions
-            let badgeDiameter: CGFloat = iconSize * 0.65
+            let badgeDiameter: CGFloat = iconSize * 0.65 * scale
             let badgeRect = NSRect(
                 x: totalSize.width - badgeDiameter,
                 y: totalSize.height - badgeDiameter,

@@ -3,10 +3,12 @@ import CoreImage
 
 public extension NSImage {
     /// Draws the image at menu bar size with a count bubble in the corner.
-    /// The bubble is deliberately small (10 pt on an 18 pt icon) so the app
-    /// icon stays identifiable when several apps are badged at once.
-    func withBadge(count: Int) -> NSImage {
-        let badgeSize: CGFloat = 10
+    /// `indicatorScale` grows or shrinks the bubble circle and its number font
+    /// together (1.0 = the historical 10 pt bubble); the app icon itself is
+    /// untouched, matching the dock style where the two sizes are independent.
+    func withBadge(count: Int, indicatorScale: CGFloat = 1) -> NSImage {
+        let scale = max(0.5, min(indicatorScale, 2))
+        let badgeSize: CGFloat = 10 * scale
         let imageSize = NSSize(width: 18, height: 18)
 
         let newImage = NSImage(size: imageSize)
@@ -16,7 +18,7 @@ public extension NSImage {
         self.draw(in: imageRect)
 
         let label = count > 99 ? "99+" : "\(count)"
-        let font = NSFont.systemFont(ofSize: 7, weight: .bold)
+        let font = NSFont.systemFont(ofSize: 7 * scale, weight: .bold)
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
 
@@ -59,7 +61,10 @@ public extension NSImage {
     /// Draws the image with a plain dot in the corner: notifications exist but
     /// the Dock label carries no count. The 1 pt white ring keeps the red dot
     /// readable on dark app icons, where red-on-dark alone can disappear.
-    func withDot() -> NSImage {
+    /// `indicatorScale` matches withBadge's scale so the dot and the number
+    /// bubble resize consistently under one preference.
+    func withDot(indicatorScale: CGFloat = 1) -> NSImage {
+        let scale = max(0.5, min(indicatorScale, 2))
         let imageSize = NSSize(width: 18, height: 18)
 
         let newImage = NSImage(size: imageSize)
@@ -68,7 +73,7 @@ public extension NSImage {
         let imageRect = NSRect(x: 0, y: 0, width: imageSize.width, height: imageSize.height)
         self.draw(in: imageRect)
 
-        let dotDiameter: CGFloat = 7
+        let dotDiameter: CGFloat = 7 * scale
         let ringDiameter: CGFloat = dotDiameter + 2
         let ringRect = NSRect(
             x: imageSize.width - ringDiameter,
