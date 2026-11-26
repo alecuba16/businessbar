@@ -234,9 +234,25 @@ public final class MeetingManager: ObservableObject {
             // a moved meeting in the past cannot be joined or rescheduled,
             // so flagging it only turns the badge into permanent noise.
             // Acknowledged rows re-flag only when their times move again.
+            // Events still inside the recently-added region are suppressed:
+            // the row already shows there, flagging it in Changed times too
+            // would render it twice. Suppression only hides the flag; the
+            // lastSeenWindows bookkeeping below still records every window,
+            // so the suppressed change is consumed and never replayed once
+            // the event leaves the region.
+            let recentRegionEventIDs = Set(
+                EventDisplayPlanner.recentEvents(
+                    firstSeen: firstSeenAt,
+                    from: fetchedEvents.filter { !readRecentEventIDs.contains($0.id) },
+                    now: now,
+                    window: recentEventsWindow,
+                    limit: recentEventsLimit
+                ).map(\.id)
+            )
             let changedTimeEvents = fetchedEvents.filter { event in
                 let key = Self.changeKey(event)
                 guard !dismissedEventIDs.contains(event.id),
+                      !recentRegionEventIDs.contains(event.id),
                       event.endDate > now,
                       let previous = lastSeenWindows[key] else { return false }
                 if let acknowledged = acknowledgedChangeWindows[key],

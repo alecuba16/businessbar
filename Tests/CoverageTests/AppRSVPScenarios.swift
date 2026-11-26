@@ -244,6 +244,10 @@ enum AppRSVPScenarios {
         // Baseline fetch: the event is first-seen, nothing changed yet.
         try c.expect(button.attributedTitle.string.contains("!") == false, "No change yet means no bang suffix")
 
+        // While the event sits in Recently added its moves are suppressed,
+        // so clear the region before moving it: the bang then flags.
+        meetings.markAllRecentAsRead()
+
         // Window moves: the live meeting text carries the orange "1!".
         let shifted = CalendarEvent(
             id: moving.id, title: moving.title,
@@ -268,6 +272,10 @@ enum AppRSVPScenarios {
         await meetings.refreshEvents()
         await settle()
         try c.expect(!button.attributedTitle.string.contains("2!"), "First-seen second event is not counted as changed")
+
+        // The second event is still in Recently added, where moves are
+        // suppressed; clear the region so both moves below flag.
+        meetings.markAllRecentAsRead()
 
         // Both move in the same fetch: "2!" suffix appears.
         let secondShifted = CalendarEvent(
