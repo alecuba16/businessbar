@@ -5,6 +5,10 @@ All notable changes to BusinessBar will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.6] - 2026-11-28
+### Added
+- The local MLX models list gained sorting and an installed-only filter: a Default / Name / Size sort reorders curated and custom entries as one list, and an Installed only toggle keeps just the models with weights on disk, showing an explicit empty state when nothing is installed
+
 ## [1.8.5] - 2026-11-26
 ### Added
 - Tutorial walkthrough opened from a Take the Tutorial button in General preferences: a 7-page paged tour reusing the onboarding window pattern, and it runs nothing while closed
