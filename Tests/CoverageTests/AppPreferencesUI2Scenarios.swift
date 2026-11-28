@@ -97,6 +97,40 @@ private final class UI2Hosted<Content: View> {
         try context.expect(switches[index].accessibilityPerformPress(), "Switch press succeeds at index \(index): \(label)")
     }
 
+    /// Presses a toggle located by its visible label, covering both AX
+    /// shapes SwiftUI renders for toggles on this host: the combined
+    /// switch-with-label node, and the split label-text + unnamed switch
+    /// pair (measured in ToolsSection rows). performPress's boolean is
+    /// not a reliable success signal, so callers assert the effect.
+    func pressToggle(labeled label: String, _ context: CoverageContext) throws {
+        OwnedAccessibility.materialize()
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        let elements = OwnedAccessibility.elements(in: host)
+        func isSwitch(_ element: OwnedAccessibility.Element) -> Bool {
+            let role = element.accessibilityRole() as? String ?? ""
+            return (role.contains("CheckBox")
+                || role.contains("Switch")
+                || element.className().contains("PlatformSwitch")
+                || element.className().contains("NSSwitch")) && element.isAccessibilityEnabled()
+        }
+        // Combined shape first: the switch node itself carries the label.
+        if let combined = elements.first(where: {
+            ($0.accessibilityLabel() ?? "").contains(label) && isSwitch($0)
+        }) {
+            _ = combined.accessibilityPerformPress()
+            return
+        }
+        // Split shape: the unnamed switch follows its label text.
+        guard let labelIndex = elements.firstIndex(where: {
+            ($0.accessibilityLabel() ?? "").contains(label)
+                || ($0.accessibilityTitle() ?? "").contains(label)
+        }), let toggle = elements[(labelIndex + 1)...].first(where: isSwitch) else {
+            throw CoverageContext.Failure(description: "Toggle not found or disabled: \(label)")
+        }
+        _ = toggle.accessibilityPerformPress()
+    }
+
     func close() {
         window.orderOut(nil)
         window.contentView = nil
@@ -509,6 +543,37 @@ enum AppPreferencesUI2Scenarios {
         try context.expect(
             MLXModelCatalog.customEntries(defaults: defaults).contains { $0.id == "mlx-community/Directory-Alpha-4bit" },
             "Directory add registers the repo"
+        )
+
+        // Catalog controls: the installed-only toggle keeps just rows with
+        // weights on disk, and the sort segments reorder curated and custom
+        // rows as one list.
+        try section.pressToggle(labeled: "Installed only", context)
+        await ui2Settle()
+        try context.expect(section.text.contains("Fixture Downloaded"), "Installed-only keeps the downloaded row")
+        try context.expect(section.text.contains("Qwen3 0.6B") == false, "Installed-only hides undownloaded curated rows")
+        try context.expect(section.text.contains("No models installed yet.") == false, "One installed row is not the empty state")
+        try section.pressToggle(labeled: "Installed only", context)
+        await ui2Settle()
+        try context.expect(section.text.contains("Qwen3 0.6B"), "Toggle off restores the curated rows")
+
+        try ui2PressSegment(section, "Sort catalog", segment: "Name", context)
+        await ui2Settle()
+        try context.expect(
+            textOrder(section.text, "Fixture Downloaded", "Qwen3 0.6B"),
+            "Name sort lifts the custom row above the curated ones"
+        )
+        try ui2PressSegment(section, "Sort catalog", segment: "Size", context)
+        await ui2Settle()
+        try context.expect(
+            textOrder(section.text, "Fixture Downloaded", "Qwen3 8B"),
+            "Size sort interleaves the custom row among the curated ones"
+        )
+        try ui2PressSegment(section, "Sort catalog", segment: "Default", context)
+        await ui2Settle()
+        try context.expect(
+            textOrder(section.text, "Qwen3 8B", "Fixture Downloaded"),
+            "Default restores the curated-first order"
         )
 
         // Use activates the pressed row. Rows render curated catalog entries
@@ -1754,6 +1819,25 @@ enum AppPreferencesUI2Scenarios {
         try ui2PressSegment(section, "Sort", segment: "Size", context)
         await ui2Settle()
         try context.expect(section.text.contains("Tail Text One"), "Size sort keeps rows listed")
+
+        // Catalog installed-only with nothing on disk: the empty state
+        // explains and every undownloaded row hides.
+        try section.pressToggle(labeled: "Installed only", context)
+        await ui2Settle()
+        try context.expect(section.text.contains("No models installed yet."), "Installed-only shows its empty state")
+        try context.expect(section.text.contains("Qwen3 0.6B") == false, "Installed-only hides every undownloaded row")
+        try section.pressToggle(labeled: "Installed only", context)
+        await ui2Settle()
+        try context.expect(section.text.contains("Qwen3 0.6B"), "Toggle off restores the catalog rows")
+    }
+
+    /// True when the first occurrence of `earlier` precedes the first
+    /// occurrence of `later` in the flattened AX text, comparing row
+    /// order as rendered.
+    private static func textOrder(_ text: String, _ earlier: String, _ later: String) -> Bool {
+        guard let earlierRange = text.range(of: earlier),
+              let laterRange = text.range(of: later) else { return false }
+        return earlierRange.lowerBound < laterRange.lowerBound
     }
 
     /// Presses one segment of a segmented Picker by its AX radio child.

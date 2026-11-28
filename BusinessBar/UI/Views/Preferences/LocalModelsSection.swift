@@ -58,6 +58,8 @@ struct LocalModelsSection: View {
     @State private var directoryError: String?
     @State private var directoryFilter: MLXModelCatalog.Kind?
     @State private var directorySortBySize = false
+    @State private var catalogInstalledOnly = false
+    @State private var catalogSort: CatalogSort = .default
 
     private let installedRAM: Int64
 
@@ -198,15 +200,56 @@ struct LocalModelsSection: View {
 
     // MARK: Model catalog
 
+    /// Sort orders for the catalog list. Default keeps the curated
+    /// entries first with custom ones after, the layout the list always
+    /// had; Name and Size sort curated and custom entries as one list.
+    private enum CatalogSort: Hashable {
+        case `default`
+        case name
+        case size
+    }
+
     private var modelCatalog: some View {
         Group {
-            ForEach(MLXModelCatalog.entries) { entry in
-                modelRow(entry)
+            HStack {
+                Toggle("Installed only", isOn: $catalogInstalledOnly)
+                Spacer()
+                Picker("Sort catalog", selection: $catalogSort) {
+                    Text("Default").tag(CatalogSort.default)
+                    Text("Name").tag(CatalogSort.name)
+                    Text("Size").tag(CatalogSort.size)
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(maxWidth: 180)
             }
-            ForEach(customEntries) { entry in
-                modelRow(entry, isCustom: true)
+            ForEach(visibleCatalogEntries) { entry in
+                modelRow(entry, isCustom: !MLXModelCatalog.isCurated(id: entry.id))
+            }
+            if visibleCatalogEntries.isEmpty {
+                Text("No models installed yet.")
+                    .foregroundColor(.secondary)
             }
         }
+    }
+
+    /// Catalog rows after the installed filter and sort. Curated and
+    /// custom entries form one list here, so Name and Size order them
+    /// together instead of keeping the two-block layout.
+    private var visibleCatalogEntries: [MLXModelCatalog.Entry] {
+        var entries = MLXModelCatalog.entries + customEntries
+        if catalogInstalledOnly {
+            entries = entries.filter { downloadedCache.contains($0.id) }
+        }
+        switch catalogSort {
+        case .default:
+            break
+        case .name:
+            entries.sort { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        case .size:
+            entries.sort { $0.sizeBytes < $1.sizeBytes }
+        }
+        return entries
     }
 
     private func modelRow(_ entry: MLXModelCatalog.Entry, isCustom: Bool = false) -> some View {
